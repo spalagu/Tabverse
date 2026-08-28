@@ -1,0 +1,183 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Tabverse design tokens",
+  "description": "Shape contract for tokens.json. Machine-checkable half only: value formats and exact key sets. The one rule a schema cannot express — every theme carries an identical key set, whatever its id — is asserted by packages/workbench/src/theme/tokens.test.ts.",
+  "type": "object",
+  "required": ["version", "shared", "themes"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "shared": {
+      "type": "object",
+      "required": ["font", "fontSize", "lineHeight", "space", "radius", "motion", "z", "findHighlight"],
+      "additionalProperties": false,
+      "properties": {
+        "font": {
+          "type": "object",
+          "required": ["ui", "mono"],
+          "additionalProperties": false,
+          "properties": {
+            "ui": { "type": "string", "minLength": 1 },
+            "mono": { "type": "string", "minLength": 1 }
+          }
+        },
+        "fontSize": {
+          "type": "object",
+          "required": ["xs", "sm", "base", "md", "lg", "xl"],
+          "additionalProperties": false,
+          "properties": {
+            "xs": { "$ref": "#/definitions/positive" },
+            "sm": { "$ref": "#/definitions/positive" },
+            "base": { "$ref": "#/definitions/positive" },
+            "md": { "$ref": "#/definitions/positive" },
+            "lg": { "$ref": "#/definitions/positive" },
+            "xl": { "$ref": "#/definitions/positive" }
+          }
+        },
+        "lineHeight": {
+          "type": "object",
+          "required": ["tight", "normal", "relaxed"],
+          "additionalProperties": false,
+          "properties": {
+            "tight": { "$ref": "#/definitions/positive" },
+            "normal": { "$ref": "#/definitions/positive" },
+            "relaxed": { "$ref": "#/definitions/positive" }
+          }
+        },
+        "space": {
+          "type": "object",
+          "required": ["2", "4", "6", "8", "12", "16", "24"],
+          "additionalProperties": false,
+          "patternProperties": { "^[0-9]+$": { "$ref": "#/definitions/positive" } }
+        },
+        "radius": {
+          "type": "object",
+          "required": ["sm", "md", "lg", "pill"],
+          "additionalProperties": false,
+          "properties": {
+            "sm": { "$ref": "#/definitions/positive" },
+            "md": { "$ref": "#/definitions/positive" },
+            "lg": { "$ref": "#/definitions/positive" },
+            "pill": { "$ref": "#/definitions/positive" }
+          }
+        },
+        "motion": {
+          "type": "object",
+          "required": ["durFast", "durStd", "durSlow", "ease"],
+          "additionalProperties": false,
+          "properties": {
+            "durFast": { "$ref": "#/definitions/positive" },
+            "durStd": { "$ref": "#/definitions/positive" },
+            "durSlow": { "$ref": "#/definitions/positive" },
+            "ease": { "type": "string", "pattern": "^cubic-bezier\\(" }
+          }
+        },
+        "z": {
+          "type": "object",
+          "required": ["base", "sticky", "overlay", "dialog", "toast"],
+          "additionalProperties": false,
+          "properties": {
+            "base": { "$ref": "#/definitions/nonNegative" },
+            "sticky": { "$ref": "#/definitions/positive" },
+            "overlay": { "$ref": "#/definitions/positive" },
+            "dialog": { "$ref": "#/definitions/positive" },
+            "toast": { "$ref": "#/definitions/positive" }
+          }
+        },
+        "findHighlight": {
+          "type": "object",
+          "required": ["bg", "fg", "currentBg", "currentFg"],
+          "additionalProperties": false,
+          "properties": {
+            "bg": { "$ref": "#/definitions/color" },
+            "fg": { "$ref": "#/definitions/color" },
+            "currentBg": { "$ref": "#/definitions/color" },
+            "currentFg": { "$ref": "#/definitions/color" }
+          }
+        }
+      }
+    },
+    "themes": {
+      "description": "One entry per selectable theme, keyed by its id. A new theme is defined entirely by its values here. dark and light stay required because they are the built-in fallbacks every other layer degrades to.",
+      "type": "object",
+      "required": ["dark", "light"],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[a-z][a-z0-9-]*$": { "$ref": "#/definitions/theme" }
+      }
+    }
+  },
+  "definitions": {
+    "color": {
+      "type": "string",
+      "pattern": "^#[0-9a-f]{6}$|^rgba?\\("
+    },
+    "positive": { "type": "number", "exclusiveMinimum": 0 },
+    "nonNegative": { "type": "number", "minimum": 0 },
+    "theme": {
+      "type": "object",
+      "required": ["label", "appearance", "color", "ansi", "shadow", "palette"],
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "description": "What the theme is called on the appearance setting. Data, not interface copy: a theme id nobody has written UI for still names itself.",
+          "type": "string",
+          "minLength": 1
+        },
+        "appearance": {
+          "description": "Whether this theme paints light ink on a dark ground or the reverse. The one property every consumer that used to branch on the theme NAME now branches on: the Monaco base, the ANSI slots the contrast gate exempts, and the answer the system preference resolves to.",
+          "enum": ["light", "dark"]
+        },
+        "color": {
+          "type": "object",
+          "required": [
+            "bg", "bgSide", "bgActive", "bgHover", "termBg",
+            "fg", "muted", "fgDim", "line", "border",
+            "accent", "accentSelection", "danger", "ok", "warn",
+            "info", "panel", "hoverVeil", "surfacePaper", "surfacePaperFg",
+            "termFindMatchBg", "termFindRulerFg",
+            "scrim", "scrimHeavy", "checkerA", "checkerB",
+            "paperLine", "paperMuted", "scrollThumb", "scrollThumbHover",
+            "previewFindBg", "previewFindCurrentBg", "previewFindCurrentFg",
+            "progressTail", "progressCore", "progressHead"
+          ],
+          "additionalProperties": false,
+          "patternProperties": { "^[a-zA-Z]+$": { "$ref": "#/definitions/color" } }
+        },
+        "ansi": {
+          "type": "object",
+          "required": [
+            "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+            "brightBlack", "brightRed", "brightGreen", "brightYellow",
+            "brightBlue", "brightMagenta", "brightCyan", "brightWhite"
+          ],
+          "additionalProperties": false,
+          "patternProperties": { "^[a-zA-Z]+$": { "$ref": "#/definitions/color" } }
+        },
+        "shadow": {
+          "type": "object",
+          "required": ["raise", "panel", "dialog"],
+          "additionalProperties": false,
+          "properties": {
+            "raise": { "type": "string", "minLength": 1 },
+            "panel": { "type": "string", "minLength": 1 },
+            "dialog": { "type": "string", "minLength": 1 }
+          }
+        },
+        "palette": {
+          "type": "object",
+          "required": ["group"],
+          "additionalProperties": false,
+          "properties": {
+            "group": {
+              "type": "array",
+              "minItems": 6,
+              "maxItems": 6,
+              "items": { "$ref": "#/definitions/color" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

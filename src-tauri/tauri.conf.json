@@ -1,0 +1,594 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tabverse",
+  "version": "0.0.1",
+  "identifier": "app.tabverse",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "Tabverse",
+        "width": 1360,
+        "height": 860,
+        "minWidth": 800,
+        "minHeight": 520,
+        "titleBarStyle": "Overlay",
+        "decorations": true,
+        "hiddenTitle": true,
+        "dragDropEnabled": false,
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 22
+        }
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' tabverse-file: data: https:; font-src 'self' data: tabverse-file:; media-src 'self' tabverse-file:; frame-src 'self' tabverse-file: data:; worker-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost tabverse-file:; object-src 'none'; base-uri 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "sh",
+          "bash",
+          "zsh",
+          "fish",
+          "command",
+          "tool"
+        ],
+        "name": "Shell script",
+        "description": "Shell script or executable",
+        "role": "Shell",
+        "mimeType": "application/x-shellscript",
+        "contentTypes": [
+          "public.shell-script",
+          "public.bash-script",
+          "public.zsh-script",
+          "com.apple.terminal.shell-script",
+          "public.unix-executable"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "txt",
+          "text",
+          "log",
+          "conf",
+          "ini",
+          "cfg",
+          "properties",
+          "env",
+          "lock",
+          "gitignore"
+        ],
+        "name": "Plain text",
+        "description": "Plain text file",
+        "role": "Editor",
+        "mimeType": "text/plain",
+        "contentTypes": [
+          "public.plain-text",
+          "com.apple.log"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "md",
+          "markdown",
+          "mdown",
+          "mkd"
+        ],
+        "name": "Markdown document",
+        "description": "Markdown document",
+        "role": "Editor",
+        "mimeType": "text/markdown",
+        "contentTypes": [
+          "net.daringfireball.markdown"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "json",
+          "jsonc",
+          "ipynb"
+        ],
+        "name": "JSON document",
+        "description": "JSON document",
+        "role": "Editor",
+        "mimeType": "application/json",
+        "contentTypes": [
+          "public.json"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "yaml",
+          "yml"
+        ],
+        "name": "YAML document",
+        "description": "YAML document",
+        "role": "Editor",
+        "mimeType": "application/yaml",
+        "contentTypes": [
+          "public.yaml"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "toml"
+        ],
+        "name": "TOML document",
+        "description": "TOML document",
+        "role": "Editor",
+        "mimeType": "application/toml",
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "xml",
+          "plist"
+        ],
+        "name": "XML document",
+        "description": "XML document",
+        "role": "Editor",
+        "mimeType": "application/xml",
+        "contentTypes": [
+          "public.xml",
+          "com.apple.property-list"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "html",
+          "htm"
+        ],
+        "name": "HTML document",
+        "description": "HTML document",
+        "role": "Editor",
+        "mimeType": "text/html",
+        "contentTypes": [
+          "public.html"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "css",
+          "scss",
+          "less"
+        ],
+        "name": "Stylesheet",
+        "description": "Stylesheet",
+        "role": "Editor",
+        "mimeType": "text/css",
+        "contentTypes": [
+          "public.css"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "js",
+          "jsx",
+          "mjs",
+          "cjs",
+          "tsx"
+        ],
+        "name": "JavaScript source",
+        "description": "JavaScript or TypeScript source",
+        "role": "Editor",
+        "mimeType": "text/javascript",
+        "contentTypes": [
+          "com.netscape.javascript-source",
+          "com.microsoft.typescript"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "c",
+          "h",
+          "cc",
+          "cpp",
+          "hpp",
+          "m",
+          "mm"
+        ],
+        "name": "C source",
+        "description": "C, C++ or Objective-C source",
+        "role": "Editor",
+        "mimeType": "text/x-c",
+        "contentTypes": [
+          "public.c-source",
+          "public.c-header",
+          "public.c-plus-plus-source",
+          "public.c-plus-plus-header",
+          "public.objective-c-source",
+          "public.objective-c-plus-plus-source"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "rs",
+          "go",
+          "kt",
+          "dart",
+          "lua",
+          "scala",
+          "cs",
+          "vue",
+          "gql",
+          "graphql",
+          "dockerfile"
+        ],
+        "name": "Source code",
+        "description": "Source code",
+        "role": "Editor",
+        "mimeType": "text/x-source",
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "py"
+        ],
+        "name": "Python script",
+        "description": "Python script",
+        "role": "Editor",
+        "mimeType": "text/x-python",
+        "contentTypes": [
+          "public.python-script"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "rb"
+        ],
+        "name": "Ruby script",
+        "description": "Ruby script",
+        "role": "Editor",
+        "mimeType": "text/x-ruby",
+        "contentTypes": [
+          "public.ruby-script"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "php"
+        ],
+        "name": "PHP script",
+        "description": "PHP script",
+        "role": "Editor",
+        "mimeType": "application/x-php",
+        "contentTypes": [
+          "public.php-script"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "java"
+        ],
+        "name": "Java source",
+        "description": "Java source",
+        "role": "Editor",
+        "mimeType": "text/x-java",
+        "contentTypes": [
+          "com.sun.java-source"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "swift"
+        ],
+        "name": "Swift source",
+        "description": "Swift source",
+        "role": "Editor",
+        "mimeType": "text/x-swift",
+        "contentTypes": [
+          "public.swift-source"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "proto"
+        ],
+        "name": "Protocol buffer",
+        "description": "Protocol buffer definition",
+        "role": "Editor",
+        "mimeType": "text/x-protobuf",
+        "contentTypes": [
+          "public.protobuf-source"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "r"
+        ],
+        "name": "R source",
+        "description": "R source",
+        "role": "Editor",
+        "mimeType": "text/x-r",
+        "contentTypes": [
+          "com.apple.rez-source"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "sql"
+        ],
+        "name": "SQL script",
+        "description": "SQL script",
+        "role": "Editor",
+        "mimeType": "application/sql",
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "diff",
+          "patch"
+        ],
+        "name": "Patch file",
+        "description": "Patch or diff",
+        "role": "Editor",
+        "mimeType": "text/x-patch",
+        "contentTypes": [
+          "public.patch-file"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "csv",
+          "tsv"
+        ],
+        "name": "Delimited text",
+        "description": "Comma or tab separated values",
+        "role": "Editor",
+        "mimeType": "text/csv",
+        "contentTypes": [
+          "public.comma-separated-values-text",
+          "public.tab-separated-values-text"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "pem",
+          "crt",
+          "cer",
+          "der",
+          "csr"
+        ],
+        "name": "Certificate",
+        "description": "Certificate or signing request",
+        "role": "Viewer",
+        "mimeType": "application/x-x509-ca-cert",
+        "contentTypes": [
+          "public.x509-certificate"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "png",
+          "jpg",
+          "jpeg",
+          "gif",
+          "webp",
+          "bmp",
+          "ico",
+          "svg",
+          "avif",
+          "heic"
+        ],
+        "name": "Image",
+        "description": "Image",
+        "role": "Viewer",
+        "mimeType": "image/png",
+        "contentTypes": [
+          "public.png",
+          "public.jpeg",
+          "com.compuserve.gif",
+          "org.webmproject.webp",
+          "com.microsoft.bmp",
+          "com.microsoft.ico",
+          "public.svg-image",
+          "public.avif",
+          "public.heic"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "pdf"
+        ],
+        "name": "PDF document",
+        "description": "PDF document",
+        "role": "Viewer",
+        "mimeType": "application/pdf",
+        "contentTypes": [
+          "com.adobe.pdf"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "docx",
+          "xlsx",
+          "xlsm",
+          "pptx",
+          "doc",
+          "xls"
+        ],
+        "name": "Office document",
+        "description": "Word, Excel or PowerPoint document",
+        "role": "Viewer",
+        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "contentTypes": [
+          "org.openxmlformats.wordprocessingml.document",
+          "org.openxmlformats.spreadsheetml.sheet",
+          "org.openxmlformats.spreadsheetml.sheet.macroenabled",
+          "org.openxmlformats.presentationml.presentation",
+          "com.microsoft.word.doc",
+          "com.microsoft.excel.xls"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "mp3",
+          "wav",
+          "m4a",
+          "aac",
+          "flac",
+          "ogg",
+          "opus"
+        ],
+        "name": "Audio",
+        "description": "Audio",
+        "role": "Viewer",
+        "mimeType": "audio/mpeg",
+        "contentTypes": [
+          "public.mp3",
+          "com.microsoft.waveform-audio",
+          "com.apple.m4a-audio",
+          "public.aac-audio",
+          "org.xiph.flac",
+          "org.xiph.ogg-audio"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "mp4",
+          "m4v",
+          "mov",
+          "webm"
+        ],
+        "name": "Video",
+        "description": "Video",
+        "role": "Viewer",
+        "mimeType": "video/mp4",
+        "contentTypes": [
+          "public.mpeg-4",
+          "com.apple.m4v-video",
+          "com.apple.quicktime-movie",
+          "org.webmproject.webm"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "zip",
+          "tar",
+          "gz",
+          "tgz",
+          "bz2",
+          "xz",
+          "zst",
+          "7z",
+          "rar"
+        ],
+        "name": "Archive",
+        "description": "Archive",
+        "role": "Viewer",
+        "mimeType": "application/zip",
+        "contentTypes": [
+          "public.zip-archive",
+          "public.tar-archive",
+          "org.gnu.gnu-zip-archive",
+          "org.gnu.gnu-zip-tar-archive",
+          "public.bzip2-archive",
+          "com.rarlab.rar-archive",
+          "org.7-zip.7-zip-archive"
+        ],
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "db",
+          "db3",
+          "sqlite",
+          "sqlite3"
+        ],
+        "name": "Database",
+        "description": "SQLite database",
+        "role": "Viewer",
+        "mimeType": "application/vnd.sqlite3",
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "ttf",
+          "otf",
+          "woff",
+          "woff2"
+        ],
+        "name": "Font",
+        "description": "Font",
+        "role": "Viewer",
+        "mimeType": "font/ttf",
+        "contentTypes": [
+          "public.truetype-ttf-font",
+          "public.opentype-font"
+        ],
+        "rank": "Alternate"
+      }
+    ],
+    "macOS": {
+      "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "http",
+          "https",
+          "ssh",
+          "telnet"
+        ]
+      }
+    },
+    "default-apps": {
+      "declareOnly": [
+        "Image",
+        "PDF document",
+        "Office document",
+        "Audio",
+        "Video",
+        "Archive",
+        "Font"
+      ]
+    }
+  }
+}

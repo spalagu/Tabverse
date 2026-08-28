@@ -1,0 +1,246 @@
+
+.share-field {
+  margin: 0 0 var(--sp-12);
+}
+
+.share-field-label {
+  display: block;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  margin-bottom: var(--sp-6);
+}
+
+.share-field-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+}
+
+.share-field-row .share-field-label {
+  margin-bottom: 0;
+}
+
+/* The access choices, one row per declared level: name and consequence
+   together, because "Approve" alone does not say what it hands over. */
+.share-levels {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.share-level {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-8);
+  padding: var(--sp-6) var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+
+.share-level:hover {
+  border-color: var(--border);
+  background: var(--bg-hover);
+}
+
+.share-level:has(input:active) {
+  transform: scale(0.99);
+}
+
+.share-level input {
+  accent-color: var(--accent);
+}
+
+.share-level.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.share-level-name {
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.share-level-hint {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+/* Shared by the TTL picker and the per-viewer level dropdowns. */
+.share-select {
+  background: var(--bg-hover);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  padding: var(--sp-4) var(--sp-8);
+}
+
+.share-select:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+/* One hand-off block: join link first, raw ticket second. */
+.share-block {
+  margin: 0 0 var(--sp-12);
+}
+
+.share-block-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-8);
+  margin-bottom: var(--sp-6);
+}
+
+.share-block-label {
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.share-block-hint {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.btn.share-copy-mini {
+  font-size: var(--fs-xs);
+  padding: var(--sp-2) var(--sp-8);
+}
+
+.share-copy-row {
+  display: flex;
+  gap: var(--sp-8);
+}
+
+.share-link-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--term-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  padding: var(--sp-8) var(--sp-12);
+}
+
+.share-link-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.share-summary {
+  margin: 0 0 var(--sp-8);
+}
+
+/* The live roster: names, level dropdowns, Kick. */
+.share-viewers {
+  margin-top: var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.share-viewers-empty {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin: 0;
+  padding: var(--sp-12);
+}
+
+.share-viewer-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-6) var(--sp-8);
+}
+
+.share-viewer-row + .share-viewer-row {
+  border-top: 1px solid var(--line);
+}
+
+.share-viewer-name {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-base);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn.share-kick {
+  font-size: var(--fs-xs);
+  padding: var(--sp-4) var(--sp-8);
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+
+.app-share-panel {
+  position: fixed;
+  top: 46px;
+  right: 16px;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  background: var(--bg-side);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-dialog);
+  padding: var(--sp-12);
+  z-index: calc(var(--z-overlay) + 9);
+  animation: layer-in var(--dur-express) var(--ease-express);
+}
+
+.app-share-panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  margin: 0 0 var(--sp-12);
+}
+
+
+.app-share-panel-title {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+}
+
+
+.app-share-viewer-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-4) 0;
+}
+
+.app-share-viewer-row + .app-share-viewer-row {
+  border-top: 1px solid var(--line);
+}
+
+.app-share-viewer-level {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}

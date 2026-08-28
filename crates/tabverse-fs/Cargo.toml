@@ -1,0 +1,59 @@
+[package]
+name = "tabverse-fs"
+version = "0.1.0"
+edition = "2021"
+description = "Filesystem + git status backend for the file explorer tab."
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+# Build libgit2 from the crate's reproducible source bundle instead of linking
+# the developer machine's Homebrew dylib. This keeps the app self-contained on
+# macOS and uses the same Cargo-managed native dependency on every platform.
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
+trash = "5.2.6"
+# Only for the search panel's regex mode; plain and whole-word searches
+# do not go through it.
+regex = "1"
+globset = "0.4"
+ignore = "0.4"
+# Metadata inspection backends (see src/inspect.rs). All of them only *read*:
+# certificates are parsed, archives are listed from headers, plists decoded.
+# (PEM support is built into 0.18 — it stopped being an opt-in feature.)
+x509-parser = "0.18"
+sha2 = "0.10"
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
+tar = "0.4"
+flate2 = "1.1"
+plist = "1.10"
+# Bundled engine: the preview must behave identically on every platform, and
+# Windows ships no system sqlite to link against.
+rusqlite = { version = "0.40", features = ["bundled"] }
+# No default features: only naming (name table), glyph count, and the
+# variable-font flag are queried — the layout/glyph-name tables never are.
+skrifa = "0.46.2"
+# Range reads (hex/log viewer) cross the IPC boundary as base64. Same major
+# as src-tauri so the workspace builds one copy.
+base64 = "0.22"
+# Header-only dimension probing: width/height come from the file header, the
+# pixel data is never decoded — that cheapness is why it runs on every preview.
+imagesize = "0.15"
+# canonicalize without the Windows verbatim prefix. std's returns `\\?\C:\...`,
+# which is a valid path but not a valid `file:` URI component and not something
+# to show a user — it broke every sqlite preview on Windows. Not hand-rolled
+# because the prefix must be *kept* when the path is too long to survive
+# without it; dunce draws that line correctly.
+dunce = "1"
+
+[dev-dependencies]
+# Backdating a file is the only way to test the abandoned-scratch sweep
+# without waiting a day. Already in the lock file through the tree, so this
+# adds no download.
+filetime = "0.2"
+# ring backend instead of the default aws-lc-rs: same test coverage, much
+# lighter native build.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+serde_json = { workspace = true }

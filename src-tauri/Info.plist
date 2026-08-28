@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the bundle's Info.plist.
+
+  WebKit hides `navigator.mediaDevices` entirely from an app that declares
+  no purpose for the camera and microphone — so before these two keys, no
+  page in a browser tab could ask for either, and the permission handling
+  underneath was unreachable. Declaring them is what turns camera and
+  microphone into a real capability; the ask in `dialogs.rs` is what keeps
+  that capability from being handed out silently, the way the webview
+  wrapper's own answer did.
+
+  The strings are what macOS shows in its own permission prompt, so they
+  say who is really asking: a page, not the terminal.
+-->
+<plist version="1.0">
+  <dict>
+    <key>NSCameraUsageDescription</key>
+    <string>A page open in a Tabverse browser tab is asking to use your camera. Tabverse asks you before every site's first request.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>A page open in a Tabverse browser tab is asking to use your microphone. Tabverse asks you before every site's first request.</string>
+
+    <!--
+      Browser tabs must be able to load plain-http pages.
+
+      The platform blocks cleartext HTTP for ordinary apps, and the block is
+      silent: no error, no navigation event, nothing for the app to report —
+      the tab simply sits there until our own ten-second timer gives up and
+      blames the network. Loopback is exempt, which is why every local probe
+      worked and only real hosts failed. Internal tools (dashboards, routers,
+      CI) are overwhelmingly http-only, so without this a browser tab cannot
+      open the pages it exists for.
+
+      Scoped to web content deliberately: this is the key Apple defines for
+      apps that display arbitrary web pages in a webview, and it leaves the
+      app's own network code under the default policy. The pages a user
+      visits are their choice, exactly as in any browser; the app's own
+      traffic is not.
+    -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+      <key>NSAllowsArbitraryLoadsInWebContent</key>
+      <true/>
+    </dict>
+
+    <!--
+      The schemes the app can be made the default handler for.
+
+      Declaring is not the same as being chosen: this key only earns the app a
+      place among the candidates. Nothing here changes a single default until
+      the user turns a switch on in Settings, and the switches ship off.
+
+      What each scheme buys:
+
+        http, https  A browser tab. Declaring both is also the exact condition
+                     macOS uses to grant an app the browser category, which is
+                     what puts it in System Settings' default-browser list --
+                     measured, not assumed: the set of handlers for
+                     com.apple.default-app.web-browser equals the set for http
+                     and equals the set for https on this system. public.html
+                     is NOT part of that condition; it is declared as a
+                     document type instead (via fileAssociations), because that
+                     one governs double-clicking an .html file, not the list.
+
+        ssh, telnet  A terminal tab running the connection. These two never
+                     prompt; http and https always do, and the prompt is the
+                     system's own, not ours.
+
+      Kept in step with the `browser`/`terminal` scheme lists in
+      src-tauri/src/default_apps.rs -- that module is what actually sets them,
+      and a scheme it sets but this file does not declare cannot be granted.
+
+      Document types are NOT here. They come from bundle.fileAssociations in
+      tauri.conf.json, which the bundler merges into this same plist, so the
+      claimed extensions live in exactly one place.
+    -->
+    <key>CFBundleURLTypes</key>
+    <array>
+      <dict>
+        <key>CFBundleURLName</key>
+        <string>Web page</string>
+        <key>CFBundleTypeRole</key>
+        <string>Viewer</string>
+        <key>CFBundleURLSchemes</key>
+        <array>
+          <string>http</string>
+          <string>https</string>
+        </array>
+      </dict>
+      <dict>
+        <key>CFBundleURLName</key>
+        <string>Remote shell</string>
+        <key>CFBundleTypeRole</key>
+        <string>Shell</string>
+        <key>CFBundleURLSchemes</key>
+        <array>
+          <string>ssh</string>
+          <string>telnet</string>
+        </array>
+      </dict>
+    </array>
+  </dict>
+</plist>

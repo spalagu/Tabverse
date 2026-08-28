@@ -1,0 +1,167 @@
+/* Rendered markdown preview: an article column on the terminal background.
+   Colors come from the app palette so the view follows the dark theme. */
+
+.md-view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--term-bg);
+}
+
+.md-article {
+  /* Wide enough to use the pane the user gave it (tables and code blocks
+     were wrapping in a 720px column on a full-screen window), still capped
+     so body text does not run to an unreadable measure. */
+  max-width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: var(--sp-24) 32px 64px;
+  color: var(--fg);
+  font-size: var(--fs-md);
+  line-height: var(--lh-relaxed);
+  word-wrap: break-word;
+}
+
+.md-article h1,
+.md-article h2,
+.md-article h3,
+.md-article h4,
+.md-article h5,
+.md-article h6 {
+  margin: 1.4em 0 0.5em;
+  line-height: var(--lh-tight);
+  font-weight: 600;
+}
+
+.md-article h1 {
+  font-size: 1.7em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--line);
+}
+
+.md-article h2 {
+  font-size: 1.35em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--line);
+}
+
+.md-article h3 {
+  font-size: 1.15em;
+}
+
+.md-article > :first-child {
+  margin-top: 0;
+}
+
+.md-article p,
+.md-article ul,
+.md-article ol,
+.md-article blockquote {
+  margin: 0 0 0.9em;
+}
+
+.md-article ul,
+.md-article ol {
+  padding-left: 1.6em;
+}
+
+.md-article li + li {
+  margin-top: 0.2em;
+}
+
+.md-article blockquote {
+  padding: var(--sp-2) var(--sp-12);
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+
+.md-article a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.md-article a:hover {
+  text-decoration: underline;
+}
+
+/* Local links are stripped of navigation; render them as plain-ish text so
+   they don't promise a click that does nothing. */
+.md-article a.md-inert-link {
+  color: var(--fg);
+  text-decoration: underline dotted var(--muted);
+  cursor: default;
+}
+
+.md-article code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--bg-active);
+  border-radius: var(--r-sm);
+  padding: 0.15em 0.35em;
+}
+
+.md-article pre {
+  margin: 0 0 0.9em;
+  padding: var(--sp-12) var(--sp-12);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow-x: auto;
+}
+
+.md-article pre code {
+  background: none;
+  padding: 0;
+  font-size: var(--fs-base);
+  line-height: var(--lh-relaxed);
+}
+
+.md-article table {
+  border-collapse: collapse;
+  margin: 0 0 0.9em;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.md-article th,
+.md-article td {
+  border: 1px solid var(--line);
+  padding: var(--sp-4) var(--sp-8);
+  text-align: left;
+}
+
+.md-article th {
+  background: var(--bg-side);
+  font-weight: 600;
+}
+
+.md-article tr:nth-child(2n) td {
+  background: var(--bg-hover);
+}
+
+.md-article img {
+  max-width: 100%;
+  border-radius: var(--r-sm);
+}
+
+.md-article hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 1.4em 0;
+}
+
+/* Round ten: tables read as rows, not grids; code blocks get an accent
+   rail so their boundary survives long scrolls. */
+.md-article table th,
+.md-article table td {
+  border-left: none;
+  border-right: none;
+}
+
+.md-article table th {
+  border-bottom-width: 2px;
+}
+
+.md-article pre {
+  border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+}

@@ -1,0 +1,420 @@
+/* Icon font for prompt glyphs. Bundled file ONLY — no local() sources:
+   WebKit refuses to render user-installed fonts (fingerprinting protection),
+   and a matching local() shadows this file, turning icons into tofu boxes. */
+@font-face {
+  font-family: "Tabverse Symbols";
+  src:
+    url("../../../assets/fonts/nerd-symbols.woff2") format("woff2");
+  font-display: block;
+  /* Range-limited so it can sit first in the stack: icons come from the font
+     we ship regardless of the machine's installed-font vintage or the
+     engine's private-use fallback rules; text falls through. */
+  unicode-range: U+E000-F8FF, U+F0000-F1AF0;
+}
+
+:root {
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
+    sans-serif;
+  --font-mono: "SF Mono", Menlo, Monaco, "Cascadia Mono",
+    "Tabverse Symbols", monospace;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+input:focus-visible,
+textarea:focus-visible,
+[contenteditable="true"]:focus-visible {
+  outline: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/* The page never scrolls as a page: the terminal pane manages its own
+   overflow, the gate scrolls inside <main>. This is also half of the "no
+   horizontal scroll on a phone" guarantee. */
+body {
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  line-height: var(--lh-relaxed);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100vh;
+  height: 100dvh;
+  height: var(--vvh, 100dvh);
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-8) var(--sp-16);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-side);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.tabtitle {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.viewers,
+.status {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  padding: var(--sp-2) var(--sp-8);
+  border-radius: var(--r-pill);
+  background: var(--panel);
+  white-space: nowrap;
+}
+
+.badge-ro {
+  font-size: var(--fs-sm);
+  color: var(--warn);
+  padding: var(--sp-2) var(--sp-8);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--warn);
+  background: var(--panel);
+  white-space: nowrap;
+}
+
+.status.live {
+  color: var(--ok);
+}
+
+.status.busy {
+  color: var(--warn);
+}
+
+.status.bad {
+  color: var(--danger);
+}
+
+.status-detail {
+  margin: var(--sp-8) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--fg-dim);
+}
+
+.status-detail summary {
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.status-detail pre {
+  margin: var(--sp-4) 0 0;
+  max-height: 160px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow-y: auto;
+}
+
+#gate {
+  margin: auto;
+  width: min(560px, calc(100vw - 32px));
+  padding: var(--sp-24);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+}
+
+#gate h1 {
+  font-size: var(--fs-lg);
+  margin: 0 0 6px;
+}
+
+#gate p {
+  color: var(--muted);
+  margin: 0 0 14px;
+}
+
+textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  background: var(--term-bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: var(--sp-12);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  word-break: break-all;
+}
+
+textarea:focus {
+  border-color: var(--accent);
+}
+
+button {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--term-bg);
+  font-weight: 600;
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  padding: var(--sp-8) var(--sp-16);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#zoom {
+  font-size: var(--fs-sm);
+  padding: var(--sp-4) var(--sp-8);
+  min-width: 62px;
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--fg);
+  border-color: var(--line);
+  font-weight: 400;
+}
+
+.row {
+  display: flex;
+  gap: var(--sp-8);
+  align-items: center;
+  margin-top: var(--sp-12);
+}
+
+.note {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  margin-top: var(--sp-12);
+  line-height: var(--lh-relaxed);
+}
+
+#stage {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  /* xterm's height math needs a definite ancestor height; a stretch child
+     of a scrollable flex main provides it. */
+  min-height: 100%;
+}
+
+/* An author display beats the UA's [hidden] rule, so restate it: a hidden
+   stage must actually be gone or the empty terminal sits beside the gate. */
+#stage[hidden] {
+  display: none;
+}
+
+/* The pre-welcome placeholder: the host has not named a renderer yet. */
+.remote-connecting {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  background: var(--term-bg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+.key-toolbar {
+  display: none;
+  flex: none;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-8) var(--sp-12);
+  padding-bottom: calc(var(--sp-8) + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--line);
+  background: var(--bg-side);
+  overflow-x: auto;
+}
+
+@media (pointer: coarse), (max-width: 480px) {
+  .key-toolbar {
+    display: flex;
+  }
+}
+
+.key-btn {
+  flex: none;
+  min-width: 44px;
+  min-height: 40px;
+  padding: var(--sp-4) var(--sp-12);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  color: var(--fg);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.key-btn-kbd {
+  font-size: 18px;
+  line-height: 1;
+}
+
+/* The sticky Ctrl, lit while armed: the next letter becomes a control
+   code, so the state has to be readable at a glance. */
+.key-btn[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--term-bg);
+}
+
+
+@media (max-width: 1024px) {
+  header {
+    padding: var(--sp-8) var(--sp-12);
+  }
+
+  .tabtitle {
+    max-width: 30%;
+  }
+}
+
+@media (max-width: 480px) {
+  header {
+    gap: var(--sp-4);
+    padding: var(--sp-4) var(--sp-8);
+  }
+
+  /* Compact header: the mark goes, the session's name stays. */
+  .brand {
+    display: none;
+  }
+
+  .tabtitle {
+    max-width: 26vw;
+  }
+
+  .status {
+    max-width: 34vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* The gate owns the screen instead of floating as a card. */
+  #gate {
+    width: 100%;
+    margin: 0;
+    border: none;
+    border-radius: 0;
+    padding: var(--sp-16);
+  }
+
+  #term {
+    padding: var(--sp-4) var(--sp-2) var(--sp-4) var(--sp-4);
+  }
+
+  /* Under 16px iOS zooms toward a focused input; on a phone every input
+     the user can reach gets the floor. */
+  #ticket,
+  .agent-input {
+    font-size: 16px;
+  }
+}
+
+.app-new-browser {
+  display: flex;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-8);
+}
+
+.app-new-browser input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+
+.app-new-browser button {
+  flex: none;
+  padding: 2px var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.clip-panel {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  margin: 0 var(--sp-8) var(--sp-4);
+  padding: var(--sp-4) var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--card, #1c1e21);
+  font-size: var(--fs-xs);
+}
+
+.clip-panel-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clip-panel button {
+  flex: none;
+  padding: 2px var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}

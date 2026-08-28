@@ -1,0 +1,15 @@
+#term {
+  flex: 1;
+  min-width: 0;
+  padding: var(--sp-8) var(--sp-4) var(--sp-8) var(--sp-12);
+  background: var(--term-bg);
+  overflow: hidden;
+}
+
+#term .xterm {
+  height: 100%;
+}
+
+#term .xterm-helper-textarea {
+  font-size: 16px !important;
+}

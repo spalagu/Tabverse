@@ -1,0 +1,57 @@
+.miller {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.miller-cols {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow-x: auto;
+}
+
+.miller-col {
+  flex: none;
+  width: 128px;
+  min-width: 96px;
+  max-width: 180px;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  padding: var(--sp-2) 0;
+}
+
+.miller-col.active {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.miller-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: 2px var(--sp-8);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: background-color var(--dur-fast) var(--ease);
+}
+
+.miller-row .tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.miller-row.dir .tree-name {
+  font-weight: 600;
+}
+
+.miller-row.aimed {
+  background: var(--bg-active);
+}
+
+.miller-row.sel {
+  color: var(--accent);
+}

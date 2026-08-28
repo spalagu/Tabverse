@@ -1,0 +1,107 @@
+/* The file workspace's embedded terminal panel. */
+
+.file-term-panel {
+  /* Never a flex item that grows: the file view above owns the free space,
+     and the panel is exactly as tall as the user dragged it. */
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* The same limits the stored height is clamped to, restated here so a
+     window that shrinks under a remembered height cannot let the panel push
+     the files out of the pane — CSS re-applies them on every layout, which is
+     the one place a pixel value from disk cannot reach. */
+  min-height: 80px;
+  max-height: 70%;
+  border-top: 1px solid var(--line);
+  background: var(--term-bg);
+}
+
+.file-term-grip {
+  flex: none;
+  height: 7px;
+  cursor: ns-resize;
+  background: var(--bg-side);
+  border-bottom: 1px solid var(--line);
+}
+
+/* A hairline that says the edge is draggable without drawing a handle. */
+.file-term-grip::after {
+  content: "";
+  display: block;
+  width: 42px;
+  height: 2px;
+  margin: 2px auto 0;
+  border-radius: var(--r-sm);
+  background: var(--line);
+}
+
+.file-term-grip:hover::after {
+  background: var(--accent);
+}
+
+.file-term-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  height: 24px;
+  padding: 0 var(--sp-4) 0 var(--sp-8);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-side);
+}
+
+.file-term-cwd {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.file-term-close {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-md);
+  line-height: var(--lh-tight);
+  cursor: pointer;
+}
+
+.file-term-close:hover {
+  color: var(--fg);
+  background: var(--bg-active);
+}
+
+/* In this short panel the indicator is a zero-height flex child overflowing
+   into the body, so it neither resizes the pty nor needs a pixel offset
+   past the grip and header rows. */
+.file-term-panel .term-loading {
+  position: static;
+  height: 0;
+  overflow: visible;
+}
+
+.file-term-body {
+  flex: 1;
+  /* Without this the terminal sizes to its content and the panel stops being
+     the thing that decides how tall it is. */
+  min-height: 0;
+  padding: var(--sp-4) var(--sp-2) var(--sp-2) var(--sp-8);
+  background: var(--term-bg);
+}
+
+.file-term-body .xterm {
+  height: 100%;
+}
+
+.file-term-grip:active::after {
+  background-color: var(--accent);
+}

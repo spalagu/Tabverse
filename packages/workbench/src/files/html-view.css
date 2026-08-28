@@ -1,0 +1,41 @@
+/* Static HTML preview: slim status bar, then the sandboxed frame. */
+
+.html-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.html-view-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-4) var(--sp-12);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-side);
+}
+
+.html-view-note {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.html-view-spacer {
+  flex: 1;
+}
+
+.html-view-bar .btn {
+  padding: var(--sp-4) var(--sp-8);
+  font-size: var(--fs-sm);
+}
+
+/* White canvas on purpose: arbitrary pages assume a light background, and a
+   transparent frame over the app's dark theme renders them unreadable. */
+.html-view-frame {
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  background: var(--surface-paper);
+}

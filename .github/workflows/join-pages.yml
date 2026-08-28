@@ -1,0 +1,178 @@
+name: Build and deploy Join page
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/join-pages.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/tabverse-web/**"
+      - "src/**"
+      - "tools/build-join-pages.mjs"
+      - "vite.pages.config.ts"
+      - "apps/join/**"
+      - "packages/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/join-pages.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/tabverse-web/**"
+      - "src/**"
+      - "tools/build-join-pages.mjs"
+      - "vite.pages.config.ts"
+      - "apps/join/**"
+      - "packages/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+env:
+  WASM_BINDGEN_VERSION: 0.2.126
+  WASM_BINDGEN_SHA256: 064948d58e2d6c0a745216477a639ba696216d6309aaa902939d1b865b1d869d
+  WASI_SDK_TAG: wasi-sdk-33
+  WASI_SDK_FULL: "33.0"
+  WASI_SDK_SHA256: 0ba8b5bfaeb2adf3f29bab5841d76cf5318ab8e1642ea195f88baba1abd47bce
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: cache cargo registry and target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: join-pages-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            join-pages-cargo-${{ runner.os }}-
+      - name: cache wasi-sdk and wasm-bindgen
+        id: toolchain-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/wasi-sdk
+            ~/.local/bin/wasm-bindgen
+          key: join-pages-toolchain-${{ runner.os }}-wasi${{ env.WASI_SDK_FULL }}-bindgen${{ env.WASM_BINDGEN_VERSION }}
+      - name: install wasi-sdk and wasm-bindgen
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL --retry 3 -o /tmp/wasi-sdk.tar.gz \
+            "https://github.com/WebAssembly/wasi-sdk/releases/download/${WASI_SDK_TAG}/wasi-sdk-${WASI_SDK_FULL}-x86_64-linux.tar.gz"
+          printf '%s  %s\n' "$WASI_SDK_SHA256" /tmp/wasi-sdk.tar.gz | sha256sum --check --strict
+          mkdir -p ~/wasi-sdk
+          tar -xzf /tmp/wasi-sdk.tar.gz -C ~/wasi-sdk --strip-components=1
+          curl -fsSL --retry 3 -o /tmp/wasm-bindgen.tar.gz \
+            "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          printf '%s  %s\n' "$WASM_BINDGEN_SHA256" /tmp/wasm-bindgen.tar.gz | sha256sum --check --strict
+          tar -xzf /tmp/wasm-bindgen.tar.gz -C /tmp
+          mkdir -p ~/.local/bin
+          mv "/tmp/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl/wasm-bindgen" \
+            ~/.local/bin/wasm-bindgen
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: build wasm module
+        run: |
+          export WASI_SDK="$HOME/wasi-sdk"
+          export CC_wasm32_unknown_unknown="$WASI_SDK/bin/clang"
+          export AR_wasm32_unknown_unknown="$WASI_SDK/bin/llvm-ar"
+          export CFLAGS_wasm32_unknown_unknown="--sysroot=$WASI_SDK/share/wasi-sysroot"
+          cargo build -p tabverse-web --target wasm32-unknown-unknown --release
+          ~/.local/bin/wasm-bindgen --target web --out-dir crates/tabverse-web/pkg \
+            --no-typescript target/wasm32-unknown-unknown/release/tabverse_web.wasm
+      - name: build Join page
+        run: |
+          npx vite build --config vite.pages.config.ts
+          TABVERSE_BUILD_ID="${GITHUB_SHA}" node tools/build-join-pages.mjs
+      - name: build Join page browser-test target
+        run: |
+          TABVERSE_JOIN_OUT_DIR=dist-pages-test VITE_JOIN_TEST_HARNESS=1 npx vite build --config vite.pages.config.ts
+          TABVERSE_JOIN_OUT_DIR=dist-pages-test TABVERSE_JOIN_TEST_HARNESS=1 TABVERSE_BUILD_ID="${GITHUB_SHA}" node tools/build-join-pages.mjs
+      - name: stage Pages artifact at the public Join path
+        run: |
+          mkdir -p dist-pages-artifact/join
+          cp -R dist-pages/. dist-pages-artifact/join/
+      - name: upload Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: dist-pages-artifact
+      - name: upload Join page for visual regression
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: join-pages-build
+          path: dist-pages-test
+          if-no-files-found: error
+          retention-days: 1
+
+  visual-regression:
+    needs: build
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: download built Join page
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: join-pages-build
+          path: dist-pages-test
+      - name: verify the built Join page at desktop and mobile widths
+        run: |
+          npx playwright install chromium
+          npx playwright test --config playwright.join.config.ts
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: join-playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [build, visual-regression]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: https://spalagu.github.io/Tabverse/join/
+    steps:
+      - name: deploy Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+      - name: verify the deployed Join path serves this build
+        env:
+          JOIN_URL: https://spalagu.github.io/Tabverse/join/
+        run: |
+          for attempt in {1..30}; do
+            if curl -fsSL --retry 2 -H 'Cache-Control: no-cache' \
+              "${JOIN_URL}?build=${GITHUB_SHA}" | \
+              grep -Fq "tabverse-build\" content=\"${GITHUB_SHA}"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "The deployed Join page did not expose build ${GITHUB_SHA}" >&2
+          exit 1

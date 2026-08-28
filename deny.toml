@@ -1,0 +1,46 @@
+[advisories]
+ignore = [
+  { id = "RUSTSEC-2024-0370", reason = "Tauri 2's Linux GTK3 stack requires this transitive macro crate; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2024-0411", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2024-0412", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2024-0413", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2024-0414", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2024-0415", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2024-0416", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2024-0417", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2024-0418", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2024-0419", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2024-0420", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2024-0436", reason = "The current iroh network stack requires this transitive macro crate; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2025-0075", reason = "Tauri 2's URL pattern parser requires this transitive crate; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2025-0080", reason = "Tauri 2's URL pattern parser requires this transitive crate; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2025-0081", reason = "Tauri 2's URL pattern parser requires this transitive crate; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2025-0098", reason = "Tauri 2's URL pattern parser requires this transitive crate; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2025-0100", reason = "Tauri 2's URL pattern parser requires this transitive crate; no maintained compatible replacement is available." },
+]
+
+[licenses]
+confidence-threshold = 0.8
+include-dev = true
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-1-Clause",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

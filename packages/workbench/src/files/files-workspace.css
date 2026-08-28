@@ -1,0 +1,24 @@
+.files-view {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 264px 1fr;
+  grid-template-rows: auto 1fr auto;
+  grid-auto-flow: column;
+  background: var(--term-bg);
+}
+
+.files-view > .files-sidebar,
+.files-view > .files-mains {
+  grid-row: 2;
+}
+
+.files-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-right: 1px solid var(--line);
+  background: var(--bg-side);
+}

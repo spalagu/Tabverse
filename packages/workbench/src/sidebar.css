@@ -1,0 +1,38 @@
+/*
+ * Baseline layout for the shared Workbench sidebar presentation. Consumers
+ * retain their frame-specific row colors, spacing and interaction rules.
+ */
+.workbench-sidebar-tree-group {
+  margin: var(--sp-2) 0;
+}
+
+:where(.tab-row, .app-tab-row) .tab-icon {
+  flex: none;
+  opacity: 0.9;
+}
+
+:where(.tab-row, .app-tab-row) .tab-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:where(.group-head, .app-tab-group-head) .group-folder {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+:where(.group-head, .app-tab-group-head) .group-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:where(.group-head, .app-tab-group-head) .group-count {
+  flex: none;
+  color: var(--muted);
+  font-weight: 400;
+}

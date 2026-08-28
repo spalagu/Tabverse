@@ -1,0 +1,26 @@
+[
+  { "keys": "⌘Q", "str": "settings.keyboard.reserved.quit", "owner": "app", "where": "mac" },
+  { "keys": "⌘H", "str": "settings.keyboard.reserved.hide", "owner": "app", "where": "mac" },
+  { "keys": "⌘⌥H", "str": "settings.keyboard.reserved.hideOthers", "owner": "app", "where": "mac" },
+  { "keys": "⌘M", "str": "settings.keyboard.reserved.minimize", "owner": "app", "where": "mac" },
+  { "keys": "⌘⌃F", "str": "settings.keyboard.reserved.fullScreen", "owner": "app", "where": "mac" },
+
+  { "keys": "⌘Z", "str": "settings.keyboard.reserved.undo", "owner": "app", "where": "all" },
+  { "keys": "⌘⇧Z", "str": "settings.keyboard.reserved.redo", "owner": "app", "where": "all" },
+  { "keys": "⌘X", "str": "settings.keyboard.reserved.cut", "owner": "app", "where": "all" },
+  { "keys": "⌘C", "str": "settings.keyboard.reserved.copy", "owner": "app", "where": "all" },
+  { "keys": "⌘V", "str": "settings.keyboard.reserved.paste", "owner": "app", "where": "all" },
+  { "keys": "⌘A", "str": "settings.keyboard.reserved.selectAll", "owner": "app", "where": "all" },
+
+  { "keys": "⌘Tab", "str": "settings.keyboard.reserved.switchApps", "owner": "system", "where": "mac" },
+  { "keys": "⌘Space", "str": "settings.keyboard.reserved.spotlight", "owner": "system", "where": "mac" },
+  { "keys": "⌘⇧3", "str": "settings.keyboard.reserved.screenshot", "owner": "system", "where": "mac" },
+  { "keys": "⌘⇧4", "str": "settings.keyboard.reserved.screenshotArea", "owner": "system", "where": "mac" },
+  { "keys": "⌘⇧5", "str": "settings.keyboard.reserved.screenTools", "owner": "system", "where": "mac" },
+  { "keys": "⌘⌥Esc", "str": "settings.keyboard.reserved.forceQuit", "owner": "system", "where": "mac" },
+  { "keys": "⌘⌃Q", "str": "settings.keyboard.reserved.lockScreen", "owner": "system", "where": "mac" },
+
+  { "keys": "⌥Tab", "str": "settings.keyboard.reserved.switchWindows", "owner": "system", "where": "other" },
+  { "keys": "⌘⌥Delete", "str": "settings.keyboard.reserved.securityScreen", "owner": "system", "where": "other" },
+  { "keys": "⌘⇧Esc", "str": "settings.keyboard.reserved.taskManager", "owner": "system", "where": "other" }
+]

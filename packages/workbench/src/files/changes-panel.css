@@ -1,0 +1,93 @@
+.changes-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-4) 0;
+}
+
+.changes-empty {
+  padding: var(--sp-12);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.change-group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  padding: var(--sp-6) var(--sp-8) var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.change-group-count {
+  margin-left: auto;
+  font-weight: 700;
+}
+
+.change-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-2) var(--sp-8);
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: background-color var(--dur-fast) var(--ease);
+}
+
+.change-row:hover {
+  background: var(--bg-hover);
+}
+
+.change-row.active {
+  background: var(--bg-active);
+}
+
+.change-row.gone .change-name {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.change-mark {
+  flex: none;
+  width: 12px;
+  text-align: center;
+  font-weight: 700;
+  font-size: var(--fs-xs);
+}
+
+.change-mark.modified {
+  color: var(--warn);
+}
+
+.change-mark.added {
+  color: var(--ok);
+}
+
+.change-mark.untracked {
+  color: var(--muted);
+}
+
+.change-mark.deleted,
+.change-mark.conflicted {
+  color: var(--danger);
+}
+
+.change-mark.renamed {
+  color: var(--info);
+}
+
+.change-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}

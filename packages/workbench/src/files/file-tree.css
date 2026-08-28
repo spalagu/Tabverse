@@ -1,0 +1,218 @@
+.file-tree {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.tree-filter {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  height: 28px;
+  padding: 0 var(--sp-8);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-side);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.tree-filter-text {
+  min-width: var(--sp-12);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.tree-filter-count {
+  flex: none;
+}
+
+.tree-filter-hint {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.tree-filter .mini-btn {
+  padding: var(--sp-2) var(--sp-6);
+}
+
+.tree-rows {
+  flex: 1;
+  overflow: auto;
+  padding: var(--sp-4) 0 var(--sp-12);
+}
+
+.tree-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  height: 26px;
+  padding-right: var(--sp-8);
+  border-radius: var(--r-sm);
+  cursor: default;
+  white-space: nowrap;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: background-color var(--dur-fast) var(--ease);
+}
+
+.tree-empty {
+  position: relative;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.tree-row:hover {
+  background: var(--bg-hover);
+}
+
+.tree-row.sel {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 24%, transparent),
+    color-mix(in srgb, var(--accent) 6%, transparent)
+  );
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.tree-row.picked {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+
+.tree-row.drop-into {
+  background: var(--bg-active);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+
+.tree-row.no-drop {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.tree-row::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 6px;
+  width: calc(var(--tree-depth) * 13px);
+  background: repeating-linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--line) 55%, transparent) 0 1px,
+    transparent 1px 13px
+  );
+  pointer-events: none;
+}
+
+.tree-caret {
+  flex: none;
+  width: 11px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  text-align: center;
+  transition:
+    transform var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.tree-caret.open {
+  transform: rotate(90deg);
+  color: var(--accent);
+}
+
+.tree-name {
+  flex: 1;
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-name.dir {
+  font-weight: 600;
+}
+
+.tree-row .tree-name.dir {
+  font-weight: 400;
+  color: color-mix(in srgb, var(--fg) 92%, var(--bg));
+}
+
+.symlink {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.git-badge {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  width: 12px;
+  text-align: center;
+  padding: 0 var(--sp-4);
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.ext-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.ext-dot.ext-code {
+  background: var(--info);
+}
+
+.ext-dot.ext-data {
+  background: var(--warn);
+}
+
+.ext-dot.ext-doc {
+  background: var(--fg-dim);
+}
+
+.ext-dot.ext-web {
+  background: var(--ok);
+}
+
+.ext-dot.ext-media {
+  background: var(--remote-edge);
+}
+
+.ext-dot.ext-pack {
+  background: var(--border);
+}
+
+.tree-row.git-modified .tree-name {
+  color: var(--warn);
+}
+
+.tree-row.git-added .tree-name,
+.tree-row.git-untracked .tree-name {
+  color: var(--ok);
+}
+
+.tree-row.git-renamed .tree-name {
+  color: var(--info);
+}
+
+.tree-row.git-conflicted .tree-name {
+  color: var(--danger);
+}

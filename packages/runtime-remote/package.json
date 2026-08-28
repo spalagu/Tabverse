@@ -1,0 +1,22 @@
+{
+  "name": "@tabverse/runtime-remote",
+  "private": true,
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "@tabverse/remote-client": "file:../remote-client",
+    "@tabverse/runtime-contracts": "file:../runtime-contracts",
+    "@tabverse/workbench": "file:../workbench",
+    "zustand": "^5.0.0"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./app-mirror": "./src/appMirror.ts",
+    "./wasm-api": "./src/wasmApi.ts",
+    "./wasm-loader": "./src/wasmLoader.ts"
+  }
+}

@@ -1,0 +1,33 @@
+[package]
+name = "tabverse-web"
+version = "0.1.0"
+edition = "2021"
+description = "Browser client for Tabverse remote control (iroh over WebSocket relays)."
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Browsers cannot send UDP, so every connection is relayed; default features
+# pull in metrics that do not build for wasm.
+# `tls-ring` restores the crypto provider that `presets::N0` needs; the other
+# default features (metrics, portmapper, apple datapath) do not build for wasm.
+iroh = { version = "1", default-features = false, features = ["tls-ring"] }
+tabverse-proto = { path = "../tabverse-proto" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+data-encoding = "2"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console"] }
+futures-lite = "2"
+n0-future = "0.3"
+async-channel = "2"
+# JsValue -> serde_json::Value for the v3 frames' argument payloads: the
+# page hands over plain JS objects, and this is the lossless bridge.
+serde-wasm-bindgen = "0.6"

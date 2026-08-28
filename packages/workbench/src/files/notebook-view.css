@@ -1,0 +1,148 @@
+/* Notebook preview: one scrolling column of cells. Markdown cells read like
+   the markdown preview; code cells are bordered blocks with an execution
+   badge, their outputs stacked underneath. */
+
+.nb-view {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-16) var(--sp-16);
+  background: var(--term-bg);
+  color: var(--fg);
+  font-size: var(--fs-base);
+}
+
+/* ---------- markdown cells ---------- */
+
+.nb-md {
+  max-width: 860px;
+  line-height: var(--lh-relaxed);
+  margin-bottom: var(--sp-12);
+  overflow-wrap: anywhere;
+}
+
+.nb-md h1,
+.nb-md h2,
+.nb-md h3 {
+  margin: var(--sp-12) 0 var(--sp-8);
+}
+
+.nb-md pre,
+.nb-md code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+.nb-md pre {
+  padding: var(--sp-12) var(--sp-12);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow-x: auto;
+}
+
+.nb-md img {
+  max-width: 100%;
+}
+
+.nb-md table {
+  border-collapse: collapse;
+}
+
+.nb-md th,
+.nb-md td {
+  border: 1px solid var(--line);
+  padding: var(--sp-4) var(--sp-8);
+}
+
+/* ---------- code cells ---------- */
+
+.nb-code {
+  max-width: 980px;
+  margin-bottom: var(--sp-12);
+}
+
+.nb-code-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-8);
+  margin-bottom: var(--sp-4);
+}
+
+.nb-badge {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--accent);
+  white-space: pre;
+}
+
+.nb-lang {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.nb-src,
+.nb-raw {
+  margin: 0;
+  padding: var(--sp-12) var(--sp-12);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  overflow-x: auto;
+}
+
+.nb-raw {
+  max-width: 980px;
+  margin-bottom: var(--sp-12);
+  color: var(--muted);
+}
+
+/* ---------- outputs ---------- */
+
+.nb-output {
+  margin: var(--sp-6) 0 0;
+  padding: var(--sp-8) var(--sp-12);
+  border-left: 2px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  overflow-x: auto;
+}
+
+.nb-output.nb-error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+  border-left-color: var(--danger);
+}
+
+.nb-truncation {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--warn);
+}
+
+.nb-img {
+  display: block;
+  margin-top: var(--sp-6);
+  max-width: 100%;
+  background: var(--surface-paper);
+  border-radius: var(--r-sm);
+}
+
+.nb-html {
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+}
+
+.nb-html table {
+  border-collapse: collapse;
+}
+
+.nb-html th,
+.nb-html td {
+  border: 1px solid var(--line);
+  padding: var(--sp-4) var(--sp-8);
+}

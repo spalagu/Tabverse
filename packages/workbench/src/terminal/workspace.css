@@ -1,0 +1,430 @@
+/* Shared desktop and remote terminal workspace chrome. */
+
+.term-pane {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--term-bg);
+}
+
+.term-pane.broadcast {
+  box-shadow: inset 0 0 0 2px var(--warn);
+}
+
+.term-pane.remote {
+  box-shadow: inset 0 0 0 1px var(--remote-edge);
+}
+
+.term-pane.broadcast.remote {
+  box-shadow:
+    inset 0 0 0 2px var(--warn),
+    inset 0 0 0 3px var(--remote-edge);
+}
+
+.term-remote-badge {
+  position: absolute;
+  top: var(--sp-8);
+  right: var(--sp-8);
+  z-index: var(--z-dialog);
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--remote-edge);
+  border: 1px solid var(--remote-edge);
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--term-bg) 85%, transparent);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  padding: 0 var(--sp-6);
+  pointer-events: none;
+}
+
+.term-remote-badge.profile-badge {
+  border-color: currentColor;
+}
+
+.term-broadcast-banner {
+  position: absolute;
+  top: var(--sp-8);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-dialog);
+  background: var(--warn);
+  color: var(--bg);
+  font-size: var(--fs-sm);
+  padding: var(--sp-4) var(--sp-12);
+  border-radius: var(--r-md);
+  pointer-events: none;
+}
+
+.term-hover-link {
+  position: absolute;
+  bottom: var(--sp-8);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-dialog);
+  max-width: calc(100% - var(--sp-16));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--bg-side);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  font-size: var(--fs-sm);
+  padding: var(--sp-2) var(--sp-8);
+  border-radius: var(--r-md);
+  pointer-events: none;
+}
+
+.term-ctx-menu {
+  position: fixed;
+}
+
+.term-container {
+  flex: 1;
+  min-height: 0;
+  /* Right padding clears the 8px overview ruler so glyphs never sit
+     under its column of marks. */
+  padding: var(--sp-12) var(--sp-8) var(--sp-4) var(--sp-12);
+  background: var(--term-bg);
+}
+
+.term-loading {
+  position: absolute;
+  top: var(--sp-8);
+  left: var(--sp-8);
+  z-index: var(--z-sticky);
+  pointer-events: none;
+}
+
+.term-container.remote {
+  overflow: hidden;
+}
+
+.term-container .xterm {
+  height: 100%;
+}
+
+@keyframes term-block-breathe {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+.search-bar {
+  position: absolute;
+  top: var(--sp-8);
+  right: var(--sp-8);
+  left: auto;
+  z-index: var(--z-overlay);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  width: min(420px, calc(100% - 2 * var(--sp-8)));
+  padding: var(--sp-6) var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(1.15);
+  backdrop-filter: blur(20px) saturate(1.15);
+  box-shadow: var(--shadow-raise);
+  animation: menu-in var(--dur-fast) var(--ease-express);
+  transform-origin: top right;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  /* The card IS the field (round eight): no inner box fighting the
+     glass around it; focus reads through the card's own ring. */
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--fg);
+  caret-color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  padding: var(--sp-2) var(--sp-4);
+}
+
+.search-count {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  min-width: 38px;
+  text-align: right;
+  font-family: var(--font-mono);
+}
+
+.search-bar {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--panel) 78%, transparent),
+    color-mix(in srgb, var(--bg-side) 92%, transparent));
+  border-bottom-color: color-mix(in srgb, var(--accent) 10%, var(--line));
+}
+
+.term-broadcast-banner {
+  background: color-mix(in srgb, var(--warn) 16%, var(--bg));
+  border-left: 3px solid var(--warn);
+  color: var(--fg);
+}
+
+.term-hover-link {
+  font-family: var(--font-mono);
+}
+.term-transfer-note {
+  position: absolute;
+  top: var(--sp-8);
+  left: var(--sp-8);
+  z-index: var(--z-dialog);
+  max-width: calc(100% - var(--sp-16));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--bg-side);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  font-size: var(--fs-sm);
+  padding: var(--sp-2) var(--sp-8);
+  border-radius: var(--r-md);
+  pointer-events: none;
+}
+
+.term-transfer-error {
+  position: absolute;
+  bottom: var(--sp-16);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-dialog);
+  width: min(520px, calc(100% - var(--sp-16)));
+  cursor: pointer;
+}
+
+.term-upload-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-dialog);
+  background: var(--scrim-heavy);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 18vh;
+}
+
+.term-upload-dialog {
+  width: 460px;
+  max-width: calc(100% - var(--sp-16));
+}
+
+.term-upload-files {
+  margin: var(--sp-8) 0;
+  padding-left: var(--sp-16);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  max-height: 10em;
+  overflow: auto;
+}
+
+.term-upload-label {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin-bottom: var(--sp-4);
+}
+
+.term-paste-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-dialog);
+  background: var(--scrim-heavy);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 18vh;
+}
+
+.term-paste-dialog {
+  width: 560px;
+  max-width: calc(100% - var(--sp-16));
+  display: flex;
+  flex-direction: column;
+}
+
+.term-paste-textarea {
+  min-height: 8em;
+  max-height: 40vh;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: var(--sp-4) var(--sp-6);
+  margin: var(--sp-8) 0;
+}
+
+.term-paste-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.term-completion-popup {
+  position: absolute;
+  top: var(--sp-8);
+  right: var(--sp-8);
+  z-index: var(--z-dialog);
+  width: min(320px, calc(100% - var(--sp-16)));
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-raise);
+  padding: var(--sp-2) 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  animation: menu-in var(--dur-fast) var(--ease-express);
+  transform-origin: top right;
+}
+
+.term-completion-hint {
+  padding: var(--sp-2) var(--sp-8);
+  color: var(--muted);
+  font-family: var(--font-ui);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.term-completion-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 10.5em;
+  overflow-y: auto;
+}
+
+.term-completion-list li {
+  padding: var(--sp-2) var(--sp-8);
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background-color var(--dur-fast) var(--ease);
+}
+
+.term-completion-list li:hover {
+  background: var(--bg-hover);
+}
+
+.term-completion-list li.selected {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--fg);
+}
+
+.term-block-dot {
+  pointer-events: none;
+  /* The gutter offset: registerDecoration refuses a negative x, so the dot
+     cell sits at column 0 and the element itself leans left out of the grid
+     into the container's left padding — the same pixels x:-1 meant. */
+  margin-left: calc(-1 * var(--sp-12) + 3px);
+}
+
+.term-block-dot::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.term-block-dot--running::before {
+  background: var(--accent);
+  animation: term-block-breathe calc(6 * var(--dur-slow)) ease-in-out infinite;
+}
+
+.term-block-dot--ok::before {
+  background: var(--ok);
+}
+
+.term-block-dot--fail::before {
+  background: var(--danger);
+}
+
+.term-block-ruler-hit {
+  position: absolute;
+  top: var(--sp-12);
+  /* The block bar is gone (round four): the ruler reaches the floor. */
+  bottom: var(--sp-4);
+  right: var(--sp-2);
+  width: 8px;
+  z-index: var(--z-overlay);
+  cursor: pointer;
+}
+
+.term-status-pill {
+  position: absolute;
+  right: var(--sp-12);
+  bottom: var(--sp-12);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-4) var(--sp-12);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  backdrop-filter: blur(16px) saturate(1.15);
+  box-shadow: var(--shadow-raise);
+  font-size: var(--fs-xs);
+  color: var(--fg);
+  pointer-events: none;
+  z-index: var(--z-sticky);
+  animation: menu-in var(--dur-slow) var(--ease-express);
+  transform-origin: bottom right;
+}
+
+.term-status-pill.hide {
+  opacity: 0;
+  transition: opacity var(--dur-slow) var(--ease);
+}
+
+.term-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.term-status-dot.ok {
+  background: var(--ok);
+}
+
+.term-status-dot.fail {
+  background: var(--danger);
+}
+
+.term-status-time {
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+
+.term-status-pill.dismissible {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.term-completion-hint {
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--line);
+}
+
+.term-completion-hint {
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--line);
+  letter-spacing: 0.02em;
+}

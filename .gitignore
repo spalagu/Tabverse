@@ -1,0 +1,21 @@
+node_modules/
+dist/
+target/
+.DS_Store
+*.local
+.env
+.env.*
+!.env.example
+src-tauri/gen/
+dist-web/
+apps/join/.offline-build/
+crates/tabverse-web/pkg/
+
+# Runtime state, logs, build output, and browser-test artifacts.
+sb[0-9]*/
+*.log
+dist-web-pages/
+dist-pages/
+dist-pages-test/
+playwright-report/
+test-results/

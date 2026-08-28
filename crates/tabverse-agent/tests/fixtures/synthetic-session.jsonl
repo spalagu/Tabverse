@@ -1,0 +1,25 @@
+{"kind":"event","v":1,"data":{"type":"user_prompt","text":"Inspect the sample workspace."}}
+{"kind":"event","v":1,"data":{"type":"turn_started","turn":1}}
+{"kind":"event","v":1,"data":{"type":"assistant_text","delta":"I will inspect the sample workspace."}}
+{"kind":"event","v":1,"data":{"type":"permission_requested","call_id":"sample-1","name":"glob","input":{"pattern":"sample/**"}}}
+{"kind":"event","v":1,"data":{"type":"permission_resolved","call_id":"sample-1","outcome":"allowed_by_rule"}}
+{"kind":"event","v":1,"data":{"type":"tool_started","call_id":"sample-1","name":"glob","input":{"pattern":"sample/**"}}}
+{"kind":"event","v":1,"data":{"type":"tool_finished","call_id":"sample-1","result":"sample/README.md\nsample/config.json\n","is_error":false,"location":null}}
+{"kind":"event","v":1,"data":{"type":"turn_ended","turn":1,"reason":"done"}}
+{"kind":"event","v":1,"data":{"type":"turn_started","turn":2}}
+{"kind":"event","v":1,"data":{"type":"assistant_text","delta":"I will run a harmless sample command."}}
+{"kind":"event","v":1,"data":{"type":"permission_requested","call_id":"sample-2","name":"bash","input":{"command":"printf sample"}}}
+{"kind":"event","v":1,"data":{"type":"permission_resolved","call_id":"sample-2","outcome":"allowed_by_rule"}}
+{"kind":"event","v":1,"data":{"type":"tool_started","call_id":"sample-2","name":"bash","input":{"command":"printf sample"}}}
+{"kind":"event","v":1,"data":{"type":"tool_finished","call_id":"sample-2","result":"sample\n","is_error":false,"location":null}}
+{"kind":"event","v":1,"data":{"type":"turn_ended","turn":2,"reason":"done"}}
+{"kind":"event","v":1,"data":{"type":"turn_started","turn":3}}
+{"kind":"event","v":1,"data":{"type":"assistant_text","delta":"The sample session is complete."}}
+{"kind":"event","v":1,"data":{"type":"user_prompt","text":"Confirm the result."}}
+{"kind":"event","v":1,"data":{"type":"turn_ended","turn":3,"reason":"done"}}
+{"kind":"message","v":1,"data":{"role":"assistant","text":"I will run a harmless sample command.","tool_calls":[{"id":"sample-2","name":"bash","input":{"command":"printf sample"}}]}}
+{"kind":"message","v":1,"data":{"role":"tool_result","call_id":"sample-2","content":"sample\n","is_error":false}}
+{"kind":"message","v":1,"data":{"role":"assistant","text":"The sample session is complete."}}
+{"kind":"message","v":1,"data":{"role":"user","text":"Inspect the sample workspace."}}
+{"kind":"message","v":1,"data":{"role":"assistant","text":"I will inspect the sample workspace."}}
+{"kind":"message","v":1,"data":{"role":"user","text":"Confirm the result."}}

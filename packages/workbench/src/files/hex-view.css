@@ -1,0 +1,90 @@
+/* Hex dump: a slim paging header, then one scrolling <pre> of dump rows.
+   Only ever one 4 KiB page in the DOM, so file size is irrelevant. */
+
+.hex-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--term-bg);
+}
+
+.hex-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  padding: var(--sp-4) var(--sp-12);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-side);
+}
+
+.hex-pos {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.hex-head-spacer {
+  flex: 1;
+}
+
+.hex-jump {
+  width: 110px;
+  padding: var(--sp-4) var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+.hex-jump:focus {
+  border-color: var(--accent);
+}
+
+.hex-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.hex-dump {
+  margin: 0;
+  padding: var(--sp-12) var(--sp-12);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+  white-space: pre;
+}
+
+.hex-off {
+  color: var(--muted);
+}
+
+.hex-bytes {
+  color: var(--fg);
+}
+
+/* The 8-byte seam gets a real gap and a hairline, not just the dump
+   text's double space: byte 9 should be findable by the eye, without
+   counting columns. Every row splits identically, so the ASCII gutter —
+   one span further down the same line — shifts with the seam and stays
+   aligned. */
+.hex-view .hex-group + .hex-group {
+  margin-left: var(--sp-4);
+  padding-left: var(--sp-4);
+  border-left: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.hex-ascii {
+  color: var(--accent);
+}
+
+/* Round ten: the ASCII gutter is context, not payload — one step dimmer
+   than the bytes it mirrors. */
+.hex-ascii,
+.hex-view .hex-ascii {
+  color: var(--fg-dim);
+}

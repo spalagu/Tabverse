@@ -1,0 +1,380 @@
+{
+  "version": "2026-08-17",
+  "commands": [
+    {
+      "name": "git",
+      "subcommands": ["add", "branch", "checkout", "clone", "commit", "diff", "fetch", "init", "log", "merge", "pull", "push", "rebase", "reset", "restore", "stash", "status", "switch", "tag"],
+      "flags": [
+        { "name": "--all", "takesValue": false },
+        { "name": "--amend", "takesValue": false },
+        { "name": "--branch", "takesValue": false },
+        { "name": "--cached", "takesValue": false },
+        { "name": "--depth", "takesValue": true },
+        { "name": "--dry-run", "takesValue": false },
+        { "name": "--force", "takesValue": false },
+        { "name": "--hard", "takesValue": false },
+        { "name": "--message", "takesValue": true },
+        { "name": "--no-ff", "takesValue": false },
+        { "name": "--oneline", "takesValue": false },
+        { "name": "--patch", "takesValue": false },
+        { "name": "--quiet", "takesValue": false },
+        { "name": "--recursive", "takesValue": false },
+        { "name": "--set-upstream", "takesValue": false },
+        { "name": "--soft", "takesValue": false },
+        { "name": "--stat", "takesValue": false },
+        { "name": "--verbose", "takesValue": false }
+      ]
+    },
+    {
+      "name": "ls",
+      "flags": [
+        { "name": "--all", "takesValue": false },
+        { "name": "--almost-all", "takesValue": false },
+        { "name": "--color", "takesValue": true },
+        { "name": "--directory", "takesValue": false },
+        { "name": "--human-readable", "takesValue": false },
+        { "name": "--inode", "takesValue": false },
+        { "name": "--long", "takesValue": false },
+        { "name": "--reverse", "takesValue": false },
+        { "name": "--recursive", "takesValue": false },
+        { "name": "--size", "takesValue": false },
+        { "name": "--sort", "takesValue": true },
+        { "name": "--time", "takesValue": true }
+      ]
+    },
+    {
+      "name": "grep",
+      "flags": [
+        { "name": "--after-context", "takesValue": true },
+        { "name": "--before-context", "takesValue": true },
+        { "name": "--basic-regexp", "takesValue": false },
+        { "name": "--byte-offset", "takesValue": false },
+        { "name": "--count", "takesValue": false },
+        { "name": "--extended-regexp", "takesValue": false },
+        { "name": "--fixed-strings", "takesValue": false },
+        { "name": "--ignore-case", "takesValue": false },
+        { "name": "--invert-match", "takesValue": false },
+        { "name": "--line-number", "takesValue": false },
+        { "name": "--perl-regexp", "takesValue": false },
+        { "name": "--recursive", "takesValue": false },
+        { "name": "--word-regexp", "takesValue": false }
+      ]
+    },
+    {
+      "name": "find",
+      "flags": [
+        { "name": "--depth", "takesValue": true },
+        { "name": "--help", "takesValue": false },
+        { "name": "--maxdepth", "takesValue": true },
+        { "name": "--mindepth", "takesValue": true },
+        { "name": "--mount", "takesValue": false },
+        { "name": "--version", "takesValue": false }
+      ]
+    },
+    {
+      "name": "curl",
+      "flags": [
+        { "name": "--compressed", "takesValue": false },
+        { "name": "--config", "takesValue": true },
+        { "name": "--data", "takesValue": true },
+        { "name": "--fail", "takesValue": false },
+        { "name": "--form", "takesValue": true },
+        { "name": "--head", "takesValue": false },
+        { "name": "--header", "takesValue": true },
+        { "name": "--include", "takesValue": false },
+        { "name": "--insecure", "takesValue": false },
+        { "name": "--location", "takesValue": false },
+        { "name": "--max-time", "takesValue": true },
+        { "name": "--output", "takesValue": true },
+        { "name": "--request", "takesValue": true },
+        { "name": "--silent", "takesValue": false },
+        { "name": "--user", "takesValue": true },
+        { "name": "--verbose", "takesValue": false }
+      ]
+    },
+    {
+      "name": "ssh",
+      "flags": [
+        { "name": "--bind-address", "takesValue": true },
+        { "name": "--compression", "takesValue": false },
+        { "name": "--config", "takesValue": true },
+        { "name": "--debug", "takesValue": false },
+        { "name": "--identity-file", "takesValue": true },
+        { "name": "--jump-host", "takesValue": true },
+        { "name": "--keep-alive", "takesValue": true },
+        { "name": "--login-name", "takesValue": true },
+        { "name": "--port", "takesValue": true },
+        { "name": "--quiet", "takesValue": false },
+        { "name": "--verbose", "takesValue": false },
+        { "name": "--verbose2", "takesValue": false }
+      ]
+    },
+    {
+      "name": "docker",
+      "subcommands": ["attach", "build", "compose", "cp", "create", "exec", "images", "inspect", "kill", "logs", "ps", "pull", "push", "restart", "rm", "rmi", "run", "start", "stop", "tag", "top"],
+      "flags": [
+        { "name": "--detach", "takesValue": false },
+        { "name": "--env", "takesValue": true },
+        { "name": "--env-file", "takesValue": true },
+        { "name": "--follow", "takesValue": false },
+        { "name": "--interactive", "takesValue": false },
+        { "name": "--name", "takesValue": true },
+        { "name": "--publish", "takesValue": true },
+        { "name": "--quiet", "takesValue": false },
+        { "name": "--rm", "takesValue": false },
+        { "name": "--tty", "takesValue": false },
+        { "name": "--volume", "takesValue": true }
+      ]
+    },
+    {
+      "name": "cargo",
+      "subcommands": ["bench", "build", "check", "clean", "doc", "fetch", "fix", "fmt", "init", "install", "new", "publish", "run", "search", "test", "tree", "update", "verify-project", "version"],
+      "flags": [
+        { "name": "--all-features", "takesValue": false },
+        { "name": "--all-targets", "takesValue": false },
+        { "name": "--bin", "takesValue": true },
+        { "name": "--color", "takesValue": true },
+        { "name": "--features", "takesValue": true },
+        { "name": "--frozen", "takesValue": false },
+        { "name": "--jobs", "takesValue": true },
+        { "name": "--locked", "takesValue": false },
+        { "name": "--manifest-path", "takesValue": true },
+        { "name": "--offline", "takesValue": false },
+        { "name": "--package", "takesValue": true },
+        { "name": "--quiet", "takesValue": false },
+        { "name": "--release", "takesValue": false },
+        { "name": "--target", "takesValue": true },
+        { "name": "--verbose", "takesValue": false },
+        { "name": "--workspace", "takesValue": false }
+      ]
+    },
+    {
+      "name": "npm",
+      "subcommands": ["access", "adduser", "audit", "bin", "cache", "ci", "completion", "config", "dedupe", "deprecate", "diff", "docs", "doctor", "edit", "exec", "explain", "find-dupes", "fund", "help", "hook", "init", "install", "link", "logout", "ls", "outdated", "owner", "pack", "ping", "prefix", "profile", "prune", "publish", "rebuild", "repo", "restart", "root", "run", "run-script", "search", "set", "shrinkwrap", "star", "stars", "start", "stop", "team", "test", "token", "uninstall", "unpublish", "update", "version", "view", "whoami"],
+      "flags": [
+        { "name": "--dry-run", "takesValue": false },
+        { "name": "--global", "takesValue": false },
+        { "name": "--json", "takesValue": false },
+        { "name": "--legacy-peer-deps", "takesValue": false },
+        { "name": "--location", "takesValue": true },
+        { "name": "--omit", "takesValue": true },
+        { "name": "--prefix", "takesValue": true },
+        { "name": "--quiet", "takesValue": false },
+        { "name": "--registry", "takesValue": true },
+        { "name": "--save-dev", "takesValue": false },
+        { "name": "--save-exact", "takesValue": false },
+        { "name": "--save-optional", "takesValue": false },
+        { "name": "--save-peer", "takesValue": false },
+        { "name": "--save-prod", "takesValue": false },
+        { "name": "--silent", "takesValue": false },
+        { "name": "--verbose", "takesValue": false },
+        { "name": "--watch", "takesValue": false },
+        { "name": "--workspaces", "takesValue": false },
+        { "name": "--yes", "takesValue": false }
+      ]
+    },
+    {
+      "name": "python3",
+      "flags": [
+        { "name": "--check-only", "takesValue": false },
+        { "name": "--encoding", "takesValue": true },
+        { "name": "--help", "takesValue": false },
+        { "name": "--ignore-environment", "takesValue": false },
+        { "name": "--interactive", "takesValue": false },
+        { "name": "--module", "takesValue": false },
+        { "name": "--no-warn-script-location", "takesValue": false },
+        { "name": "--optimized", "takesValue": false },
+        { "name": "--quiet", "takesValue": false },
+        { "name": "--verbose", "takesValue": false },
+        { "name": "--version", "takesValue": false }
+      ]
+    },
+    {
+      "name": "pip",
+      "subcommands": ["check", "completion", "config", "debug", "download", "freeze", "hash", "help", "index", "install", "list", "search", "show", "uninstall", "wheel"],
+      "flags": [
+        { "name": "--disable-pip-version-check", "takesValue": false },
+        { "name": "--editable", "takesValue": false },
+        { "name": "--exists-action", "takesValue": true },
+        { "name": "--force-reinstall", "takesValue": false },
+        { "name": "--index-url", "takesValue": true },
+        { "name": "--isolated", "takesValue": false },
+        { "name": "--log", "takesValue": true },
+        { "name": "--no-cache-dir", "takesValue": false },
+        { "name": "--no-deps", "takesValue": false },
+        { "name": "--pre", "takesValue": false },
+        { "name": "--require-hashes", "takesValue": false },
+        { "name": "--requirement", "takesValue": true },
+        { "name": "--require-virtualenv", "takesValue": false },
+        { "name": "--root-user-action", "takesValue": true },
+        { "name": "--target", "takesValue": true },
+        { "name": "--upgrade", "takesValue": false },
+        { "name": "--user", "takesValue": false },
+        { "name": "--verbose", "takesValue": false }
+      ]
+    },
+    {
+      "name": "rsync",
+      "flags": [
+        { "name": "--archive", "takesValue": false },
+        { "name": "--backup", "takesValue": false },
+        { "name": "--checksum", "takesValue": false },
+        { "name": "--compress", "takesValue": false },
+        { "name": "--delete", "takesValue": false },
+        { "name": "--delete-excluded", "takesValue": false },
+        { "name": "--dry-run", "takesValue": false },
+        { "name": "--exclude", "takesValue": true },
+        { "name": "--include", "takesValue": true },
+        { "name": "--itemize-changes", "takesValue": false },
+        { "name": "--links", "takesValue": false },
+        { "name": "--partial", "takesValue": false },
+        { "name": "--perms", "takesValue": false },
+        { "name": "--progress", "takesValue": false },
+        { "name": "--recursive", "takesValue": false },
+        { "name": "--rsh", "takesValue": true },
+        { "name": "--times", "takesValue": false },
+        { "name": "--verbose", "takesValue": false }
+      ]
+    },
+    {
+      "name": "tar",
+      "flags": [
+        { "name": "--append", "takesValue": false },
+        { "name": "--checkpoint", "takesValue": true },
+        { "name": "--compare", "takesValue": false },
+        { "name": "--compress", "takesValue": false },
+        { "name": "--create", "takesValue": false },
+        { "name": "--delete", "takesValue": false },
+        { "name": "--dereference", "takesValue": false },
+        { "name": "--diff", "takesValue": false },
+        { "name": "--exclude", "takesValue": true },
+        { "name": "--extract", "takesValue": false },
+        { "name": "--file", "takesValue": true },
+        { "name": "--gzip", "takesValue": false },
+        { "name": "--keep-old-files", "takesValue": false },
+        { "name": "--list", "takesValue": false },
+        { "name": "--no-same-owner", "takesValue": false },
+        { "name": "--no-same-permissions", "takesValue": false },
+        { "name": "--one-file-system", "takesValue": false },
+        { "name": "--same-owner", "takesValue": false },
+        { "name": "--touch", "takesValue": false },
+        { "name": "--update", "takesValue": false },
+        { "name": "--use-compress-program", "takesValue": true },
+        { "name": "--verbose", "takesValue": false }
+      ]
+    },
+    {
+      "name": "chmod",
+      "flags": [
+        { "name": "--changes", "takesValue": false },
+        { "name": "--dereference", "takesValue": false },
+        { "name": "--no-dereference", "takesValue": false },
+        { "name": "--preserve-root", "takesValue": false },
+        { "name": "--quiet", "takesValue": false },
+        { "name": "--recursive", "takesValue": false },
+        { "name": "--reference", "takesValue": true },
+        { "name": "--silent", "takesValue": false },
+        { "name": "--verbose", "takesValue": false }
+      ]
+    },
+    {
+      "name": "cp",
+      "flags": [
+        { "name": "--archive", "takesValue": false },
+        { "name": "--attributes-only", "takesValue": false },
+        { "name": "--backup", "takesValue": true },
+        { "name": "--copy-contents", "takesValue": false },
+        { "name": "--dereference", "takesValue": false },
+        { "name": "--force", "takesValue": false },
+        { "name": "--interactive", "takesValue": false },
+        { "name": "--link", "takesValue": false },
+        { "name": "--no-clobber", "takesValue": false },
+        { "name": "--no-dereference", "takesValue": false },
+        { "name": "--no-preserve", "takesValue": true },
+        { "name": "--parents", "takesValue": false },
+        { "name": "--preserve", "takesValue": true },
+        { "name": "--recursive", "takesValue": false },
+        { "name": "--reflink", "takesValue": true },
+        { "name": "--sparse", "takesValue": true },
+        { "name": "--strip-trailing-slashes", "takesValue": false },
+        { "name": "--symbolic-link", "takesValue": false },
+        { "name": "--update", "takesValue": false },
+        { "name": "--verbose", "takesValue": false }
+      ]
+    },
+    {
+      "name": "mv",
+      "flags": [
+        { "name": "--backup", "takesValue": true },
+        { "name": "--exchange", "takesValue": false },
+        { "name": "--force", "takesValue": false },
+        { "name": "--interactive", "takesValue": false },
+        { "name": "--no-clobber", "takesValue": false },
+        { "name": "--no-copy", "takesValue": false },
+        { "name": "--strip-trailing-slashes", "takesValue": false },
+        { "name": "--target-directory", "takesValue": true },
+        { "name": "--update", "takesValue": false },
+        { "name": "--verbose", "takesValue": false }
+      ]
+    },
+    {
+      "name": "mkdir",
+      "flags": [
+        { "name": "--mode", "takesValue": true },
+        { "name": "--parents", "takesValue": false },
+        { "name": "--verbose", "takesValue": false }
+      ]
+    },
+    {
+      "name": "head",
+      "flags": [
+        { "name": "--bytes", "takesValue": true },
+        { "name": "--lines", "takesValue": true },
+        { "name": "--quiet", "takesValue": false },
+        { "name": "--verbose", "takesValue": false },
+        { "name": "--zero-terminated", "takesValue": false }
+      ]
+    },
+    {
+      "name": "tail",
+      "flags": [
+        { "name": "--bytes", "takesValue": true },
+        { "name": "--follow", "takesValue": false },
+        { "name": "--lines", "takesValue": true },
+        { "name": "--max.retry", "takesValue": true },
+        { "name": "--pid", "takesValue": true },
+        { "name": "--quiet", "takesValue": false },
+        { "name": "--sleep-interval", "takesValue": true },
+        { "name": "--verbose", "takesValue": false }
+      ]
+    },
+    {
+      "name": "kill",
+      "flags": [
+        { "name": "--list", "takesValue": true },
+        { "name": "--pid", "takesValue": true },
+        { "name": "--queue", "takesValue": true },
+        { "name": "--signal", "takesValue": true },
+        { "name": "--verbose", "takesValue": false }
+      ]
+    },
+    {
+      "name": "df",
+      "flags": [
+        { "name": "--all", "takesValue": false },
+        { "name": "--block-size", "takesValue": true },
+        { "name": "--human-readable", "takesValue": false },
+        { "name": "--inodes", "takesValue": false },
+        { "name": "--output", "takesValue": true },
+        { "name": "--print-type", "takesValue": false },
+        { "name": "--si", "takesValue": false },
+        { "name": "--total", "takesValue": false },
+        { "name": "--type", "takesValue": true }
+      ]
+    }
+  ],
+  "files": {
+    "patterns": ["~/", "./", "../", "/"],
+    "extensions": [".c", ".cc", ".cfg", ".conf", ".cpp", ".csv", ".css", ".go", ".h", ".hpp", ".html", ".ini", ".js", ".json", ".log", ".md", ".proto", ".py", ".rs", ".sh", ".toml", ".ts", ".tsx", ".txt", ".yaml", ".yml"]
+  }
+}

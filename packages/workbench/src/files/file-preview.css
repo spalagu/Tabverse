@@ -1,0 +1,73 @@
+.preview-center {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-12);
+  padding: var(--sp-16);
+  overflow: auto;
+}
+
+.preview-center.column {
+  flex-direction: column;
+}
+
+.preview-img,
+.preview-video {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  background: repeating-conic-gradient(
+      var(--checker-a) 0% 25%,
+      var(--checker-b) 0% 50%
+    )
+    50% / 18px 18px;
+  border-radius: var(--r-md);
+}
+
+.preview-frame {
+  flex: 1;
+  border: 0;
+  background: var(--surface-paper);
+}
+
+.preview-note {
+  font-size: var(--fs-base);
+  color: var(--fg);
+}
+
+.preview-sub {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.doc-view {
+  flex: 1;
+  overflow: auto;
+  padding: var(--sp-24);
+  background: var(--surface-paper);
+  color: var(--surface-paper-fg);
+  font-family: var(--font-ui);
+  line-height: var(--lh-relaxed);
+}
+
+.doc-view table {
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+
+.doc-view td,
+.doc-view th {
+  border: 1px solid var(--paper-line);
+  padding: var(--sp-4) var(--sp-8);
+}
+
+.sheet-name {
+  font-size: var(--fs-base);
+  margin: var(--sp-16) 0 var(--sp-6);
+  color: var(--paper-muted);
+}
+
+.sheet-table {
+  overflow-x: auto;
+}

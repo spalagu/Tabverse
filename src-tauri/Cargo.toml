@@ -1,0 +1,110 @@
+[package]
+name = "tabverse"
+version = "0.0.1"
+edition = "2021"
+description = "Tabverse: a cross-platform terminal that can replace most of your desktop."
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lib]
+name = "tabverse_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# build.rs reads tauri.conf.json to bake the claimed file types into the
+# binary — the runtime config does not carry them (see build.rs).
+serde_json = { workspace = true }
+
+[dependencies]
+tauri = { version = "2", features = ["unstable", "macos-proxy"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+base64 = "0.22"
+rand = "0.10.2"
+# For the PKCE challenge only. Already in the lock file by way of the existing
+# tree, so declaring it adds no download and no compilation unit.
+sha2 = "0.10"
+tabverse-proto = { path = "../crates/tabverse-proto" }
+tabverse-term = { path = "../crates/tabverse-term" }
+tabverse-agent = { path = "../crates/tabverse-agent" }
+tabverse-agent-tools = { path = "../crates/tabverse-agent-tools" }
+tabverse-remote = { path = "../crates/tabverse-remote" }
+tabverse-fs = { version = "0.1.0", path = "../crates/tabverse-fs" }
+toml = "1"
+toml_edit = { version = "0.25", features = ["serde"] }
+tauri-plugin-notification = "2.3.3"
+tauri-plugin-window-state = "2"
+tauri-plugin-dialog = "2"
+aes-gcm = "0.10"
+argon2 = "0.5"
+zeroize = "1"
+percent-encoding = "2"
+reqwest = { version = "0.13", default-features = false }
+# Reading the agent's SSE body as it arrives (agent_http.rs). Already compiled
+# into the tree through reqwest itself; naming it adds zero new units.
+futures-util = { version = "0.3", default-features = false }
+# The Codex socket transport (agent_http.rs). Already compiled into the tree by
+# iroh-relay with the same client + rustls-ring features; naming it adds no new
+# units and no new TLS stack.
+tokio-websockets = { version = "0.13", default-features = false, features = ["client", "rustls-webpki-roots", "ring"] }
+http = "1"
+# The header timeout around that request. Tauri's async runtime is tokio, so
+# this names what the tree already builds.
+tokio = { version = "1", default-features = false, features = ["time"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+regex = "1"
+notify = "6"
+
+# Killing a timed-out scp transfer by process group (transfer.rs): scp runs
+# ssh as a child, and killing scp alone leaves ssh holding the pipes the
+# output drains through. Already in the lock file by way of tauri's tree,
+# so declaring it adds no download and no compilation unit.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+# Launch Services speaks CoreFoundation strings and URLs, and the default-app
+# calls in default_apps.rs are plain C functions rather than Objective-C
+# messages. Already in the tree underneath security-framework — same version,
+# no new compilation units.
+core-foundation = "0.10"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "NSPasteboard"] }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-web-kit = "0.3"
+block2 = "0.6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "0.38"
+# Default-apps registration writes ProgIds and capability keys under HKCU
+# (default_apps/imp_windows.rs). Same windows-rs generation as `windows` 0.61.
+windows-registry = "0.5"
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_Security_Credentials",
+  "Security_Credentials_UI",
+  # Telling the shell the file and link associations changed. This is also
+  # what makes Windows offer its own "make this your default browser"
+  # notification — the only prompt an application is allowed to cause on that
+  # platform (default_apps/imp_windows.rs).
+  "Win32_UI_Shell",
+] }
+# The async operation the identity check answers through.
+windows-future = "0.2"
+# Named as a direct dependency because the interface macro generates paths
+# rooted at it: a hand-declared COM interface does not compile otherwise.
+windows-core = "0.61"
+
+[dev-dependencies]
+# The agent session tests need a real directory to run tools in and a real
+# place to write a session log, both thrown away afterwards.
+tempfile = "3.23.0"
+# The app-share action seam test needs an AppHandle without a GUI: the
+# mock runtime runs the real event system in-process. Same crate, one
+# more feature, tests only — the shipped binary never sees it.
+tauri = { version = "2", features = ["test"] }

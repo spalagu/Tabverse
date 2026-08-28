@@ -1,0 +1,15 @@
+[package]
+name = "tabverse-term"
+version = "0.1.0"
+edition = "2021"
+description = "PTY session engine: spawn shells, stream bytes, resize, kill."
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+portable-pty = "0.9"
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { version = "1", features = ["v4"] }

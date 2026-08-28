@@ -1,0 +1,221 @@
+.new-tab-view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-16);
+  overflow-y: auto;
+  background: var(--term-bg);
+}
+
+.new-tab-inner {
+  width: 560px;
+  max-width: 100%;
+  margin-bottom: 8vh;
+}
+
+.new-tab-input {
+  width: 100%;
+  height: 46px;
+  background: var(--term-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-lg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-lg);
+  padding: 0 var(--sp-16);
+}
+
+.new-tab-input:focus {
+  box-shadow: var(--shadow-halo);
+}
+
+.new-tab-input::placeholder {
+  color: var(--muted);
+}
+
+.new-tab-sites {
+  margin-top: var(--sp-12);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  background: var(--bg-side);
+}
+
+.new-tab-site {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-8);
+  width: 100%;
+  padding: var(--sp-8) var(--sp-12);
+  border: none;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
+}
+
+.new-tab-site:active {
+  background: var(--bg-active);
+}
+
+.new-tab-site:last-child {
+  border-bottom: none;
+}
+
+.new-tab-site.sel {
+  background: var(--bg-active);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.new-tab-site-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-tab-site-host {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.new-tab-blank {
+  margin-top: var(--sp-12);
+  padding: 0 var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.new-tab-hints {
+  display: flex;
+  gap: var(--sp-12);
+  padding: var(--sp-8) var(--sp-4) 0;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.new-tab-brand {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: var(--sp-12);
+}
+
+.new-tab-view .new-tab-input {
+  border-color: var(--line);
+}
+
+.new-tab-view .new-tab-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.placeholder .new-tab-brand {
+  margin-bottom: var(--sp-16);
+}
+
+.demo-pane .new-tab-brand {
+  margin-bottom: var(--sp-16);
+}
+
+.ghost-wrap {
+  position: relative;
+}
+
+.ghost-wrap .ghost-line {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.ghost-wrap .ghost-typed {
+  color: transparent;
+}
+
+.ghost-wrap .ghost-rest {
+  color: var(--muted);
+}
+
+.new-tab-view {
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 18vh;
+}
+
+.new-tab-inner {
+  width: min(620px, calc(100% - 2 * var(--sp-24)));
+  margin-bottom: 0;
+}
+
+.new-tab-input {
+  height: 56px;
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  box-shadow: var(--shadow-raise);
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.new-tab-sites {
+  margin-top: var(--sp-8);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+
+.new-tab-site {
+  position: relative;
+  padding: var(--sp-8) var(--sp-16);
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.new-tab-site:hover {
+  transform: none;
+}
+
+.new-tab-site.sel {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent) 18%, transparent),
+    color-mix(in srgb, var(--accent) 4%, transparent)
+  );
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.new-tab-site-title {
+  font-weight: 500;
+}
+
+.new-tab-site-host {
+  color: var(--fg-dim);
+}
+
+.new-tab-blank {
+  opacity: 0.7;
+}

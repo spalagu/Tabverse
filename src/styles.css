@@ -1,0 +1,3761 @@
+/* Icon font for prompt glyphs (Powerline separators, Nerd Font icons).
+   Bundled file ONLY — no local() sources: WebKit refuses to render fonts the
+   user installed themselves (font-fingerprinting protection), and a matching
+   local() silently shadows this file, turning every icon into a tofu box. */
+@font-face {
+  font-family: "Tabverse Symbols";
+  src:
+    url("../assets/fonts/nerd-symbols.woff2") format("woff2");
+  font-display: block;
+  /* Icons only. This font sits FIRST in the terminal stack, and the range is
+     what keeps it from capturing text: codepoints outside it skip straight to
+     the real monospace fonts. Codepoints inside it that the font lacks
+     (e.g. Apple's private U+F8FF) still fall through per-glyph. */
+  unicode-range: U+E000-F8FF, U+F0000-F1AF0;
+}
+
+@font-face {
+  font-family: "Tabverse Ligatures";
+  src:
+    url("../assets/fonts/fira-code-ligatures.woff2") format("woff2");
+  font-display: swap;
+}
+
+:root {
+  --sidebar-w: 248px;
+  /* Shared horizontal gutter for every top-level sidebar row and tab. */
+  --sidebar-row-inset: var(--sp-8);
+  --depth: 0;
+  /* The files tree's row depth (FileTree sets it inline per row); zero
+     is the no-guide default the guide rule falls back to. */
+  --tree-depth: 0;
+  --indent: 16px;
+  /* Width the window's own controls take out of our content, at the top
+     left. Only macOS puts them there; elsewhere the system draws them in a
+     title bar of its own and this is zero. Every control that has to clear
+     them measures from here, so the strip is one number, not four. */
+  --window-controls: 0px;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
+    sans-serif;
+  --font-mono: "SF Mono", Menlo, Monaco, "Cascadia Mono", "Tabverse Symbols",
+    monospace;
+}
+
+/* Set from `markPlatform()` before the first paint. Kept as an override on
+   the zero default so a platform we have not named yet reserves nothing —
+   the wrong-way-round failure (a stranded control) is the visible one. */
+:root[data-platform="mac"] {
+  --window-controls: 82px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  /* Loud mode: the ring carries a soft halo so keyboard focus reads at a
+     glance on any surface, light or dark. */
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+input:focus-visible,
+textarea:focus-visible,
+[contenteditable="true"]:focus-visible {
+  outline: none;
+}
+
+/* Users who asked the OS for less motion get it everywhere at once. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* Deep Console interaction layer (2026-08-22 redesign). Three systemic
+   pieces every surface inherits:
+   1. Selection ink follows the accent instead of the browser default.
+   2. Firefox gets the same custom scrollbar palette WebKit has (the
+      property inherits, so one declaration covers every scroller).
+   3. One entrance keyframe for the floating layer family — dialogs, the
+      command bar, menus and panels rise 8px with a soft decelerate. Pure
+      CSS: no JS timing depends on it, and the global reduced-motion rule
+      above flattens it to a fade-in-place. */
+::selection {
+  background: var(--accent-selection);
+}
+
+html {
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+@keyframes layer-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  color: var(--fg);
+  /* Loud-mode canvas: a faint accent wash pools at the top of the frame
+     so the chrome reads as lit from above, not painted flat. */
+  background:
+    radial-gradient(120% 70% at 18% -8%,
+      color-mix(in srgb, var(--accent) 9%, transparent), transparent 62%),
+    var(--bg);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-rows: minmax(0, 1fr);
+  height: 100vh;
+  /* The floating sidebar anchors to this. */
+  position: relative;
+  transition: grid-template-columns var(--dur-std) var(--ease);
+}
+
+/* ---------- sidebar ---------- */
+
+.sidebar {
+  /* Loud-mode sidebar: glass, not paint — the panel tone melts into the
+     canvas wash behind it and a hairline of light caps the edge. */
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--panel) 55%, var(--bg-side)),
+    var(--bg-side) 220px);
+  /* Same reason, one level in: a flex column defaults to never shrinking
+     below its content. */
+  min-height: 0;
+  border-right: 1px solid color-mix(in srgb, var(--accent) 14%, var(--line));
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+.sidebar-head {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--accent) 6%, transparent), transparent);
+}
+
+.sidebar-head {
+  height: 40px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  /* Reserve only the native macOS control strip. The sidebar toggle starts
+     immediately after it; search and new-tab actions use the far edge. */
+  padding: 0 var(--sp-8) 0 max(var(--window-controls), var(--sp-8));
+  justify-content: space-between;
+}
+
+.brand {
+  font-size: var(--fs-base);
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+  flex: 1;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.icon-btn {
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.icon-btn:active {
+  background: var(--bg-active);
+  transform: scale(0.94);
+}
+
+.tab-list {
+  flex: 1;
+  /* Without this the list never scrolls: a flex item defaults to
+     min-height:auto, which means "never smaller than my content", so a
+     long list grows the column instead of overflowing — the scrollbar
+     never appears and the footer is pushed off the bottom. */
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-6) var(--sidebar-row-inset);
+}
+
+.section-label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  padding: var(--sp-6) var(--sidebar-row-inset) var(--sp-4);
+}
+
+.section-sep {
+  height: 1px;
+  background: var(--line);
+  margin: var(--sp-8) var(--sp-6);
+}
+
+.tab-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  height: 30px;
+  padding: 0 var(--sp-6) 0 var(--sidebar-row-inset);
+  border-radius: var(--r-md);
+  color: var(--muted);
+  cursor: default;
+  overflow: hidden;
+  position: relative;
+  /* A tab row is a control, not a document (2026-08-12). Selecting its label
+     puts a text selection under the pointer that the drag then has to fight,
+     and the sidebar's own rule is one inherited override away from being
+     lost — so the row states it, prefixed for WebKit. */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.tab-row {
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.tab-row:hover {
+  background: var(--bg-hover);
+}
+
+.tab-row:active {
+  background: var(--bg-active);
+}
+
+/* Loud-mode selection: the active row is lit, not filled — an accent
+   gradient wash under the label and a glowing edge on the left, so the
+   eye finds the current tab by light before it reads a word. */
+.tab-row.active {
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--accent) 26%, transparent),
+    color-mix(in srgb, var(--accent) 7%, transparent));
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--fg);
+}
+
+.tab-row.co-active {
+  background: var(--bg-hover);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.pw-window {
+  position: fixed;
+  top: 46px;
+  right: 16px;
+  bottom: 16px;
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-dialog);
+  z-index: calc(var(--z-overlay) + 9);
+  overflow: hidden;
+  animation: layer-in var(--dur-express) var(--ease-express);
+}
+
+.pw-window-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-8) var(--sp-8);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-side);
+}
+
+.pw-filter {
+  flex: 1;
+  height: 26px;
+  padding: 0 var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-side);
+  color: var(--fg);
+  font-size: var(--fs-base);
+}
+
+.pw-count {
+  flex: none;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.pw-window-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-4) var(--sp-8) var(--sp-12);
+}
+
+.pw-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 150px auto;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-4) var(--sp-6);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+}
+
+.pw-row:nth-child(odd) {
+  background: var(--bg-side);
+}
+
+.pw-row:hover {
+  background: var(--bg-hover);
+}
+
+.pw-host {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+.pw-user {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.pw-secret {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+
+.pw-secret.masked {
+  color: var(--muted);
+  letter-spacing: 2px;
+}
+
+.pw-row-actions {
+  display: flex;
+  gap: var(--sp-4);
+  justify-content: flex-end;
+}
+
+.btn-row {
+  display: flex;
+  gap: var(--sp-8);
+  margin-bottom: var(--sp-8);
+}
+
+/* Picked out to be moved, which is not the same as being the tab you are
+   looking at — an outline rather than a fill, so both can show at once. */
+.tab-row.selected {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+  color: var(--fg);
+}
+
+/* What the cursor carries when a drag is moving several rows; parked off
+   screen because the browser only needs to photograph it. */
+.drag-ghost {
+  position: fixed;
+  top: -1000px;
+  left: -1000px;
+  padding: var(--sp-4) var(--sp-8);
+  border-radius: var(--r-md);
+  background: var(--accent);
+  color: var(--surface-paper);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.tab-row.exited .tab-title {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.tab-icon {
+  flex: none;
+  opacity: 0.9;
+}
+
+.tab-title {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--fs-base);
+}
+
+.tab-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.tab-row:hover .tab-close {
+  opacity: 1;
+}
+
+.tab-close:hover {
+  background: color-mix(in srgb, var(--danger) 15%, transparent);
+  color: var(--danger);
+}
+
+.newtab-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  width: 100%;
+  height: 30px;
+  margin-top: var(--sp-4);
+  padding: 0 var(--sp-8);
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.newtab-row:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.newtab-row:active {
+  background: var(--bg-active);
+  transform: scale(0.99);
+}
+
+.newtab-row span {
+  flex: 1;
+  text-align: left;
+}
+
+kbd {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  background: var(--bg-hover);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-4);
+}
+
+.sidebar-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-8) var(--sp-12);
+  border-top: 1px solid var(--line);
+}
+
+.sidebar-foot .icon-btn {
+  position: relative;
+}
+
+.background-task-badge {
+  position: absolute;
+  top: -5px;
+  right: -7px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+.version {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+/* The whole-app share door in the sidebar foot: a tab's share button in
+   paint, but always visible — the tab-row variant is hover-gated
+   (.tab-share), and a door you must hover to find is not a door. */
+.app-share-btn {
+  color: var(--muted);
+}
+
+.app-share-btn.on {
+  color: var(--accent);
+}
+
+/* ---------- content ---------- */
+
+.content {
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /* Loud mode: the frame around the panes is the deep canvas, so each
+     pane's own surface reads as a sheet laid into it. Panes paint
+     themselves (term-pane/browser-pane/files-view); the native shell
+     overrides this to transparent further down and is untouched. */
+  background: var(--bg);
+}
+
+/* Panes keep their own stacking context; the strip above is outside it. */
+.panes {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.pane {
+  position: absolute;
+  inset: 0;
+}
+
+.pane-hidden {
+  display: none;
+}
+
+
+/* A split pane's left/width arrive inline (they carry the ratio); the
+   divider strip between them keeps 6px of DOM-owned pixels, since each
+   pane holds 3px back from the seam. */
+.split-pane {
+  /* Beats the .pane inset's right:0 so the inline width is the width. */
+  right: auto;
+}
+
+.split-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: var(--z-sticky);
+  background: var(--line);
+  background-clip: content-box;
+  padding: 0 var(--sp-2);
+}
+
+.split-divider.vertical {
+  top: auto;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 6px;
+  cursor: row-resize;
+  padding: var(--sp-2) 0;
+}
+
+.split-divider:hover {
+  /* A whisper, not a shout: the seam answers the pointer without
+     painting a full-height bar across two live panes. */
+  background-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+
+.peek-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: calc(var(--z-overlay) + 4);
+  background: var(--scrim);
+}
+
+/* The overlay slot: centered, ~84% × 88% of the pane. overflow:visible so the
+   round action buttons can sit just outside its top-right edge. */
+.pane.peek-pane {
+  top: 6%;
+  bottom: 6%;
+  left: 8%;
+  right: 8%;
+  z-index: calc(var(--z-overlay) + 6);
+  overflow: visible;
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-dialog);
+  animation: layer-in var(--dur-express) var(--ease-express);
+}
+
+.peek-actions {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 10px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-8);
+  z-index: calc(var(--z-overlay) + 7);
+}
+
+.peek-btn {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg-side);
+  color: var(--fg);
+  box-shadow: var(--shadow-raise);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.peek-btn:active {
+  transform: scale(0.92);
+}
+
+.peek-btn:hover {
+  background: var(--bg-active);
+  color: var(--accent);
+}
+
+.pane.peek-pane {
+  background: var(--term-bg);
+}
+
+/* The peek's preview matrix: the same column flex the files main uses, so
+   every viewer (centered image, hex dump, document) lays out as it does in
+   a full files tab, in the smaller window. */
+.file-peek {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.file-peek-center {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-16);
+}
+
+
+/* The ring is its own element on the CELL rectangle, and the page is placed
+   from the cell minus this band (see paneLayout in TabContent.tsx). Nothing
+   here depends on padding: the previous version reserved the band with
+   `padding` on the pane, which an absolutely positioned page ignores — so the
+   page covered the ring and it was never once visible. */
+.split-focus-ring {
+  position: absolute;
+  border: 2px solid var(--accent);
+  border-radius: var(--r-sm);
+  pointer-events: none;
+  z-index: calc(var(--z-overlay) + 2);
+}
+
+/* The pane's controls: Arc's floating buttons at the top-right of the pane,
+   shown while the pointer is in that corner (the page reports arriving; this
+   document hears the leaving, because by then its layer is on top). The box is
+   deliberately larger than the buttons so the hand has somewhere to travel. */
+.pane-actions {
+  position: absolute;
+  pointer-events: none;
+  z-index: calc(var(--z-overlay) + 3);
+}
+
+.pane-actions-row {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  display: flex;
+  gap: var(--sp-6);
+  padding: var(--sp-4);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--bg-side) 88%, transparent);
+  box-shadow: var(--shadow-raise);
+  pointer-events: auto;
+}
+
+.pane-btn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.pane-btn:hover {
+  background: var(--bg-active);
+  color: var(--accent);
+}
+
+.pane-btn:active {
+  transform: scale(0.92);
+}
+
+
+.split-menu {
+  position: absolute;
+  top: 44px;
+  right: 10px;
+  /* The box around the buttons lets the pointer through so the page keeps it;
+     the menu itself must take clicks. */
+  pointer-events: auto;
+  min-width: 210px;
+  padding: var(--sp-6);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-panel);
+  z-index: calc(var(--z-overlay) + 8);
+  animation: menu-in var(--dur-std) var(--ease-express);
+  transform-origin: top right;
+}
+
+/* No left-hand variant any more (2026-08-12 feedback 5). It dated from the
+   chrome BAR, whose button sat at the pane's left for the first pane; the
+   controls now always float at the pane's top-right, so a menu anchored to
+   the cell's left edge simply appeared in the wrong place — on the first pane
+   only, which is exactly what was reported. The menu hangs under the buttons
+   that opened it, whichever pane that is. */
+
+.tab-row.split-drop-left,
+.tab-row.split-drop-right {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  border-radius: var(--r-md);
+}
+
+.tab-row.split-drop-left::after,
+.tab-row.split-drop-right::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  width: 46%;
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  pointer-events: none;
+}
+
+.tab-row.split-drop-left::after {
+  left: 2px;
+}
+
+.tab-row.split-drop-right::after {
+  right: 2px;
+}
+
+
+/* Two split tabs draw as one row: two halves and a thin seam, each half its
+   own icon and title, clicking one focusing that pane. */
+.tab-row.split-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 0 var(--sp-6) 0 var(--sidebar-row-inset);
+  overflow: hidden;
+}
+
+.split-half-row {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  min-width: 0;
+  padding: 0 var(--sp-6);
+  border-radius: var(--r-md);
+  color: var(--muted);
+  cursor: default;
+}
+
+.split-half-row:hover {
+  background: var(--bg-hover);
+}
+
+/* The focus half wears the primary highlight; the companion half stays
+   quiet — which side is focused is read at a glance. */
+.split-half-row.active {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+
+.split-half-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.split-row-seam {
+  flex: none;
+  width: 1px;
+  align-self: center;
+  height: 16px;
+  background: var(--line);
+  margin: 0 var(--sp-4);
+}
+
+
+.split-dropzone {
+  position: absolute;
+  inset: 0;
+  z-index: calc(var(--z-overlay) + 8);
+}
+
+.split-drop-slot {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  transform: translateX(-50%);
+  border-radius: var(--r-lg);
+  border: 2px dashed transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.split-dropzone.vertical .split-drop-slot {
+  top: auto;
+  bottom: auto;
+  left: 8px;
+  right: 8px;
+  transform: translateY(-50%);
+}
+
+.split-drop-slot.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.split-drop-label {
+  font-size: var(--fs-sm);
+  color: var(--fg);
+  background: var(--bg-side);
+  padding: var(--sp-4) var(--sp-8);
+  border-radius: var(--r-pill);
+  white-space: nowrap;
+  box-shadow: var(--shadow-raise);
+}
+
+.tab-remote-badge {
+  flex: none;
+  max-width: 10ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--remote-edge);
+  border: 1px solid var(--remote-edge);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-xs);
+  line-height: 14px;
+  padding: 0 var(--sp-4);
+}
+
+/* A profile badge on the sidebar row, beside the subtitle: the same
+   profileBadgeVar colour source the pane corner uses. */
+.tab-profile-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.tab-subtitle-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+
+/* The footer trigger is at the lower-left of the sidebar. Its menu is
+   positioned with `bottom`, so the animation grows upward into the window. */
+.foot-menu {
+  transform-origin: bottom left;
+}
+
+.placeholder {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-8);
+  color: var(--muted);
+}
+
+.placeholder-icon {
+  opacity: 0.5;
+}
+
+.placeholder-title {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.placeholder-blurb {
+  font-size: var(--fs-base);
+  max-width: 360px;
+  text-align: center;
+  line-height: var(--lh-relaxed);
+}
+
+/* ---------- overlays ---------- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim-heavy);
+  /* Deep Console: the scrim frosts what it dims, lifting the dialog
+     without brightening the room. Scoped to overlays only — full-page
+     blur is a cost we do not pay anywhere else. */
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 18vh;
+  z-index: var(--z-dialog);
+}
+
+.newtab-menu {
+  width: 380px;
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-dialog);
+  padding: var(--sp-8);
+  animation: layer-in var(--dur-express) var(--ease-express);
+}
+
+.newtab-menu-title {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  padding: var(--sp-8) var(--sp-8) var(--sp-6);
+}
+
+.newtab-option {
+  gap: var(--sp-12);
+  padding: var(--sp-8);
+  border-radius: var(--r-md);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  cursor: pointer;
+}
+
+.newtab-option {
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.newtab-option:hover {
+  background: var(--bg-active);
+}
+
+.newtab-option:active {
+  transform: scale(0.98);
+}
+
+.newtab-label {
+  gap: var(--sp-2);
+}
+
+.newtab-hint {
+  font-size: var(--fs-xs);
+}
+
+/* ---------- groups, drag, context menu, switcher ---------- */
+
+.tab-row.indent {
+  margin-left: calc(var(--depth) * var(--indent));
+}
+
+.tab-row.drop-before {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.tab-row.attention .tab-title {
+  color: var(--fg);
+}
+
+.tab-broadcast-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+  flex: none;
+}
+
+.attention-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.tab-rename {
+  flex: 1;
+  min-width: 0;
+  background: var(--term-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  padding: var(--sp-2) var(--sp-4);
+}
+
+.tab-rename:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.group-block {
+  margin: var(--sp-2) 0;
+}
+
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  height: 26px;
+  padding: 0 var(--sp-6) 0 var(--sidebar-row-inset);
+  margin: var(--sp-2) 0;
+  margin-left: calc(var(--depth) * var(--indent));
+  border-left: 2px solid transparent;
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.group-head:hover {
+  background: var(--bg-hover);
+}
+
+.group-folder {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+}
+
+.group-name {
+  flex: 1;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-head .loading-state-inline {
+  padding: 0;
+  white-space: nowrap;
+}
+
+.group-count {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.sort-menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-overlay) - 1);
+}
+
+.ctx-menu {
+  position: fixed;
+  z-index: var(--z-toast);
+  width: 210px;
+  padding: var(--sp-6);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-panel);
+  animation: menu-in var(--dur-std) var(--ease-spring);
+  transform-origin: top left;
+}
+
+.ctx-title {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  padding: var(--sp-4) var(--sp-8) var(--sp-6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ctx-label {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--muted);
+  padding: var(--sp-6) var(--sp-8) var(--sp-2);
+}
+
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  width: 100%;
+  padding: var(--sp-6) var(--sp-8);
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.ctx-item:hover {
+  background: var(--bg-active);
+}
+
+.ctx-item:active {
+  transform: scale(0.98);
+}
+
+.ctx-item.on {
+  color: var(--accent);
+}
+
+.ctx-item.danger:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+.ctx-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.ctx-sep {
+  height: 1px;
+  background: var(--line);
+  margin: var(--sp-4) var(--sp-4);
+}
+
+.ctx-input {
+  width: 100%;
+  background: var(--term-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  padding: var(--sp-4) var(--sp-8);
+}
+
+.ctx-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.switcher {
+  width: 520px;
+  max-width: calc(100vw - 40px);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-dialog);
+  overflow: hidden;
+  animation: layer-in var(--dur-express) var(--ease-express);
+}
+
+.switcher-input {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  padding: var(--sp-12) var(--sp-16);
+}
+
+.switcher-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.switcher-list {
+  max-height: 340px;
+  overflow-y: auto;
+  padding: var(--sp-6);
+}
+
+.switcher-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  width: 100%;
+  padding: var(--sp-8) var(--sp-8);
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
+}
+
+.switcher-row.sel {
+  background: var(--bg-active);
+}
+
+.switcher-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switcher-group,
+.switcher-pin {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.switcher-empty {
+  padding: var(--sp-16);
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--fs-base);
+}
+
+/* ---------- share / dialogs ---------- */
+
+.tab-share {
+  flex: none;
+  display: none;
+  align-items: center;
+  gap: var(--sp-4);
+  height: 20px;
+  padding: 0 var(--sp-4);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.tab-row:hover .tab-share,
+.tab-row.active .tab-share {
+  display: inline-flex;
+}
+
+.tab-share.on {
+  display: inline-flex;
+  color: var(--ok);
+}
+
+.tab-share:hover {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+
+.tab-share.on:hover {
+  color: var(--ok);
+}
+
+.share-count {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+}
+
+.tab-audio {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 var(--sp-4);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.tab-audio.muted {
+  color: var(--muted);
+}
+
+.tab-audio:hover {
+  background: var(--bg-hover);
+}
+
+.viewers-badge {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  border-radius: var(--r-pill);
+  padding: var(--sp-2) var(--sp-6);
+}
+
+.dialog {
+  width: 460px;
+  max-width: calc(100vw - 40px);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-dialog);
+  padding: var(--sp-16);
+  animation: layer-in var(--dur-express) var(--ease-express);
+}
+
+.dialog-title {
+  font-size: var(--fs-md);
+  font-weight: 700;
+  margin-bottom: var(--sp-8);
+}
+
+.dialog-text {
+  font-size: var(--fs-base);
+  color: var(--muted);
+  line-height: var(--lh-relaxed);
+  margin: 0 0 var(--sp-12);
+}
+
+.dialog-text b {
+  color: var(--fg);
+}
+
+.dialog-error {
+  font-size: var(--fs-sm);
+  color: var(--danger);
+  margin: var(--sp-8) 0;
+}
+
+.ticket-area {
+  width: 100%;
+  resize: none;
+  background: var(--term-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-normal);
+  padding: var(--sp-12);
+  word-break: break-all;
+}
+
+.ticket-area:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.dialog-actions {
+  display: flex;
+  gap: var(--sp-8);
+  margin-top: var(--sp-12);
+}
+
+.btn {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-hover);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  padding: var(--sp-8) var(--sp-12);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    filter var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.btn:hover {
+  background: var(--bg-active);
+}
+
+.btn:active {
+  transform: scale(0.98);
+  filter: brightness(0.94);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--term-bg);
+  font-weight: 600;
+}
+
+.btn.primary:hover {
+  filter: brightness(1.08);
+}
+
+.btn.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.segmented-btn {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  padding: var(--sp-6) var(--sp-12);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.segmented-btn + .segmented-btn {
+  border-left: 1px solid var(--line);
+}
+
+.segmented-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.segmented-btn:active {
+  background: var(--bg-active);
+}
+
+.segmented-btn.active {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+
+/* ---------- files tab ---------- */
+
+.tree-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  height: 34px;
+  padding: 0 var(--sp-8);
+  border-bottom: 1px solid var(--line);
+}
+
+.crumb-path {
+  flex: 1;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Same LRI/PDI contract as .bb-cwd. */
+  direction: rtl;
+  text-align: left;
+}
+
+.tree-error,
+.files-error {
+  font-size: var(--fs-sm);
+  color: var(--danger);
+  padding: var(--sp-6) var(--sp-8);
+  word-break: break-word;
+}
+
+.error-state {
+  font-size: var(--fs-sm);
+  word-break: break-word;
+}
+
+.error-state-inline {
+  border-left: 3px solid var(--danger);
+  padding: var(--sp-6) var(--sp-8);
+}
+
+.error-state-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-8);
+  max-width: 360px;
+  margin: 0 auto;
+  padding: var(--sp-24);
+  text-align: center;
+}
+
+.error-state-block .error-state-icon {
+  color: var(--danger);
+}
+
+.error-state-title {
+  margin: 0;
+  color: var(--fg);
+}
+
+.error-state-inline .error-state-title {
+  color: var(--danger);
+}
+
+.error-state-next {
+  color: var(--muted);
+}
+
+.error-state-block .error-state-next {
+  margin: 0;
+}
+
+.error-details {
+  margin-top: var(--sp-4);
+  font-size: var(--fs-xs);
+  color: var(--fg-dim);
+}
+
+.error-details summary {
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.error-details pre {
+  margin: var(--sp-4) 0 0;
+  max-height: 160px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  text-align: left;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-8);
+  max-width: 360px;
+  margin: 0 auto;
+  padding: var(--sp-24);
+  text-align: center;
+}
+
+.empty-state-icon {
+  color: var(--muted);
+}
+
+.empty-state-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--fs-md);
+}
+
+.empty-state-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+}
+
+.empty-state-kbd {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0 var(--sp-4);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.files-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  height: 28px;
+  padding: 0 var(--sp-8);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.mini-btn {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-hover);
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  padding: var(--sp-4) var(--sp-8);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.mini-btn:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--bg-active);
+}
+
+.mini-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.mini-btn.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.mini-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---------- scrollbars ---------- */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: var(--r-sm);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ---------- browser tab ---------- */
+
+.browser-pane {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--term-bg);
+}
+
+.browser-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  height: 36px;
+  padding: 0 var(--sp-8);
+  background: var(--bg-side);
+  border-bottom: 1px solid var(--line);
+}
+
+.browser-address {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  background: var(--term-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  padding: 0 var(--sp-12);
+}
+
+.browser-address:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.findbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-6) var(--sp-8);
+  background: var(--bg-side);
+  border-bottom: 1px solid var(--line);
+}
+
+.findbar-input {
+  width: 260px;
+  height: 24px;
+  background: var(--term-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  padding: 0 var(--sp-8);
+}
+
+.findbar-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.findbar-count {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.findbar-scope {
+  font-family: var(--font-ui);
+}
+
+.findbar-hints {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+:root[data-shell="native"] body,
+/* .content paints --term-bg for the panes that need it; a browser pane's own
+   pixels belong to a page behind this document, so the container must not
+   paint them. Non-browser panes below take that surface back. */
+:root[data-shell="native"] .content {
+  background: transparent;
+}
+:root[data-shell="native"] .pane {
+  background: var(--bg);
+}
+/* The slot's hint text belongs to an EMPTY slot. Now that this document can
+   be ordered above a live page, it would float over the page itself. */
+:root[data-shell="native"] .pane.pane-browser .browser-hint {
+  display: none;
+}
+:root[data-shell="native"] .pane.pane-browser,
+:root[data-shell="native"] .pane.pane-browser .browser-pane,
+:root[data-shell="native"] .pane.pane-browser .browser-slot {
+  background: transparent;
+}
+/* The new-tab page is DOM, not a page — the Workbench stylesheet keeps its
+   own surface, so native shell transparency needs no exception here. */
+
+.browser-slot {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-paper-fg);
+  position: relative;
+}
+
+.page-freeze {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  object-fit: fill;
+  z-index: calc(var(--z-base) + 1);
+}
+
+.browser-hint {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  opacity: 0.4;
+}
+
+/* ---------- settings ---------- */
+
+/* The page is the scroll container (inset-0 + overflow-y), which is what
+   the section rail sticks against and what "which section am I on" is
+   measured in. Wider than the 760px the prose column had to itself: the
+   rail takes a column of its own, and the reading column keeps its width
+   rather than being narrowed to pay for it. */
+.settings-view {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  padding: var(--sp-24) var(--sp-24) 48px;
+  max-width: 964px;
+}
+
+.settings-view h2 {
+  font-size: var(--fs-xl);
+  margin: 0 0 var(--sp-16);
+}
+
+
+/* Above the section rail and outside it, because neither banner belongs to
+   a section: they are about the file every section is read from. */
+.settings-banner {
+  border-radius: var(--r-md);
+  padding: var(--sp-12);
+  margin: 0 0 var(--sp-16);
+  font-size: var(--fs-base);
+  line-height: var(--lh-relaxed);
+}
+
+.settings-banner.danger {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+}
+
+.settings-banner.warn {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+}
+
+.settings-banner-title {
+  font-weight: 600;
+  margin: 0 0 var(--sp-4);
+}
+
+/* The banners sit inside .settings-view, whose paragraph rule paints every
+   <p> muted — which would grey out the sentence that says what is wrong. */
+.settings-view .settings-banner p {
+  color: inherit;
+}
+
+/* The parser's own report, kept as laid out: the caret line only points at
+   the right column in a monospaced face, and a long source line scrolls
+   inside the banner rather than widening the page. */
+.settings-banner-detail {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  white-space: pre;
+  overflow-x: auto;
+  margin: var(--sp-8) 0;
+  padding: var(--sp-8);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+
+.settings-banner-list {
+  margin: 0 0 var(--sp-8);
+  padding-left: var(--sp-16);
+}
+
+
+.settings-layout {
+  display: grid;
+  /* minmax(0, 1fr) rather than 1fr: the reading column holds tables and
+     <code> that would otherwise push the grid wider than the page. */
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: var(--sp-24);
+  align-items: start;
+}
+
+.settings-nav {
+  position: sticky;
+  top: 0;
+  align-self: start;
+}
+
+.settings-nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.settings-nav-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  padding: var(--sp-4) var(--sp-8);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.settings-nav-item:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.settings-nav-item.active {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+
+/* Rail family captions: eighteen sections read as six families, each
+   caption a hairline-separated small-caps line above its first entry.
+   A list item of its own — announced with the list, never focusable. */
+.settings-nav-group {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  padding: var(--sp-6) var(--sp-8) var(--sp-2);
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+.settings-nav ul li:first-child,
+.settings-nav-group:first-child {
+  border-top: none;
+}
+
+/* The first heading would otherwise start a section-gap below the rail's
+   first entry, so the two columns would not line up at the top. */
+.settings-sections > section:first-child > h3 {
+  margin-top: 0;
+}
+
+/* Programmatic scrolling lands the heading flush against the top edge
+   without this. The slot is the wrapper the one externally-rendered section
+   (User scripts) is hidden by, so it has to answer to the same rules as a
+   bare section or that one section would scroll to a different place. */
+.settings-sections > section,
+.settings-sections > .settings-section-slot > section {
+  scroll-margin-top: var(--sp-8);
+}
+
+
+/* Four lists under one heading: the subsection titles are waymarks between
+   tables, not section titles, so they take the muted small caps the ⌘/
+   overlay's groups use rather than another weight of the page's own h3. */
+.settings-sections h4 {
+  margin: var(--sp-12) 0 var(--sp-4);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+
+.settings-danger {
+  border-left: 2px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  padding-left: var(--sp-12);
+}
+
+.settings-danger > h3 {
+  color: var(--danger);
+}
+
+
+.settings-search {
+  margin: 0 0 var(--sp-16);
+}
+
+/* Spans the page rather than taking the template input's 420px: it filters
+   both columns, and a short box floating over a wide page reads as
+   belonging to whatever section is under it. */
+.settings-search-input {
+  width: 100%;
+  margin-top: 0;
+  height: 30px;
+}
+
+.settings-sections > section[hidden],
+.settings-sections > .settings-section-slot[hidden] {
+  display: none;
+}
+
+/* The row a search matched. A ring rather than a fill: these controls carry
+   their own backgrounds, and repainting one would say something about its
+   state instead of about the search. */
+.settings-hit {
+  border-radius: var(--r-md);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.settings-search-empty {
+  font-size: var(--fs-base);
+  line-height: var(--lh-relaxed);
+  color: var(--muted);
+  margin: 0 0 var(--sp-16);
+}
+
+
+.keyboard-lookup {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-8);
+  flex-wrap: wrap;
+  margin: 0 0 var(--sp-8);
+}
+
+/* The verdict under a recorded key, and the answer under the lookup. Muted
+   like the rest of this page's explanatory prose: it is information, not an
+   alarm — a conflict is refused by the disabled button beside it, and
+   colouring the sentence red as well would say it twice. */
+.keyboard-verdict {
+  font-size: var(--fs-sm);
+  line-height: var(--lh-relaxed);
+  color: var(--muted);
+}
+
+.keyboard-verdict p {
+  margin: 0;
+}
+
+.keyboard-recorder {
+  margin-top: var(--sp-6);
+  display: grid;
+  gap: var(--sp-4);
+}
+
+/* A shortcut row the search matched. The ring `.settings-hit` draws is not
+   painted on a row of a collapsed-border table, so the same fact is shown
+   here as a wash of the same accent — one appearance for "this is the
+   answer", two ways of drawing it. */
+tr.settings-hit td {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* The buttons column sits against the right edge of the table and never
+   wraps under the label: `table.kv td` is top-aligned, so a row whose
+   verdict is three lines long keeps its buttons beside the first one. */
+.keyboard-actions {
+  width: 1%;
+  white-space: nowrap;
+  text-align: right;
+}
+
+
+.settings-changed {
+  margin: 0 0 var(--sp-16);
+}
+
+.settings-changed-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-8);
+  font-size: var(--fs-base);
+  line-height: var(--lh-normal);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+/* The two paragraphs sit inside .settings-view, whose <p> rule already
+   paints them muted; only the spacing is theirs. */
+.settings-changed-blurb,
+.settings-changed-empty {
+  margin: var(--sp-8) 0 0;
+}
+
+.settings-changed-list {
+  list-style: none;
+  margin: var(--sp-8) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.settings-changed-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-8);
+  border-radius: var(--r-md);
+  background: var(--bg-hover);
+}
+
+/* The title takes the slack so every reset button lines up down the right
+   edge; min-width lets a long one ellipsize rather than push them apart. */
+.settings-changed-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-base);
+  line-height: var(--lh-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-changed-key {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* With the filter on, the page is the list above it: the rail and every
+   section leave the layout rather than being dimmed — the same reason the
+   search hides its sections outright, and the reading column takes the
+   width the rail gives up. */
+.settings-layout.only-changed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.settings-layout.only-changed .settings-nav,
+.settings-layout.only-changed .settings-sections > section,
+.settings-layout.only-changed .settings-sections > .settings-section-slot {
+  display: none;
+}
+
+/* Too narrow for two columns: the rail becomes a strip above the page that
+   scrolls sideways, rather than eating the reading column. */
+@media (max-width: 720px) {
+  .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--sp-12);
+  }
+
+  .settings-nav {
+    position: static;
+    overflow-x: auto;
+  }
+
+  .settings-nav ul {
+    flex-direction: row;
+    gap: var(--sp-4);
+  }
+
+  .settings-nav-item {
+    width: auto;
+    white-space: nowrap;
+  }
+}
+
+.settings-view h3 {
+  font-size: var(--fs-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  margin: var(--sp-24) 0 var(--sp-8);
+}
+
+.settings-view p {
+  color: var(--muted);
+  font-size: var(--fs-base);
+  line-height: var(--lh-relaxed);
+  margin: 0 0 var(--sp-8);
+}
+
+.settings-view code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  background: var(--bg-hover);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-4);
+}
+
+table.kv {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--fs-base);
+}
+
+table.kv td {
+  border-bottom: 1px solid var(--line);
+  padding: var(--sp-6) var(--sp-8) var(--sp-6) 0;
+  vertical-align: top;
+}
+
+table.kv td:first-child {
+  width: 170px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
+/* Brief confirmation on copy buttons. */
+.mini-btn.ok-flash {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.dialog-warn {
+  font-size: var(--fs-sm);
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  border-radius: var(--r-md);
+  padding: var(--sp-8) var(--sp-8);
+}
+
+
+.tab-favicon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--r-sm);
+  object-fit: contain;
+}
+
+/* ---------- browser: command bar, progress ---------- */
+
+.cmdbar {
+  width: 560px;
+  max-width: calc(100vw - 40px);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-dialog);
+  padding: var(--sp-12);
+  animation: layer-in var(--dur-express) var(--ease-express);
+}
+
+.cmdbar-input {
+  width: 100%;
+  height: 40px;
+  background: var(--term-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-lg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-lg);
+  padding: 0 var(--sp-12);
+}
+
+.cmdbar-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.cmdbar-hints {
+  display: flex;
+  gap: var(--sp-12);
+  padding: var(--sp-8) var(--sp-4) 0;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.browser-progress {
+  flex: none;
+  height: 2px;
+  background: transparent;
+  overflow: visible;
+  position: relative;
+  z-index: var(--z-sticky);
+}
+
+/* The comet, quieted: tail fades in from the page's own ground, core is
+   the accent, head runs hot. Width comes inline from browserProgress.ts —
+   a function of what the page said, never of a clock. */
+.browser-progress-band {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  border-radius: var(--r-pill);
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--progress-tail) 0%, transparent) 0%,
+    var(--progress-core) 55%,
+    var(--progress-head) 100%
+  );
+  opacity: 1;
+  transition:
+    width var(--dur-slow) var(--ease),
+    opacity var(--dur-slow) var(--ease);
+}
+
+/* One restrained glow — near and tight. The old triple drop-shadow plus
+   the flowing streak read as neon; a single blur says "working" without
+   shouting over the page that is loading. */
+.browser-progress-band.glow {
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--progress-core) 70%, transparent));
+}
+
+/* prefers-reduced-motion: a plain solid hairline. No glow at all. */
+.browser-progress-band.plain {
+  background-image: none;
+  background-color: var(--accent);
+  filter: none;
+}
+
+/* The completed band leaves: it sprints to 100% first (the width
+   transition), holds, then the whole thing fades. The timings are the same
+   motion token browserProgress.ts reads, so the element is unmounted at the
+   moment it becomes invisible rather than before or after. */
+.browser-progress-band.fading {
+  opacity: 0;
+}
+
+
+/* In normal flow like the find bar: the page must stay visible while the
+   user decides, so the slot shrinks instead of the webview parking. */
+.pwbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-6) var(--sp-12);
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-base);
+}
+.pwbar-text {
+  opacity: 0.9;
+}
+.pwbar button {
+  font-size: var(--fs-sm);
+  padding: var(--sp-4) var(--sp-8);
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.pwbar button.primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--surface-paper);
+}
+.pw-table {
+  border-collapse: collapse;
+  font-size: var(--fs-base);
+}
+.pw-table td {
+  padding: var(--sp-4) var(--sp-12) var(--sp-4) 0;
+  border-bottom: 1px solid var(--border);
+}
+.pw-empty {
+  opacity: 0.7;
+}
+
+.auth-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-8);
+  min-width: 360px;
+}
+.auth-title {
+  font-size: var(--fs-md);
+}
+.auth-realm {
+  font-size: var(--fs-sm);
+  opacity: 0.75;
+}
+.auth-failed {
+  font-size: var(--fs-sm);
+  color: var(--danger);
+}
+.auth-save {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  font-size: var(--fs-base);
+  opacity: 0.9;
+}
+.auth-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-8);
+}
+.auth-actions button {
+  font-size: var(--fs-base);
+  padding: var(--sp-4) var(--sp-12);
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.auth-actions button.primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--surface-paper);
+}
+
+/* The page's own words, kept visually distinct from the app's chrome and
+   wrapped: a page controls this text and can make it long. */
+.page-dialog-message {
+  font-size: var(--fs-base);
+  line-height: var(--lh-normal);
+  max-height: 40vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.92;
+}
+
+/* Full pane, not a strip: the page behind it must not look reachable while
+   the user decides, and the native webview parks so this is all there is. */
+.cert-block {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-12);
+  align-items: flex-start;
+  justify-content: center;
+  padding: 0 12% 6%;
+}
+.cert-block-title {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+}
+.cert-block-body {
+  font-size: var(--fs-base);
+  line-height: var(--lh-relaxed);
+  max-width: 62ch;
+  opacity: 0.92;
+}
+.cert-block-actions {
+  display: flex;
+  gap: var(--sp-8);
+}
+.cert-block-actions button {
+  font-size: var(--fs-base);
+  padding: var(--sp-6) var(--sp-16);
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+/* The unsafe path stays available but never looks like the default one. */
+.cert-block-actions button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.cert-block-note {
+  font-size: var(--fs-sm);
+  opacity: 0.65;
+  max-width: 62ch;
+}
+
+/* Two lines per row: the title, and what the title cannot say. */
+.tab-lines {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.tab-subtitle {
+  font-size: var(--fs-xs);
+  opacity: 0.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* keep the meaningful tail of a path visible */
+  text-align: left;
+}
+
+/* Where a drop would land, answered before the mouse is released. */
+.group-head.dropping {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.group-tail-drop {
+  height: 8px;
+  margin: -2px 0;
+  margin-left: calc(var(--depth) * var(--indent));
+  border-radius: var(--r-sm);
+}
+
+.group-tail-drop.dropping {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.tab-list.list-dropping {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* The right edge, wide enough to hit without being visible. */
+.sidebar-resize {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: var(--z-overlay);
+}
+
+.sidebar {
+  position: relative;
+}
+
+/* The only way back to a hidden sidebar, floating clear of the window's own
+   controls rather than in a strip of its own. */
+.reveal-sidebar {
+  position: absolute;
+  top: 7px;
+  left: calc(max(var(--window-controls), 8px) + 6px);
+  z-index: calc(var(--z-overlay) + 1);
+  width: 26px;
+  height: 24px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--bg-side);
+  color: inherit;
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-tight);
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.sidebar-toggle {
+  position: fixed;
+  top: 8px;
+  left: calc(max(var(--window-controls), 8px) + 2px);
+  z-index: calc(var(--z-overlay) + 4);
+  width: 24px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.sidebar-toggle:hover {
+  background: var(--hover-veil);
+  color: inherit;
+}
+
+.ctx-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Bare buttons in the page-dialog family (pwbar, auth, certificate) share
+   the press language of .btn without inheriting its palette: transparent
+   rest, veil hover, a real press. */
+.pwbar button,
+.auth-actions button,
+.cert-block-actions button {
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.pwbar button:hover,
+.auth-actions button:hover,
+.cert-block-actions button:hover {
+  background: var(--hover-veil);
+}
+
+.pwbar button:active,
+.auth-actions button:active,
+.cert-block-actions button:active {
+  transform: scale(0.98);
+}
+
+/* Pinned it holds a column; unpinned it leaves and comes back over the
+   content. Both directions animate, because a panel that teleports reads
+   as a glitch rather than a choice. */
+.sidebar {
+  transition: transform var(--dur-std) var(--ease), width var(--dur-std) var(--ease);
+}
+
+.sidebar.floating {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: calc(var(--z-overlay) + 6);
+  transform: translateX(-100%);
+  box-shadow: var(--shadow-panel);
+}
+
+.sidebar.floating.peeking {
+  transform: translateX(0);
+}
+
+/* The strip that calls it back — narrow enough never to be in the way. */
+.sidebar-peek-zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 10px;
+  z-index: calc(var(--z-overlay) + 5);
+  cursor: default;
+}
+
+.ctx-kbd {
+  margin-left: var(--sp-8);
+  opacity: 0.55;
+  font-size: var(--fs-xs);
+}
+
+/* The toggle is the left action; search and new-tab form the right action
+   group. Both groups share the same center line as the native controls. */
+.sidebar-head-left,
+.sidebar-head-right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.sidebar-head-left {
+  padding: 0;
+  background: transparent;
+}
+
+.sidebar-head-right {
+  margin-left: auto;
+}
+
+/* Exactly the strip the system draws its window buttons in, kept clear of
+   our own drag handling. Collapses to nothing where the system draws them
+   somewhere else, so it cannot swallow clicks meant for our own controls. */
+.traffic-light-zone {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--window-controls);
+  height: 40px;
+}
+
+.switcher-hints {
+  display: flex;
+  gap: var(--sp-12);
+  padding: var(--sp-8) var(--sp-12);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-xs);
+  opacity: 0.55;
+}
+
+
+.confirm-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-toast);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--scrim);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+}
+
+.confirm-box {
+  width: min(420px, calc(100vw - 48px));
+  padding: var(--sp-16);
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  background: var(--bg);
+  box-shadow: var(--shadow-dialog);
+  animation: layer-in var(--dur-express) var(--ease-express);
+}
+
+.confirm-text {
+  margin: 0 0 var(--sp-12);
+  font-size: var(--fs-base);
+  line-height: var(--lh-normal);
+  color: var(--fg);
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-8);
+}
+
+.migrate-pass-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 var(--sp-8);
+  padding: var(--sp-8) var(--sp-8);
+  font-size: var(--fs-base);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.migrate-pass-hint {
+  margin: 0 0 var(--sp-12);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  color: var(--muted);
+}
+
+.migrate-pass-hint.danger-text {
+  color: var(--danger);
+}
+
+/* The button that does the irreversible thing looks like it. */
+.btn.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.btn.danger:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+
+/* A dragged group over a header's top band: the line means "order me
+   before this one". The filled state (group-head.dropping, above) keeps
+   meaning "put me inside". */
+.group-head.drop-before {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.zone-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  margin: var(--sp-8) 0 var(--sp-2);
+  padding: var(--sp-2) var(--sidebar-row-inset);
+}
+
+.zone-label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.zone-divider-line {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.zone-clear {
+  flex: none;
+  height: 18px;
+  padding: 0 var(--sp-6);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.zone-clear:hover:enabled {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.zone-clear:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.tab-favicon {
+  width: 15px;
+  height: 15px;
+  border-radius: var(--r-sm);
+  object-fit: contain;
+}
+
+.group-archive {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-4);
+  height: 18px;
+  padding: 0 var(--sp-4);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  cursor: default;
+}
+
+.group-archive:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.group-archive.bare {
+  opacity: 0.55;
+}
+
+/* The archive panel borrows the saved-logins panel's frame; only its own
+   cells differ. */
+.archive-head-space {
+  flex: 1;
+}
+
+.pw-note {
+  margin: 0;
+  padding: var(--sp-4) var(--sp-8);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.archive-when {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+  text-align: right;
+}
+
+.history-day {
+  padding: var(--sp-8) var(--sp-6) var(--sp-4);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.history-row {
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 0.9fr) 64px auto;
+  cursor: pointer;
+}
+
+.archive-row {
+  grid-template-columns:
+    auto minmax(0, 1.4fr) minmax(0, 1fr) max-content auto;
+}
+
+.download-row {
+  grid-template-columns: auto minmax(0, 1.6fr) 92px 64px auto;
+}
+
+.download-row.openable {
+  cursor: pointer;
+}
+
+.download-state {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.download-state.done {
+  color: var(--accent);
+}
+
+.download-state.failed {
+  color: var(--danger);
+}
+
+/* Why the last click on a row did nothing (file moved or deleted). */
+.download-note {
+  margin: 0;
+  padding: var(--sp-6) var(--sp-8);
+  font-size: var(--fs-sm);
+  color: var(--danger);
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-select {
+  height: 26px;
+  padding: 0 var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-side);
+  color: var(--fg);
+  font-size: var(--fs-base);
+}
+
+
+.tab-row.dormant {
+  opacity: 0.55;
+}
+
+.tab-row.dormant:hover {
+  opacity: 0.8;
+}
+
+
+.tab-deviation {
+  opacity: 0.45;
+  font-weight: 600;
+  margin-right: var(--sp-4);
+}
+
+.folder-preview {
+  position: absolute;
+  z-index: calc(var(--z-overlay) + 9);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-6);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-panel);
+  animation: menu-in var(--dur-fast) var(--ease-express);
+  transform-origin: top left;
+}
+
+.preview-search {
+  height: 26px;
+  padding: 0 var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--term-bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+}
+
+.preview-search:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.preview-list {
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.preview-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  height: 28px;
+  padding: 0 var(--sp-6);
+  border-radius: var(--r-md);
+  color: var(--muted);
+  cursor: default;
+  flex: none;
+}
+
+.preview-row.sel {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+
+.preview-row.dormant {
+  opacity: 0.55;
+}
+
+.preview-title {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--fs-sm);
+}
+
+.preview-when {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.preview-empty {
+  padding: var(--sp-8);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  text-align: center;
+}
+
+
+/* The settings page's one-line text input (custom search template). */
+.settings-input {
+  display: block;
+  width: 420px;
+  max-width: 100%;
+  margin-top: var(--sp-8);
+  height: 26px;
+  padding: 0 var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-side);
+  color: var(--fg);
+  font-size: var(--fs-base);
+}
+
+.settings-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.us-grant {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin: var(--sp-2) var(--sp-4) var(--sp-2) 0;
+  padding: var(--sp-2) var(--sp-4) var(--sp-2) var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  font-size: var(--fs-sm);
+}
+.us-grant-x {
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: var(--fs-base);
+  line-height: var(--lh-tight);
+  padding: 0 var(--sp-2);
+}
+.us-grant-x:hover {
+  color: var(--danger);
+}
+
+.us-update-dialog {
+  width: 720px;
+}
+
+.us-update-grants-note {
+  font-size: var(--fs-sm);
+  color: var(--warn);
+  margin: 0 0 var(--sp-8);
+}
+
+.us-diff-legend {
+  display: flex;
+  gap: var(--sp-12);
+  font-size: var(--fs-xs);
+  margin-bottom: var(--sp-4);
+}
+
+.us-diff-legend-del {
+  color: var(--danger);
+}
+
+.us-diff-legend-add {
+  color: var(--ok);
+}
+
+.us-diff {
+  max-height: 50vh;
+  overflow: auto;
+  margin: 0;
+  padding: var(--sp-8) 0;
+  background: var(--term-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-tight);
+  white-space: pre;
+}
+
+.us-diff-line {
+  padding: 0 var(--sp-8);
+  min-height: 1em;
+}
+
+.us-diff-same {
+  color: var(--fg-dim);
+}
+
+.us-diff-del {
+  color: var(--danger);
+  background: var(--bg-hover);
+}
+
+.us-diff-add {
+  color: var(--ok);
+  background: var(--bg-hover);
+}
+
+.command-bar {
+  width: 560px;
+  max-width: calc(100vw - 40px);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-dialog);
+  overflow: hidden;
+  animation: layer-in var(--dur-express) var(--ease-express);
+}
+
+.command-bar-input {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  padding: var(--sp-12) var(--sp-16);
+}
+
+.command-bar-input:focus {
+  border-color: var(--accent);
+}
+
+.command-bar-list {
+  max-height: 380px;
+  overflow-y: auto;
+  padding: var(--sp-6);
+}
+
+.command-bar-section {
+  padding: var(--sp-6) var(--sp-8) var(--sp-2);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.command-bar-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  width: 100%;
+  padding: var(--sp-8) var(--sp-8);
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.command-bar-row.sel {
+  background: var(--bg-active);
+}
+
+.command-bar-row:active {
+  transform: scale(0.99);
+}
+
+/* A dormant pinned item's row: here, but asleep — picking it wakes it. */
+.command-bar-row.dormant {
+  opacity: 0.6;
+}
+
+.command-bar-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-bar-note {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.command-bar-group {
+  flex: none;
+  font-size: var(--fs-xs);
+}
+
+.command-bar-row kbd {
+  flex: none;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-4);
+}
+
+.command-bar-hints {
+  display: flex;
+  gap: var(--sp-12);
+  padding: var(--sp-8) var(--sp-16) var(--sp-8);
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+}
+
+.shortcuts-overlay {
+  width: 560px;
+  max-width: calc(100vw - 40px);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-dialog);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: 68vh;
+  animation: layer-in var(--dur-express) var(--ease-express);
+}
+
+.shortcuts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-12) var(--sp-16);
+  border-bottom: 1px solid var(--line);
+}
+
+.shortcuts-head h3 {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.shortcuts-body {
+  overflow-y: auto;
+  padding: var(--sp-8) var(--sp-16) var(--sp-16);
+}
+
+.shortcuts-section h4 {
+  margin: var(--sp-12) 0 var(--sp-4);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.shortcuts-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-12);
+  padding: var(--sp-2) 0;
+  font-size: var(--fs-base);
+}
+
+.shortcuts-keys {
+  flex: none;
+  width: 96px;
+  text-align: right;
+}
+
+.shortcuts-label {
+  color: var(--fg);
+}
+
+/* ── Loud-mode identity layer (2026-08-22, second pass) ────────────────
+   Placed last on purpose: these grouped rules win the cascade over the
+   per-component blocks above without touching a line of them. Three
+   moves: chrome strips turn glass; floating layers go translucent with
+   deep blur and the xl radius; the primary action wears the accent
+   gradient with a glow. All values are token-derived — nothing here is
+   a literal color. */
+
+.findbar,
+.browser-bar {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--panel) 78%, transparent),
+    color-mix(in srgb, var(--bg-side) 92%, transparent));
+  border-bottom-color: color-mix(in srgb, var(--accent) 10%, var(--line));
+}
+
+.dialog,
+.cmdbar,
+.command-bar,
+.switcher,
+.newtab-menu,
+.shortcuts-overlay,
+.pw-window,
+.confirm-box {
+  border-radius: var(--r-xl);
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(1.2);
+  backdrop-filter: blur(24px) saturate(1.2);
+  box-shadow: var(--shadow-dialog);
+}
+
+.btn.primary {
+  border-color: transparent;
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--accent) 82%, var(--surface-paper)),
+    var(--accent) 46%,
+    color-mix(in srgb, var(--accent) 84%, var(--fg-dim)));
+  box-shadow:
+    0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--surface-paper) 30%, transparent);
+}
+
+.btn.primary:hover {
+  filter: brightness(1.07);
+  box-shadow:
+    0 3px 14px color-mix(in srgb, var(--accent) 45%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--surface-paper) 30%, transparent);
+}
+
+/* ── Terminal status pill (round four) ──────────────────────────────────
+   The bottom strip's replacement: what just ran, how it ended, how long
+   it took — one glass badge in the pane's corner, fading after four
+   seconds. Selecting an older block re-flashes its outcome. Purely
+   informational; pointer-events stay off so terminal clicks pass. */
+
+
+
+
+
+
+
+/* ── Browser tab, round five ────────────────────────────────────────────
+   The browser pane owns almost no chrome — that is its point (Arc-style,
+   the page IS the pane). So this pass spends its weight on the four
+   moments the browser DOES draw: summoning the address bar, the new-tab
+   identity page, the password offer, and the certificate interstitial.
+
+   Two contracts respected here on purpose:
+   - The find bar stays IN FLOW (it squeezes the slot): matches must stay
+     visible while searching, so it never becomes an overlay — and being
+     in flow means no backdrop tricks over a LIVE webview, which
+     backdrop-filter cannot sample anyway.
+   - The new tab stays favicon-free: fetching icons per row would put
+     back the network request "nothing loads" exists to save. Identity
+     comes from typography and rhythm instead. */
+
+/* ⌘L: the summon. Bigger, monospaced like the addresses it holds,
+   springing in over the frosted scrim. */
+.browser-pane .overlay .cmdbar {
+  width: min(680px, calc(100vw - 48px));
+  padding: var(--sp-12);
+}
+
+.browser-pane .cmdbar-input {
+  height: 48px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  caret-color: var(--accent);
+}
+
+.cmdbar-hints {
+  letter-spacing: 0.02em;
+}
+
+/* Password offer: a quiet card, not a stripe. Still in flow — it does
+   not park the page, so it must own real pixels, not hope for blur. */
+.pwbar {
+  margin: var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  box-shadow: var(--shadow-raise);
+  padding: var(--sp-8) var(--sp-12);
+}
+
+.pwbar button.primary,
+.auth-actions button.primary {
+  border-color: transparent;
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--accent) 82%, var(--surface-paper)),
+    var(--accent) 46%,
+    color-mix(in srgb, var(--accent) 84%, var(--fg-dim)));
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* Certificate interstitial: the one full-page moment — make it feel
+   like the door closed, not like an error slipped out. */
+.cert-block {
+  background:
+    radial-gradient(90% 60% at 50% -10%,
+      color-mix(in srgb, var(--danger) 10%, transparent), transparent 60%),
+    var(--bg);
+  align-items: center;
+  text-align: center;
+}
+
+.cert-block-title {
+  font-size: var(--fs-xl);
+  letter-spacing: 0.02em;
+}
+
+.cert-block-body {
+  max-width: 52ch;
+  border-left: none;
+  padding: 0;
+}
+
+.cert-block-actions button {
+  border-radius: var(--r-pill);
+  padding: var(--sp-8) var(--sp-24);
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.cert-block-actions button:hover {
+  background: var(--hover-veil);
+}
+
+.cert-block-actions button:active {
+  transform: scale(0.97);
+}
+
+.cert-block-actions button.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.cert-block-actions button.danger:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+/* Peek frame: the overlay page sits in a deeper, softer frame. */
+.pane.peek-pane {
+  border-radius: var(--r-xl);
+}
+
+.newtab-menu {
+  max-height: calc(100vh - 24vh - 48px);
+  overflow-y: auto;
+}
+
+.pwbar .pwbar-never {
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.pwbar .pwbar-never:hover {
+  color: var(--danger);
+}
+
+.cert-block-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-12);
+}
+
+.cert-block-icon {
+  color: var(--danger);
+}
+
+.cert-block-title {
+  color: var(--danger);
+}
+
+/* ── Shell & navigation, round seven ─────────────────────────────────── */
+
+/* The brand span the head always had room for; small caps, quiet. */
+.brand {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+/* Group headers carry a count chip, not a bare number. */
+.group-count {
+  padding: 0 var(--sp-6);
+  border-radius: var(--r-pill);
+  background: var(--bg-hover);
+}
+
+/* Zone divider: label and line stay; the two actions reveal on hover or
+   keyboard focus-within — fewer standing objects, same reachability. */
+.zone-clear,
+.group-archive {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.zone-divider:hover .zone-clear,
+.zone-divider:hover .group-archive,
+.zone-divider:focus-within .zone-clear,
+.zone-divider:focus-within .group-archive {
+  opacity: 1;
+}
+
+/* Context-menu chords align to the menu's right edge like every desktop
+   menu, not to the label they trail. */
+.ctx-kbd {
+  margin-left: auto;
+  padding-left: var(--sp-8);
+}
+
+.switcher {
+  width: min(560px, calc(100vw - 40px));
+}
+
+/* Shortcuts table: searchable input in the head, two-column reading. */
+.shortcuts-search {
+  flex: 1;
+  margin-left: var(--sp-16);
+  height: 28px;
+  padding: 0 var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--term-bg);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+
+.shortcuts-search:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}
+
+.shortcuts-body {
+  column-count: 2;
+  column-gap: var(--sp-24);
+}
+
+.shortcuts-section {
+  break-inside: avoid;
+}
+
+
+
+/* Progress: the START leg glows low — a 15% bar at full halo over a
+   silent page read as an alarm; commit lights it up. */
+.browser-progress-band.phase-started {
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--progress-core) 40%, transparent));
+}
+
+.browser-progress-band.phase-started.glow {
+  opacity: 0.75;
+}
+
+/* Userscript authorization is a security boundary; it gets a remote-edge
+   rail and its script name reads mono so it can never look like a page
+   saying hello. */
+.cmdbar.auth-dialog.us-ask {
+  border-left: 3px solid var(--remote-edge);
+}
+
+/* Password offer entrance joins the layer family. */
+.pwbar {
+  animation: menu-in var(--dur-fast) var(--ease-express);
+  transform-origin: top center;
+}
+
+/* In-flow bars over a live page cannot blur it — raise their base so
+   legibility never depends on what the page happens to paint. */
+.findbar,
+.pane .pwbar {
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+}
+
+/* Find bar restyle: taller input, tabular counts, real close affordance
+   come with the DOM touch below; here the strip loses its flat edge. */
+.findbar {
+  border-bottom: none;
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow: var(--shadow-raise);
+}
+
+.findbar-count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Settings rail: the current section gets the lit-edge language every
+   other selected row in the app uses. */
+.settings-nav-item.active {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* ── Round eleven ─────────────────────────────────────────────────────── */
+
+/* Load rail, truly floating (user direction): absolute over the pane's
+   top edge, in no layout at all — mounting and unmounting it can no
+   longer nudge the content area. uiPlane raises it over the live page
+   for its two-second life; idle renders nothing. It anchors to
+   .browser-pane itself, which stays position:absolute (its base rule):
+   an earlier cut of this round switched the pane to position:relative,
+   which silently unhooked the pane from its own geometry — the flex
+   column then sized to content, the page slot collapsed to zero height,
+   and browser_create's ≥20px gate refused every tab (the packaged-app
+   browser-column hang of 2026-08-23~24, three matrix runs lost to it). */
+.browser-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  flex: none;
+  height: 2px;
+  background: transparent;
+  overflow: visible;
+  z-index: var(--z-overlay);
+}
+
+/* Header groups share one 26px optical line; the left group only contains
+   the sidebar toggle and the right group contains search/new-tab. */
+.sidebar-head-left {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.sidebar-head .icon-btn {
+  width: 26px;
+  height: 26px;
+}
+
+
+/* ── Directory panel v4 (round twelve) ────────────────────────────────── */
+
+/* ── Round twelve, second pass: the consolidated review backlog ───────── */
+
+/* Keep the header actions as independent controls. The older joined tray
+   made the left toggle look centered with search/new-tab instead of leading
+   the left edge. */
+.sidebar-head-left {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.sidebar-head-left .icon-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-md);
+}
+
+.sidebar-head-left .icon-btn:hover {
+  background: var(--bg-hover);
+}
+
+/* Non-active rows read one step dimmer than active — hierarchy by ink,
+   not by weight. */
+.tab-row {
+  color: var(--fg-dim);
+}
+
+.tab-row.active {
+  color: var(--fg);
+}
+
+/* Failed status pill is dismissable by click. */
+
+/* Broadcast banner: a wash and an edge, not a solid amber slab. */
+
+/* Hover link is an address: mono, like every other path in the app. */
+
+/* Completion hint: quieter than the list it explains. */
+
+/* Find bar entrance joins the layer family. */
+.findbar {
+  animation: menu-in var(--dur-fast) var(--ease-express);
+  transform-origin: top center;
+}
+
+/* Certificate page: the trust consequence outranks the engine error —
+   swap their weights. */
+.cert-block-body {
+  font-size: var(--fs-sm);
+  opacity: 0.8;
+  font-family: var(--font-mono);
+}
+
+.cert-block-note {
+  font-size: var(--fs-base);
+  opacity: 0.95;
+  color: var(--fg);
+}
+
+/* Shortcuts table: chords get room to breathe. */
+.shortcuts-keys {
+  width: 128px;
+}
+
+.shortcuts-keys kbd {
+  font-family: var(--font-mono);
+}

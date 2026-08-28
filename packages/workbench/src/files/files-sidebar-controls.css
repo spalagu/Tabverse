@@ -1,0 +1,177 @@
+.panel-head,
+.tree-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--panel) 78%, transparent),
+    color-mix(in srgb, var(--bg-side) 92%, transparent)
+  );
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 10%, var(--line));
+}
+
+.panel-head {
+  gap: var(--sp-6);
+  height: 34px;
+  padding: 0 var(--sp-8);
+}
+
+.crumb-up {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.crumb-up:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.crumb-up:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.panel-root {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.panel-modes {
+  margin-left: auto;
+  display: flex;
+  gap: var(--sp-4);
+  padding: var(--sp-2);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+}
+
+.panel-head .mini-btn,
+.tree-bar .mini-btn {
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.panel-modes .mini-btn {
+  padding: var(--sp-4) var(--sp-8);
+  border: none;
+  border-radius: calc(var(--r-md) - 2px);
+}
+
+.panel-modes .mini-btn.on {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+
+.tree-bar {
+  position: relative;
+  gap: var(--sp-4);
+  height: 28px;
+  padding: 0 var(--sp-8);
+}
+
+.tree-bar-group {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.tree-bar .mini-btn {
+  padding: var(--sp-2) var(--sp-6);
+}
+
+.tree-bar .mini-btn:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+
+.tree-bar .mini-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.tree-bar .mini-btn.on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.tree-bar .pane-bar {
+  margin-left: auto;
+}
+
+.toolbar-spacer {
+  flex: 1;
+}
+
+.sort-chip .sort-dir {
+  margin-left: var(--sp-4);
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+
+.files-sidebar .sort-menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-overlay) - 1);
+}
+
+.files-sidebar .sort-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: var(--sp-8);
+  width: 200px;
+  z-index: var(--z-dialog);
+  padding: var(--sp-6);
+  background: var(--bg-side);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-panel);
+}
+
+.files-sidebar .sort-menu .ctx-label {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--muted);
+  padding: var(--sp-6) var(--sp-8) var(--sp-2);
+}
+
+.files-sidebar .sort-menu .ctx-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  width: 100%;
+  padding: var(--sp-6) var(--sp-8);
+  border: none;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  text-align: left;
+  cursor: pointer;
+}
+
+.files-sidebar .sort-menu .ctx-item:hover {
+  background: var(--bg-active);
+}
+
+.files-sidebar .sort-menu .ctx-item.on {
+  color: var(--accent);
+}

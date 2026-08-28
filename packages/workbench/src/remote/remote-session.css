@@ -1,0 +1,45 @@
+/* Overlay chips for the mirrored terminal pane: read-only, viewport and
+   reconnect status. Scoped to the shared remote session view. */
+
+/* Before the welcome names the share's kind, no renderer exists yet; the
+   pane says so in plain text, in the same grey the terminal path uses. */
+.remote-connecting {
+  display: flex;
+  align-items: flex-start;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+}
+
+.remote-overlays {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  z-index: var(--z-overlay);
+  /* Status only — clicks belong to the terminal underneath. */
+  pointer-events: none;
+}
+
+.remote-chip {
+  font-size: var(--fs-xs);
+  line-height: var(--lh-tight);
+  padding: var(--sp-4) var(--sp-8);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.remote-chip.readonly {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.remote-chip.reconnect {
+  color: var(--danger);
+  border-color: var(--danger);
+}

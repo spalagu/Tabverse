@@ -1,0 +1,14 @@
+{
+  "name": "@tabverse/remote-client",
+  "private": true,
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    "./b64": "./src/b64.ts",
+    "./app-frame": "./src/appFrame.ts",
+    "./agent-viewer": "./src/agent/viewerFrames.ts",
+    "./clipboard": "./src/clipboard.ts",
+    "./proxy-fetch": "./src/proxyFetch.ts"
+  }
+}

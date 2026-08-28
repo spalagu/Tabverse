@@ -1,0 +1,73 @@
+.loc-bar {
+  flex: none;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  padding: var(--sp-6) var(--sp-8);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--panel) 78%, transparent),
+    color-mix(in srgb, var(--bg-side) 92%, transparent)
+  );
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 10%, var(--line));
+}
+
+.loc-completions {
+  position: absolute;
+  top: 100%;
+  left: var(--sp-8);
+  right: var(--sp-8);
+  z-index: var(--z-sticky);
+  margin-top: var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg);
+  box-shadow: var(--shadow-raise);
+  overflow: hidden;
+  animation: menu-in var(--dur-fast) var(--ease-express);
+  transform-origin: top center;
+}
+
+.loc-completion {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  width: 100%;
+  padding: var(--sp-4) var(--sp-8);
+  border: none;
+  background: none;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: default;
+}
+
+.loc-completion.sel {
+  background: var(--bg-active);
+}
+
+.loc-completion-hint {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.loc-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  background: var(--term-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-pill);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  padding: 0 var(--sp-12);
+}
+
+.loc-input:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-halo);
+}

@@ -1,0 +1,145 @@
+/* CSV/TSV table preview: info strip, then one scroll container in both axes
+   with the header row frozen via position: sticky. */
+
+.csv-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--term-bg);
+}
+
+.csv-info {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-12);
+  padding: var(--sp-6) var(--sp-12);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-side);
+}
+
+.csv-truncation {
+  color: var(--warn);
+}
+
+.csv-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.csv-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  color: var(--fg);
+}
+
+.csv-table th,
+.csv-table td {
+  padding: var(--sp-4) var(--sp-12);
+  text-align: left;
+  white-space: nowrap;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
+/* The frozen header must be opaque: rows scroll underneath it. */
+.csv-table th {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  background: var(--bg-active);
+  font-weight: 600;
+}
+
+
+.csv-editable th,
+.csv-editable td {
+  cursor: text;
+}
+
+.csv-editable th:hover,
+.csv-editable td:hover {
+  box-shadow: inset 0 0 0 1px var(--muted);
+}
+
+/* th keeps its sticky positioning (the .csv-table th rule above outweighs
+   this one); sticky anchors the absolute input exactly like relative does. */
+td.csv-cell-editing {
+  position: relative;
+}
+
+.csv-editable th.csv-cell-editing,
+.csv-editable td.csv-cell-editing {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* Invisible copy of the committed value: it keeps the column at its current
+   width while the input floats above it, so entering/leaving edit mode never
+   reflows the table or jumps the scroll position. */
+.csv-ghost {
+  visibility: hidden;
+  display: inline-block;
+  /* An empty column would otherwise collapse to its padding and leave the
+     input unusably narrow. */
+  min-width: 4ch;
+}
+
+.csv-cell-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  margin: 0;
+  border: none;
+  padding: var(--sp-4) var(--sp-12);
+  font: inherit;
+  line-height: inherit;
+  color: var(--fg);
+  background: transparent;
+}
+
+.csv-cell-input:focus {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.csv-rowhead {
+  min-width: 3ch;
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  text-align: right;
+  cursor: context-menu;
+  user-select: none;
+}
+
+.csv-table th.csv-rowhead {
+  cursor: default;
+}
+
+/* Round three: the table reads at a glance — zebra rows for column
+   tracking, a hairline under the frozen header, and row hover that
+   does not fight the zebra. */
+.csv-table tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+.csv-table tbody tr:hover td {
+  background: var(--bg-hover);
+}
+
+.csv-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-side);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-weight: 600;
+}

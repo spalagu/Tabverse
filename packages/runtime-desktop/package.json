@@ -1,0 +1,16 @@
+{
+  "name": "@tabverse/runtime-desktop",
+  "private": true,
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "@tabverse/remote-client": "file:../remote-client",
+    "@tabverse/runtime-contracts": "file:../runtime-contracts",
+    "@tauri-apps/api": "^2"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./terminal": "./src/terminal.ts"
+  }
+}

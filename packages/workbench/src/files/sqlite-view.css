@@ -1,0 +1,127 @@
+/* SQLite preview: table list sidebar, then a pager strip and one scroll
+   container in both axes with the header row frozen — same table styling
+   conventions as the CSV preview. */
+
+.sqlite-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: var(--term-bg);
+}
+
+.sqlite-tables {
+  flex: none;
+  width: 200px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-6);
+  border-right: 1px solid var(--line);
+  background: var(--bg-side);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.sqlite-table-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-8);
+  padding: var(--sp-4) var(--sp-8);
+  border: none;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sqlite-table-item:hover {
+  background: var(--bg-hover);
+}
+
+.sqlite-table-item.active {
+  background: var(--bg-active);
+}
+
+.sqlite-table-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sqlite-table-rows {
+  flex: none;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+.sqlite-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sqlite-pager {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-8);
+  padding: var(--sp-6) var(--sp-12);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-side);
+}
+
+.sqlite-pager .btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.sqlite-pager-range {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.sqlite-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.sqlite-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  color: var(--fg);
+}
+
+.sqlite-table th,
+.sqlite-table td {
+  padding: var(--sp-4) var(--sp-12);
+  text-align: left;
+  white-space: nowrap;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+/* The frozen header must be opaque: rows scroll underneath it. */
+.sqlite-table th {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  background: var(--bg-active);
+  font-weight: 600;
+}
+
+.sqlite-table tbody tr:nth-child(2n) td {
+  background: var(--bg-hover);
+}

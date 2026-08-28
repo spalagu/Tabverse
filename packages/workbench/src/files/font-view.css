@@ -1,0 +1,49 @@
+/* Font specimen: metadata header (ttf/otf only), pangram at three sizes, a
+   figures/symbols line, then a body paragraph — all set in the loaded face. */
+
+.font-view {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-16) var(--sp-24);
+  background: var(--term-bg);
+  color: var(--fg);
+}
+
+.font-meta {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--sp-12);
+  padding-bottom: var(--sp-12);
+  margin-bottom: var(--sp-16);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.font-meta-family {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.font-line {
+  line-height: var(--lh-tight);
+  margin-bottom: var(--sp-8);
+  overflow-wrap: anywhere;
+}
+
+.font-figures {
+  margin: var(--sp-12) 0;
+  overflow-wrap: anywhere;
+  /* Symbols the face lacks fall back visibly; the line is a coverage probe. */
+  letter-spacing: 0.02em;
+}
+
+.font-body {
+  max-width: 640px;
+  margin: var(--sp-12) 0 0;
+  font-size: var(--fs-lg);
+  line-height: var(--lh-relaxed);
+}

@@ -1,0 +1,140 @@
+[
+  { "command": "new-terminal", "keys": "⌘T", "label": "New terminal tab" },
+  { "command": "new-files", "keys": "⌘E", "label": "New file explorer tab" },
+  {
+    "command": "command-bar",
+    "keys": "⌘⇧B",
+    "label": "Command bar — open tabs, commands, history, search",
+    "note": "⌘⇧B belongs to the command bar. New-browser remains key-less: the ⌘N chooser and the command bar itself reach it."
+  },
+  { "command": "new-browser", "label": "New browser tab" },
+  { "command": "new-tab-menu", "keys": "⌘N", "label": "New tab chooser" },
+  {
+    "command": "duplicate-tab",
+    "keys": "⌘⇧U",
+    "label": "Duplicate this tab",
+    "note": "Moved off ⌘⇧D because ⌘D and ⌘⇧D are the terminal split pair. The first replacement, ⌘⌥D, was free but unreachable: the global handler returns on ⌥ chords and page key tables do not receive them. A shortcut must be checked against dispatch behavior, not only the list of occupied keys."
+  },
+  { "command": "join", "keys": "⌘⇧J", "label": "Join a remote tab by ticket" },
+  {
+    "command": "share-app",
+    "label": "Share the whole app…",
+    "note": "Sharing the entire interface is deliberate and rare, so the command bar is its only entrance and a mispressed shortcut cannot start it. A tab's own share keeps its dialog."
+  },
+  {
+    "command": "stop-app-share",
+    "label": "Stop sharing the app",
+    "note": "Key-less: the stop lives with the ticket panel; this row is the same hand's other half."
+  },
+  {
+    "command": "close-tab",
+    "keys": "⌘W",
+    "label": "Close the open file, or the tab when none is open"
+  },
+  { "command": "reopen-closed", "keys": "⌘⇧T", "label": "Reopen the last closed tab" },
+  { "command": "switcher", "keys": "⌘P", "label": "Switch tabs by name" },
+  {
+    "command": "history-panel",
+    "keys": "⌘Y",
+    "label": "History — every page visited, searchable"
+  },
+  {
+    "command": "downloads-panel",
+    "label": "Downloads — files this browser saved",
+    "note": "Key-less like new-browser and reachable from the command bar and View menu. ⌘⇧J is taken by join, and a near-synonym key would be worse than none."
+  },
+  { "command": "jump-n", "keys": "⌘1…9", "label": "Jump to the n-th tab", "local": true },
+  { "command": "cycle-tabs", "keys": "⌃Tab", "label": "Cycle tabs in order", "local": true },
+  { "command": "next-tab", "keys": "⌘⇧]", "label": "Next tab" },
+  { "command": "prev-tab", "keys": "⌘⇧[", "label": "Previous tab" },
+  { "command": "toggle-pin", "keys": "⌘⇧G", "label": "Pin or unpin this tab" },
+  { "command": "toggle-sidebar", "keys": "⌘⇧\\", "label": "Pin or hide the sidebar" },
+  { "command": "clear-terminal", "keys": "⌘K", "label": "Clear the terminal" },
+  {
+    "command": "find",
+    "keys": "⌘F",
+    "label": "Find — in the terminal, the editor, or the page",
+    "note": "Dispatched contextually by the global handler: the terminal and the code editor each run their own search, so only a browser tab routes this to the shared find command. The key is this one wherever it is answered."
+  },
+  {
+    "command": "command-blocks",
+    "keys": "⌘⇧↑ / ⌘⇧↓",
+    "label": "Previous / next command block",
+    "local": true
+  },
+  {
+    "command": "scroll-end",
+    "keys": "⌘↑ / ⌘↓",
+    "label": "Scroll to top / bottom",
+    "local": true
+  },
+  {
+    "command": "split-pane-vertical",
+    "keys": "⌘D",
+    "label": "Split the terminal into two side by side",
+    "local": true,
+    "note": "The five rows below are local pane controls: they act on the terminal in front and mean nothing on browser or file tabs, so the app-wide handler must not answer them. ⌘D creates a vertical divider with panes side by side."
+  },
+  {
+    "command": "split-pane-horizontal",
+    "keys": "⌘⇧D",
+    "label": "Split the terminal into two stacked",
+    "local": true
+  },
+  {
+    "command": "focus-pane-dir",
+    "keys": "⌘⌥← / ⌘⌥→ / ⌘⌥↑ / ⌘⌥↓",
+    "label": "Move to the pane left / right / above / below",
+    "local": true
+  },
+  {
+    "command": "zoom-pane",
+    "keys": "⌘⇧⏎",
+    "label": "Zoom this pane to fill the tab, or put it back",
+    "local": true
+  },
+  {
+    "command": "resize-pane-dir",
+    "keys": "⌃⌘← / ⌃⌘→ / ⌃⌘↑ / ⌃⌘↓",
+    "label": "Move this pane's edge left / right / up / down",
+    "local": true
+  }, {
+    "command": "toggle-broadcast",
+    "keys": "⌘⌥I",
+    "label": "Type into every pane of this terminal at once",
+    "local": true,
+    "note": "Broadcast input is a switch, not a mode. On, one keystroke reaches every pane of the tab; off, only the focused pane. It is deliberately local to the terminal in front."
+  },
+  { "command": "save-file", "keys": "⌘S", "label": "Save the open file", "local": true },
+  { "command": "quick-open", "keys": "⌘⇧P", "label": "Open a file by name", "local": true },
+  {
+    "command": "terminal-panel",
+    "keys": "⌘J",
+    "label": "Terminal panel in a file tab",
+    "local": true
+  },
+  { "command": "location-bar", "keys": "⌘L", "label": "Address bar / jump to a directory" },
+  { "command": "reload", "keys": "⌘R", "label": "Reload the page" },
+  { "command": "back", "keys": "⌘[", "label": "Back" },
+  { "command": "forward", "keys": "⌘]", "label": "Forward" },
+  {
+    "command": "open-external",
+    "keys": "⌘⇧O",
+    "label": "Open this page in the default browser"
+  },
+  { "command": "copy-url", "keys": "⌘⇧C", "label": "Copy the page's link" },
+  {
+    "command": "print",
+    "label": "Print the current page",
+    "note": "Printing is key-less because ⌘P belongs to the switcher. Use File ▸ Print… or the command bar."
+  },
+  {
+    "command": "shortcuts-help",
+    "keys": "⌘/",
+    "label": "Keyboard shortcuts — the full list",
+    "note": "This shortcut opens the complete keyboard reference."
+  },
+  { "command": "zoom-in", "keys": "⌘=", "label": "Zoom in" },
+  { "command": "zoom-out", "keys": "⌘-", "label": "Zoom out" },
+  { "command": "zoom-reset", "keys": "⌘0", "label": "Actual size" }
+]

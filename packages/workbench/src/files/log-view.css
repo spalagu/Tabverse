@@ -1,0 +1,59 @@
+/* Windowed log viewer: a slim byte-range header, then one scrolling <pre>.
+   The component never holds more than ~2 MiB of text, so this pane stays
+   cheap no matter how big the file behind it is. */
+
+.log-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--term-bg);
+}
+
+.log-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-6);
+  padding: var(--sp-4) var(--sp-12);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-side);
+}
+
+.log-range {
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.log-head-spacer {
+  flex: 1;
+}
+
+.log-error {
+  flex: none;
+  padding: var(--sp-6) var(--sp-12);
+  font-size: var(--fs-sm);
+  color: var(--danger);
+  border-bottom: 1px solid var(--line);
+}
+
+.log-scroll {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.log-text {
+  margin: 0;
+  padding: var(--sp-12) var(--sp-12);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+  color: var(--fg);
+  white-space: pre;
+}

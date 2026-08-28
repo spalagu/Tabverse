@@ -1,0 +1,31 @@
+/*
+ * The editor tab menu is an ordinary .ctx-menu; only what closing files adds
+ * lives here — room for "Close to the Right", the number of tabs an item
+ * takes with it, and an item that has nothing to act on saying so.
+ */
+
+.editor-tab-menu {
+  width: 236px;
+}
+
+/* The count is the answer to "how much am I about to lose", so it sits at
+   the far edge where the eye can run down the column and compare. */
+.editor-tab-menu .etm-count {
+  margin-left: auto;
+  padding-left: var(--sp-8);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Nothing to the right of the last tab, no others when one file is open:
+   the item stays visible so the menu keeps its shape, but stops offering. */
+.editor-tab-menu .ctx-item:disabled {
+  color: var(--muted);
+  opacity: 0.5;
+  cursor: default;
+}
+
+.editor-tab-menu .ctx-item:disabled:hover {
+  background: transparent;
+}

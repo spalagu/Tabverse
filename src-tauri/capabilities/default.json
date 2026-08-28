@@ -1,0 +1,23 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Baseline capability for the main window.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "window-state:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-destroy",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-hide",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-set-focus"
+  ],
+  "_comment": "Tauri's default set is deliberately narrow. Anything the app asks the window to do must be granted here, and a missing grant fails silently at the call site."
+}
