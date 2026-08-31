@@ -1,7 +1,8 @@
 //! Resident terminal helper process mode and lazy GUI connection.
 
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -17,6 +18,7 @@ use tabverse_term::{
     protocol::AuthToken,
 };
 use tauri::AppHandle;
+use zeroize::Zeroizing;
 
 const ENDPOINT_FILE: &str = "terminal-helper.json";
 const CONNECT_DEADLINE: Duration = Duration::from_secs(5);
@@ -58,7 +60,8 @@ impl TerminalHelper {
             }
         }
         let state = crate::state_dir(app)?;
-        let token = AuthToken::new(crate::credentials::helper_token()?);
+        let token_bytes = Zeroizing::new(crate::credentials::helper_token()?);
+        let token = AuthToken::new(*token_bytes);
         if let Ok(client) = connect_record(&state, token, Arc::clone(&on_event)) {
             let client = Arc::new(client);
             *self.client.lock().unwrap() = Some(Arc::clone(&client));
@@ -66,14 +69,29 @@ impl TerminalHelper {
         }
 
         let executable = std::env::current_exe().map_err(|e| format!("helper executable: {e}"))?;
-        Command::new(executable)
+        let mut child = Command::new(executable)
             .arg("--helper")
             .arg(&state)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("start terminal helper: {e}"))?;
+        let write_result = child
+            .stdin
+            .take()
+            .ok_or_else(|| "terminal helper stdin pipe is missing".to_string())
+            .and_then(|mut stdin| {
+                stdin
+                    .write_all(token_bytes.as_ref())
+                    .and_then(|()| stdin.flush())
+                    .map_err(|e| format!("send terminal helper token: {e}"))
+            });
+        if let Err(error) = write_result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
 
         let deadline = Instant::now() + CONNECT_DEADLINE;
         let mut last_error = "helper endpoint did not appear".to_string();
@@ -121,6 +139,23 @@ fn connect_record(
     Ok(client)
 }
 
+/// Read the helper's one-time bootstrap token from an inherited anonymous
+/// pipe. The exact-length check rejects accidental framing changes before a
+/// terminal server starts.
+fn read_helper_token(mut input: impl Read) -> io::Result<[u8; 32]> {
+    let mut bytes = Zeroizing::new(Vec::with_capacity(33));
+    input.by_ref().take(33).read_to_end(&mut bytes)?;
+    if bytes.len() != 32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("helper token has {} bytes, expected 32", bytes.len()),
+        ));
+    }
+    let mut token = [0u8; 32];
+    token.copy_from_slice(&bytes);
+    Ok(token)
+}
+
 /// Answer `tabverse --helper <state-dir>` before Tauri or a webview exists.
 pub fn from_args(mut args: impl Iterator<Item = String>) -> Option<i32> {
     if args.next().as_deref() != Some("--helper") {
@@ -130,11 +165,11 @@ pub fn from_args(mut args: impl Iterator<Item = String>) -> Option<i32> {
         return Some(2);
     };
     let state = PathBuf::from(state);
-    crate::credentials::set_vault_dir(state.clone());
-    let token = match crate::credentials::helper_token() {
-        Ok(token) => AuthToken::new(token),
+    let token_bytes = match read_helper_token(io::stdin().lock()) {
+        Ok(token) => Zeroizing::new(token),
         Err(_) => return Some(3),
     };
+    let token = AuthToken::new(*token_bytes);
     Some(run_helper(&state, token, DEFAULT_IDLE).unwrap_or(4))
 }
 
@@ -181,6 +216,49 @@ fn remove_own_endpoint(state: &Path, pid: u32) {
 mod tests {
     use super::*;
     use tabverse_term::protocol::Kind;
+
+    #[test]
+    fn helper_token_pipe_requires_exactly_32_bytes() {
+        assert_eq!(
+            read_helper_token(io::Cursor::new(vec![0x5a; 32])).unwrap(),
+            [0x5a; 32]
+        );
+        assert_eq!(
+            read_helper_token(io::Cursor::new(vec![0x5a; 31]))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            read_helper_token(io::Cursor::new(vec![0x5a; 33]))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn gui_is_the_only_helper_token_reader_and_the_child_stdin_is_piped() {
+        let source = include_str!("terminal_helper.rs");
+        let credential_read = ["credentials::", "helper_token()"].concat();
+        let piped_stdin = [".stdin(Stdio::", "piped())"].concat();
+        assert_eq!(
+            source.matches(&credential_read).count(),
+            1,
+            "only TerminalHelper::ensure may read the cached bundle field"
+        );
+        assert!(source.contains(&piped_stdin));
+
+        let helper_mode = source
+            .split("pub fn from_args")
+            .nth(1)
+            .unwrap()
+            .split("fn run_helper")
+            .next()
+            .unwrap();
+        assert!(!helper_mode.contains("credentials::"));
+        assert!(helper_mode.contains("read_helper_token(io::stdin().lock())"));
+    }
 
     #[test]
     fn endpoint_file_is_owner_only_and_removed_by_its_owner() {

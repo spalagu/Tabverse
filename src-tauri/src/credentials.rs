@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 /// One saved web login. The password is only ever materialized on an
 /// explicit find — list operations return (host, username) pairs.
@@ -16,16 +17,96 @@ const SEP: char = '\u{1}';
 const WEB_SERVICE: &str = "Tabverse Web Passwords";
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 const AUTH_SERVICE: &str = "Tabverse HTTP Auth";
-#[cfg(not(test))]
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
-const KEY_SERVICE: &str = "Tabverse Keys";
+#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+const KEY_BUNDLE_SERVICE: &str = "Tabverse Key Bundle";
+#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+const KEY_BUNDLE_ACCOUNT: &str = "key-bundle-v1";
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+const KEY_BUNDLE_MAGIC: &[u8] = b"TABVERSEKEYBUNDLE1";
+const KEY_BYTES: usize = 32;
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+const KEY_BUNDLE_BYTES: usize = KEY_BUNDLE_MAGIC.len() + KEY_BYTES * 3;
 
-/// The system-store service name the 32-byte keys live under.
-#[cfg(not(test))]
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
-fn key_service() -> String {
-    KEY_SERVICE.to_string()
+/// The only secret stored in the platform credential store.
+///
+/// Each consumer still gets an independently random key. Packing them into
+/// one versioned item means an ad-hoc-signed macOS update has one Keychain ACL
+/// to authorize, rather than one ACL per consumer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeyBundle {
+    terminal_helper: [u8; KEY_BYTES],
+    login_vault: [u8; KEY_BYTES],
+    cookie_snapshot: [u8; KEY_BYTES],
 }
+
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+impl KeyBundle {
+    fn generate() -> Self {
+        Self {
+            terminal_helper: rand::random(),
+            login_vault: rand::random(),
+            cookie_snapshot: rand::random(),
+        }
+    }
+
+    fn encode(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(KEY_BUNDLE_BYTES);
+        bytes.extend_from_slice(KEY_BUNDLE_MAGIC);
+        bytes.extend_from_slice(&self.terminal_helper);
+        bytes.extend_from_slice(&self.login_vault);
+        bytes.extend_from_slice(&self.cookie_snapshot);
+        bytes
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() != KEY_BUNDLE_BYTES {
+            return Err(format!(
+                "key bundle has {} bytes, expected {KEY_BUNDLE_BYTES}",
+                bytes.len()
+            ));
+        }
+        if !bytes.starts_with(KEY_BUNDLE_MAGIC) {
+            return Err("key bundle has an unknown format".into());
+        }
+        let mut offset = KEY_BUNDLE_MAGIC.len();
+        let mut take_key = || {
+            let mut key = [0u8; KEY_BYTES];
+            key.copy_from_slice(&bytes[offset..offset + KEY_BYTES]);
+            offset += KEY_BYTES;
+            key
+        };
+        Ok(Self {
+            terminal_helper: take_key(),
+            login_vault: take_key(),
+            cookie_snapshot: take_key(),
+        })
+    }
+}
+
+/// A process-wide single-flight. Both successful loads and user-visible
+/// failures are cached so concurrent consumers cannot fan one authorization
+/// decision out into repeated Keychain prompts.
+struct KeyBundleCache {
+    value: OnceLock<Result<KeyBundle, String>>,
+}
+
+impl KeyBundleCache {
+    const fn new() -> Self {
+        Self {
+            value: OnceLock::new(),
+        }
+    }
+
+    fn get_or_load(
+        &self,
+        loader: impl FnOnce() -> Result<KeyBundle, String>,
+    ) -> Result<KeyBundle, String> {
+        self.value.get_or_init(loader).clone()
+    }
+}
+
+#[cfg(not(test))]
+static KEY_BUNDLE: KeyBundleCache = KeyBundleCache::new();
 
 /// Where the encrypted login store lives. Set once at startup, because
 /// resolving it needs the app handle and this module deliberately has no
@@ -65,11 +146,11 @@ pub(crate) fn test_vault_guard(
     guard
 }
 
-/// Stable 32-byte authentication key shared by the GUI and the resident
-/// terminal helper. It lives in the same machine-key seam as the encrypted
-/// browser vault, never in argv, endpoint metadata, or logs.
+/// Stable 32-byte authentication key the GUI passes to the resident terminal
+/// helper over an anonymous pipe. It is one field of the cached key bundle,
+/// never an independent credential item, argv value, endpoint field, or log.
 pub fn helper_token() -> Result<[u8; 32], String> {
-    machine_key("terminal-helper")
+    Ok(key_bundle()?.terminal_helper)
 }
 
 fn account(host: &str, username: &str) -> Result<String, String> {
@@ -79,7 +160,7 @@ fn account(host: &str, username: &str) -> Result<String, String> {
     Ok(format!("{host}{SEP}{username}"))
 }
 
-/// One key in the system's own store, everything else encrypted beside it.
+/// One bundle in the system store, everything else encrypted beside it.
 ///
 /// Logins used to be one system credential each, and that is what made
 /// macOS ask for permission **once per password**: an item's access list
@@ -93,8 +174,8 @@ fn account(host: &str, username: &str) -> Result<String, String> {
 mod vault {
     use super::*;
 
-    const MAGIC: &[u8] = b"CALVAULT1";
-    const FILE: &str = "logins.vault";
+    const MAGIC: &[u8] = b"TABVERSEVAULT2";
+    const FILE: &str = "logins.v2.vault";
 
     /// service -> "host\u{1}username" -> password
     pub type Store = BTreeMap<String, BTreeMap<String, String>>;
@@ -108,7 +189,7 @@ mod vault {
     }
 
     fn key() -> Result<[u8; 32], String> {
-        machine_key("login-vault")
+        Ok(key_bundle()?.login_vault)
     }
 
     fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, String> {
@@ -275,7 +356,7 @@ pub type VaultDump = BTreeMap<String, BTreeMap<String, String>>;
 ///
 /// The plaintext this returns is handed straight into the passphrase-sealed
 /// archive and nowhere else — never a file on its own, never a log line. The
-/// machine key that opens the store here is the source machine's; the
+/// bundle key that opens the store here belongs to the source install; the
 /// destination re-seals under its own via [`replace_vault`].
 pub fn export_vault() -> Result<VaultDump, String> {
     vault::read()
@@ -305,65 +386,68 @@ pub fn find_http_auth(key: &str) -> Result<Vec<WebCredential>, String> {
     find(AUTH_SERVICE, key)
 }
 
-/// The deterministic stand-in key: the name, cycled to 32 bytes.
-///
-/// What the vault exercises in an automated run is the sealing and
-/// unsealing, and that only needs a key that is the same every time it
-/// is asked for. Nothing sealed under these keys is a secret — the mode
-/// encrypts reproducibility, not data — so it must never be used outside
-/// an automated run.
 #[cfg(test)]
-fn fixed_key(name: &str) -> Result<[u8; 32], String> {
-    let mut key = [0u8; 32];
-    for (slot, byte) in key.iter_mut().zip(name.bytes().cycle()) {
-        *slot = byte;
-    }
-    Ok(key)
+fn key_bundle() -> Result<KeyBundle, String> {
+    // Unit tests exercise sealing and unsealing without touching a real
+    // credential store. The three values remain distinct so a wrong field
+    // selection is observable.
+    Ok(KeyBundle {
+        terminal_helper: [0x11; KEY_BYTES],
+        login_vault: [0x22; KEY_BYTES],
+        cookie_snapshot: [0x33; KEY_BYTES],
+    })
 }
 
-/// The one doorway every machine key goes through. Test builds and
-/// production builds use separate implementations: unit tests get a
-/// deterministic stand-in, while the application always uses the platform
-/// credential store.
-fn machine_key(name: &str) -> Result<[u8; 32], String> {
-    #[cfg(test)]
-    {
-        fixed_key(name)
-    }
-    #[cfg(not(test))]
-    {
-        machine_key_from_system(name)
+#[cfg(not(test))]
+fn key_bundle() -> Result<KeyBundle, String> {
+    KEY_BUNDLE.get_or_load(load_key_bundle_from_system)
+}
+
+/// Apply the platform-independent read/create policy around a credential
+/// store. `None` is the only state allowed to create; read errors and corrupt
+/// bytes return without invoking `write`.
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+fn load_or_create_key_bundle(
+    read: impl FnOnce() -> Result<Option<Vec<u8>>, String>,
+    write: impl FnOnce(&mut [u8]) -> Result<(), String>,
+) -> Result<KeyBundle, String> {
+    use zeroize::Zeroizing;
+
+    match read()? {
+        Some(bytes) => KeyBundle::decode(&Zeroizing::new(bytes)),
+        None => {
+            let bundle = KeyBundle::generate();
+            let mut bytes = Zeroizing::new(bundle.encode());
+            write(bytes.as_mut_slice())?;
+            Ok(bundle)
+        }
     }
 }
 
 /// The machine-local key encrypting the cookie snapshot: created on first
 /// use, then stable for the install. 32 bytes, never logged.
 pub fn cookie_key() -> Result<[u8; 32], String> {
-    machine_key("cookie-snapshot")
+    Ok(key_bundle()?.cookie_snapshot)
 }
 
-/// Fetch a 32-byte key the system keeps for this app, creating it the first
-/// time. **The only part of this file that differs by platform.**
+/// Fetch the one versioned key bundle this app keeps in the login Keychain,
+/// creating it only when Security.framework says it is absent.
 #[cfg(all(not(test), target_os = "macos"))]
-fn machine_key_from_system(name: &str) -> Result<[u8; 32], String> {
+fn load_key_bundle_from_system() -> Result<KeyBundle, String> {
     use security_framework::passwords::{get_generic_password, set_generic_password};
-    let service = key_service();
-    match get_generic_password(&service, name) {
-        Ok(bytes) if bytes.len() == 32 => {
-            let mut k = [0u8; 32];
-            k.copy_from_slice(&bytes);
-            Ok(k)
-        }
-        // Wrong length means a corrupt entry; regenerating would orphan the
-        // ciphertext it belongs to, so surface it instead.
-        Ok(bytes) => Err(format!("{name} key has {} bytes, expected 32", bytes.len())),
-        Err(_) => {
-            let key: [u8; 32] = rand::random();
-            set_generic_password(&service, name, &key)
-                .map_err(|e| format!("create {name} key: {e}"))?;
-            Ok(key)
-        }
-    }
+    use security_framework_sys::base::errSecItemNotFound;
+
+    load_or_create_key_bundle(
+        || match get_generic_password(KEY_BUNDLE_SERVICE, KEY_BUNDLE_ACCOUNT) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.code() == errSecItemNotFound => Ok(None),
+            Err(error) => Err(format!("read key bundle: {error}")),
+        },
+        |bytes| {
+            set_generic_password(KEY_BUNDLE_SERVICE, KEY_BUNDLE_ACCOUNT, bytes)
+                .map_err(|e| format!("create key bundle: {e}"))
+        },
+    )
 }
 
 /// The same, in the store this system keeps credentials in.
@@ -372,8 +456,9 @@ fn machine_key_from_system(name: &str) -> Result<[u8; 32], String> {
 /// machine. Nothing else about the arrangement changes: the logins are in
 /// the same encrypted file, sealed by the key this returns.
 #[cfg(all(not(test), target_os = "windows"))]
-fn machine_key_from_system(name: &str) -> Result<[u8; 32], String> {
+fn load_key_bundle_from_system() -> Result<KeyBundle, String> {
     use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::ERROR_NOT_FOUND;
     use windows::Win32::Security::Credentials::{
         CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
     };
@@ -381,41 +466,42 @@ fn machine_key_from_system(name: &str) -> Result<[u8; 32], String> {
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
-    let target = wide(&format!("{}:{name}", key_service()));
+    let target = wide(&format!("{KEY_BUNDLE_SERVICE}:{KEY_BUNDLE_ACCOUNT}"));
 
-    unsafe {
-        let mut found: *mut CREDENTIALW = std::ptr::null_mut();
-        if CredReadW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, None, &mut found).is_ok()
-            && !found.is_null()
-        {
-            let cred = &*found;
-            let size = cred.CredentialBlobSize as usize;
-            let stored = if size == 32 && !cred.CredentialBlob.is_null() {
-                let mut k = [0u8; 32];
-                k.copy_from_slice(std::slice::from_raw_parts(cred.CredentialBlob, size));
-                Some(k)
-            } else {
-                None
+    load_or_create_key_bundle(
+        || unsafe {
+            let mut found: *mut CREDENTIALW = std::ptr::null_mut();
+            match CredReadW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, None, &mut found) {
+                Ok(()) if !found.is_null() => {
+                    let cred = &*found;
+                    let size = cred.CredentialBlobSize as usize;
+                    let stored = if !cred.CredentialBlob.is_null() {
+                        Ok(Some(
+                            std::slice::from_raw_parts(cred.CredentialBlob, size).to_vec(),
+                        ))
+                    } else {
+                        Err("key bundle has a null credential blob".into())
+                    };
+                    CredFree(found as *const core::ffi::c_void);
+                    stored
+                }
+                Ok(()) => Err("read key bundle returned no credential".into()),
+                Err(error) if error.code() == ERROR_NOT_FOUND.to_hresult() => Ok(None),
+                Err(error) => Err(format!("read key bundle: {error}")),
+            }
+        },
+        |bytes| unsafe {
+            let cred = CREDENTIALW {
+                Type: CRED_TYPE_GENERIC,
+                TargetName: PWSTR(target.as_ptr() as *mut u16),
+                CredentialBlobSize: bytes.len() as u32,
+                CredentialBlob: bytes.as_mut_ptr(),
+                Persist: CRED_PERSIST_LOCAL_MACHINE,
+                ..Default::default()
             };
-            CredFree(found as *const core::ffi::c_void);
-            return match stored {
-                Some(k) => Ok(k),
-                None => Err(format!("{name} key has {size} bytes, expected 32")),
-            };
-        }
-
-        let mut key: [u8; 32] = rand::random();
-        let cred = CREDENTIALW {
-            Type: CRED_TYPE_GENERIC,
-            TargetName: PWSTR(target.as_ptr() as *mut u16),
-            CredentialBlobSize: 32,
-            CredentialBlob: key.as_mut_ptr(),
-            Persist: CRED_PERSIST_LOCAL_MACHINE,
-            ..Default::default()
-        };
-        CredWriteW(&cred, 0).map_err(|e| format!("create {name} key: {e}"))?;
-        Ok(key)
-    }
+            CredWriteW(&cred, 0).map_err(|e| format!("create key bundle: {e}"))
+        },
+    )
 }
 
 /// Systems this app has not been taught to keep a secret on.
@@ -424,8 +510,149 @@ fn machine_key_from_system(name: &str) -> Result<[u8; 32], String> {
 /// ciphertext: that arrangement encrypts nothing, and pretending otherwise
 /// is worse than saying the feature is not available here.
 #[cfg(all(not(test), not(any(target_os = "macos", target_os = "windows"))))]
-fn machine_key_from_system(name: &str) -> Result<[u8; 32], String> {
-    Err(format!(
-        "this system has no credential store this app can keep the {name} key in"
-    ))
+fn load_key_bundle_from_system() -> Result<KeyBundle, String> {
+    Err("this system has no credential store this app can keep a key bundle in".into())
+}
+
+#[cfg(test)]
+mod key_bundle_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    fn sample_bundle() -> KeyBundle {
+        KeyBundle {
+            terminal_helper: [0x41; KEY_BYTES],
+            login_vault: [0x52; KEY_BYTES],
+            cookie_snapshot: [0x63; KEY_BYTES],
+        }
+    }
+
+    #[test]
+    fn bundle_wire_format_is_strict_and_round_trips() {
+        let bundle = sample_bundle();
+        let bytes = bundle.encode();
+        assert_eq!(bytes.len(), KEY_BUNDLE_BYTES);
+        assert_eq!(KeyBundle::decode(&bytes).unwrap(), bundle);
+
+        let mut wrong_magic = bytes.clone();
+        wrong_magic[0] ^= 0xff;
+        assert!(KeyBundle::decode(&wrong_magic).is_err());
+        assert!(KeyBundle::decode(&bytes[..bytes.len() - 1]).is_err());
+        let mut too_long = bytes;
+        too_long.push(0);
+        assert!(KeyBundle::decode(&too_long).is_err());
+    }
+
+    #[test]
+    fn cache_single_flights_concurrent_consumers() {
+        const THREADS: usize = 12;
+        let cache = Arc::new(KeyBundleCache::new());
+        let loads = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut workers = Vec::new();
+        for _ in 0..THREADS {
+            let cache = Arc::clone(&cache);
+            let loads = Arc::clone(&loads);
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                cache
+                    .get_or_load(|| {
+                        loads.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        Ok(sample_bundle())
+                    })
+                    .unwrap()
+            }));
+        }
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), sample_bundle());
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cache_does_not_retry_a_rejected_authorization() {
+        let cache = KeyBundleCache::new();
+        let loads = AtomicUsize::new(0);
+        let first = cache.get_or_load(|| {
+            loads.fetch_add(1, Ordering::SeqCst);
+            Err("authorization cancelled".into())
+        });
+        let second = cache.get_or_load(|| {
+            loads.fetch_add(1, Ordering::SeqCst);
+            Ok(sample_bundle())
+        });
+        assert_eq!(first.unwrap_err(), "authorization cancelled");
+        assert_eq!(second.unwrap_err(), "authorization cancelled");
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn only_a_missing_item_is_created() {
+        let writes = Cell::new(0);
+        let created = load_or_create_key_bundle(
+            || Ok(None),
+            |bytes| {
+                writes.set(writes.get() + 1);
+                assert_eq!(bytes.len(), KEY_BUNDLE_BYTES);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(writes.get(), 1);
+        assert_eq!(KeyBundle::decode(&created.encode()).unwrap(), created);
+    }
+
+    #[test]
+    fn a_read_error_never_falls_through_to_create() {
+        let writes = Cell::new(0);
+        let result = load_or_create_key_bundle(
+            || Err("authorization denied".into()),
+            |_| {
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err(), "authorization denied");
+        assert_eq!(writes.get(), 0);
+    }
+
+    #[test]
+    fn a_corrupt_existing_bundle_is_not_overwritten() {
+        let writes = Cell::new(0);
+        let result = load_or_create_key_bundle(
+            || Ok(Some(b"not-a-key-bundle".to_vec())),
+            |_| {
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(writes.get(), 0);
+    }
+
+    #[test]
+    fn test_consumers_receive_distinct_keys() {
+        let bundle = key_bundle().unwrap();
+        assert_eq!(helper_token().unwrap(), [0x11; KEY_BYTES]);
+        assert_eq!(bundle.login_vault, [0x22; KEY_BYTES]);
+        assert_eq!(cookie_key().unwrap(), [0x33; KEY_BYTES]);
+    }
+
+    #[test]
+    fn legacy_vault_file_is_ignored_without_being_modified() {
+        let preferred = tempfile::tempdir().unwrap();
+        let _guard = test_vault_guard(preferred.path().to_path_buf());
+        let dir = VAULT_DIR.get().unwrap();
+        let legacy = dir.join("logins.vault");
+        let marker = b"legacy-vault-must-remain-untouched";
+        std::fs::write(&legacy, marker).unwrap();
+
+        assert!(vault::read().unwrap().is_empty());
+        assert_eq!(std::fs::read(&legacy).unwrap(), marker);
+        assert!(dir.join("logins.v2.vault").exists());
+    }
 }

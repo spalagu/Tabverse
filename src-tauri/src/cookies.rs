@@ -29,9 +29,12 @@ use std::time::Duration;
 use tauri::webview::cookie::{Cookie, Expiration, SameSite};
 use tauri::{AppHandle, Manager};
 
-const FILE_NAME: &str = "browser-session-cookies.json";
+// A new namespace is intentional: the key bundle is not derived from or
+// compatible with the three legacy Keychain items, so old ciphertext must
+// never be opened as though it used the new cookie key.
+const FILE_NAME: &str = "browser-session-cookies.v2.sealed";
 
-const SEALED_MAGIC: &[u8] = b"TABVERSECOOKIES1";
+const SEALED_MAGIC: &[u8] = b"TABVERSECOOKIES2";
 
 fn seal(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     use aes_gcm::aead::Aead;
@@ -363,4 +366,15 @@ fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+
+    #[test]
+    fn cookie_runtime_uses_only_the_key_bundle_namespace() {
+        assert_eq!(FILE_NAME, "browser-session-cookies.v2.sealed");
+        assert_eq!(SEALED_MAGIC, b"TABVERSECOOKIES2");
+    }
 }
