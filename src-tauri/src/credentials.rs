@@ -17,14 +17,14 @@ const SEP: char = '\u{1}';
 const WEB_SERVICE: &str = "Tabverse Web Passwords";
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 const AUTH_SERVICE: &str = "Tabverse HTTP Auth";
-#[cfg_attr(test, allow(dead_code))]
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
 const KEY_BUNDLE_SERVICE: &str = "Tabverse Key Bundle";
-#[cfg_attr(test, allow(dead_code))]
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
 const KEY_BUNDLE_ACCOUNT: &str = "key-bundle-v1";
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 const KEY_BUNDLE_MAGIC: &[u8] = b"TABVERSEKEYBUNDLE1";
 const KEY_BYTES: usize = 32;
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 const KEY_BUNDLE_BYTES: usize = KEY_BUNDLE_MAGIC.len() + KEY_BYTES * 3;
 
 /// The only secret stored in the platform credential store.
@@ -39,8 +39,8 @@ struct KeyBundle {
     cookie_snapshot: [u8; KEY_BYTES],
 }
 
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 impl KeyBundle {
-    #[cfg_attr(test, allow(dead_code))]
     fn generate() -> Self {
         Self {
             terminal_helper: rand::random(),
@@ -406,6 +406,7 @@ fn key_bundle() -> Result<KeyBundle, String> {
 /// Apply the platform-independent read/create policy around a credential
 /// store. `None` is the only state allowed to create; read errors and corrupt
 /// bytes return without invoking `write`.
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 fn load_or_create_key_bundle(
     read: impl FnOnce() -> Result<Option<Vec<u8>>, String>,
     write: impl FnOnce(&mut [u8]) -> Result<(), String>,
