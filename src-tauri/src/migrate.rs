@@ -14,10 +14,12 @@ const FORMAT_VERSION: u8 = 1;
 fn excluded_file(rel: &str) -> bool {
     // Login state: the engine's own website data, declared out of scope.
     rel == "browser-session-cookies.json"
+        || rel == "browser-session-cookies.v2.sealed"
         // The vault is not copied raw — its bytes are sealed under *this*
         // machine's key and would not open on another. Its contents ride in
         // the `passwords` section instead, re-sealed on arrival.
         || rel == "logins.vault"
+        || rel == "logins.v2.vault"
         // A crash-time temp file is not state.
         || rel.ends_with(".tmp")
         // Favicon cache (cosmetic, re-fetched).
@@ -520,7 +522,13 @@ mod tests {
         std::fs::write(dir.join("userscripts").join("abcd.js"), b"marker();").unwrap();
         // Excluded: login state and the raw vault, plus a favicon and a temp.
         std::fs::write(dir.join("browser-session-cookies.json"), b"SECRETCOOKIE").unwrap();
+        std::fs::write(
+            dir.join("browser-session-cookies.v2.sealed"),
+            b"NEWSECRETCOOKIE",
+        )
+        .unwrap();
         std::fs::write(dir.join("logins.vault"), b"RAWVAULTBYTES").unwrap();
+        std::fs::write(dir.join("logins.v2.vault"), b"NEWRAWVAULTBYTES").unwrap();
         std::fs::create_dir_all(dir.join("favicons")).unwrap();
         std::fs::write(dir.join("favicons").join("x.dataurl"), b"icon").unwrap();
         std::fs::write(dir.join("session.json.tmp"), b"half").unwrap();
@@ -554,7 +562,9 @@ mod tests {
         assert!(files.contains_key("session.json"));
         assert!(files.contains_key("userscripts/abcd.js"));
         assert!(!files.contains_key("browser-session-cookies.json"));
+        assert!(!files.contains_key("browser-session-cookies.v2.sealed"));
         assert!(!files.contains_key("logins.vault"));
+        assert!(!files.contains_key("logins.v2.vault"));
         assert!(!files.contains_key("favicons/x.dataurl"));
         assert!(!files.keys().any(|k| k.ends_with(".tmp")));
     }
@@ -589,6 +599,8 @@ mod tests {
         );
         // The excluded things never arrive on the far side either.
         assert!(!dst_state.join("browser-session-cookies.json").exists());
+        assert!(!dst_state.join("browser-session-cookies.v2.sealed").exists());
+        assert!(!dst_state.join("logins.v2.vault").exists());
         assert!(!dst_state.join("favicons").exists());
     }
 

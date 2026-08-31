@@ -67,6 +67,7 @@ libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+security-framework-sys = "2"
 # Launch Services speaks CoreFoundation strings and URLs, and the default-app
 # calls in default_apps.rs are plain C functions rather than Objective-C
 # messages. Already in the tree underneath security-framework — same version,
