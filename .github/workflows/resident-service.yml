@@ -83,18 +83,21 @@ jobs:
         shell: bash
         run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_ENV, 'TABVERSE_RESIDENT_SIGNING_KEY_HEX=' + '2a'.repeat(32) + '\n')"
 
+      - name: Select package takeover versions
+        run: node tools/prepare-resident-package-acceptance.mjs --export-version-pair
+
       - name: Build and install package v1
         shell: bash
         run: |
           set -euo pipefail
           npm run tauri build -- --bundles "${{ matrix.bundle }}"
-          node tools/prepare-resident-package-acceptance.mjs --phase v1 --version 0.0.1
+          node tools/prepare-resident-package-acceptance.mjs --phase v1 --version "$TABVERSE_RESIDENT_PACKAGE_V1_VERSION"
 
       - name: Build package v2 without installing it
         shell: bash
         run: |
           set -euo pipefail
-          node tools/prepare-resident-package-acceptance.mjs --set-version 0.0.2
+          node tools/prepare-resident-package-acceptance.mjs --set-version "$TABVERSE_RESIDENT_PACKAGE_V2_VERSION"
           npm run tauri build -- --bundles "${{ matrix.bundle }}"
 
       - name: Install package v2 while runtimes live and exercise takeover
