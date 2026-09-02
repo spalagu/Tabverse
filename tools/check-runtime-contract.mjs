@@ -228,11 +228,11 @@ const checks = [
   ],
   [
     lib.includes("fn browser_navigation_action(") &&
-      lib.includes(
-        'browser_navigation_action(&app, &webview, &tab_id, "go"',
+      /browser_navigation_action\(\s*&app,\s*&webview,\s*&tab_id,\s*"go"/s.test(
+        lib,
       ) &&
-      lib.includes(
-        "browser_navigation_action(&app, &wv, &tab_id, &action, url.as_deref())",
+      /browser_navigation_action\(\s*&app,\s*&wv,\s*&tab_id,\s*&action,\s*url\.as_deref\(\)\s*\)/s.test(
+        lib,
       ) &&
       lib.includes("nav_failures::remember_request(tab_id, url)") &&
       lib.includes("nav_watchdog::watch(app, tab_id, url)"),
