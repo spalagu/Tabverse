@@ -20,12 +20,12 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Tauri CEF is not published on crates.io yet. Pin the public Alpha.25 tag so
-# every developer and CI job resolves the same source revision. The follow-up
-# CEF stabilization patch is tracked separately until it has a public ref.
+# Tauri CEF is not published on crates.io yet. Pin the public Tabverse fork to
+# an immutable revision based on Alpha.25 so every developer and CI job resolves
+# the same reviewed CEF runtime and handler fixes.
 [patch.crates-io]
-tauri = { git = "https://github.com/tauri-apps/tauri.git", tag = "tauri-cef-v3.0.0-alpha.25" }
-tauri-build = { git = "https://github.com/tauri-apps/tauri.git", tag = "tauri-cef-v3.0.0-alpha.25" }
+tauri = { git = "https://github.com/spalagu/tauri.git", rev = "3158a834eadbece24b9709e9ce45c32062492b69" }
+tauri-build = { git = "https://github.com/spalagu/tauri.git", rev = "3158a834eadbece24b9709e9ce45c32062492b69" }
 
 [profile.release]
 lto = true

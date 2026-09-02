@@ -11,8 +11,10 @@ const checks = [
   [cargo.includes('runtime-wry = ["tauri/wry"]'), "runtime-wry provider feature is missing"],
   [cargo.includes('runtime-cef = ["tauri/cef"]'), "runtime-cef provider feature is missing"],
   [
-    rootCargo.match(/tag = "tauri-cef-v3\.0\.0-alpha\.25"/g)?.length === 2,
-    "tauri and tauri-build must share the public Alpha.25 tag",
+    rootCargo.match(
+      /git = "https:\/\/github\.com\/spalagu\/tauri\.git", rev = "3158a834eadbece24b9709e9ce45c32062492b69"/g,
+    )?.length === 2,
+    "tauri and tauri-build must share the immutable public CEF fork revision",
   ],
   [
     main.includes('#[cfg_attr(feature = "runtime-cef", tauri::cef_entry_point)]'),

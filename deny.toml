@@ -48,5 +48,5 @@ allow = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
-  "https://github.com/tauri-apps/tauri.git",
+  "https://github.com/spalagu/tauri.git",
 ]
