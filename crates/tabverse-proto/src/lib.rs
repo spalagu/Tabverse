@@ -32,11 +32,15 @@ pub enum TermEvent {
 #[serde(rename_all = "camelCase")]
 pub enum SharedTabType {
     Terminal,
-    Agent,
     /// v3: the whole app, not one tab. A v2 client has no renderer for this
     /// and must be told "cannot display" rather than shown a blank grid;
     /// the hub rejects the join before any app frame is sent.
     App,
+    /// v4: one non-terminal tab transported through its plugin-owned
+    /// `RemoteContribution`. The Join client renders the app shell with a
+    /// one-tab mirror, but older app-share clients must be refused because
+    /// the semantic snapshot/frame family did not exist before v4.
+    Contribution,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,8 +48,7 @@ pub enum SharedTabType {
 pub enum Access {
     /// Watch only.
     View,
-    /// Watch, and put input in — type at the terminal, prompt the agent, stop
-    /// a turn. Cannot authorise a tool call.
+    /// Watch and send interaction input. Cannot authorise privileged work.
     Steer,
     /// Everything Steer can do, plus deciding permission requests.
     Approve,
@@ -89,19 +92,18 @@ pub enum RemoteClientMsg {
     /// Liveness probe.
     Ping,
 
-    // ── v2: agent tabs ───────────────────────────────────────────────────
-    /// Say something to the agent. Requires Steer.
-    #[serde(rename_all = "camelCase")]
-    AgentPrompt { text: String },
-    /// Answer a permission request. Requires Approve.
-    #[serde(rename_all = "camelCase")]
-    AgentAnswer {
+    // Read-only compatibility decoder for requests emitted by the retired
+    // v2 tab type. The host answers these with a structured End frame.
+    #[serde(rename = "agentPrompt", rename_all = "camelCase")]
+    RetiredPrompt { text: String },
+    #[serde(rename = "agentAnswer", rename_all = "camelCase")]
+    RetiredAnswer {
         call_id: String,
         allow: bool,
         reason: Option<String>,
     },
-    /// Stop the turn in progress. Requires Steer.
-    AgentCancel,
+    #[serde(rename = "agentCancel")]
+    RetiredCancel,
 
     // ── v3: app-level shares ────────────────────────────────────────────
     /// Invoke a host command over the app share. Requires Steer.
@@ -127,6 +129,64 @@ pub enum RemoteClientMsg {
         head: String,
         body: Option<String>,
     },
+
+    // ── v4: Browser http-stream-v2 ───────────────────────────────────
+    /// Open a requester-private HTTP(S) stream. The host derives shareId and
+    /// viewerId from the authenticated connection; neither is accepted from
+    /// client data.
+    #[serde(rename_all = "camelCase")]
+    BrowserOpen {
+        stream_id: u64,
+        tab_id: String,
+        /// Correlation only, never bearer authority. The host re-derives it
+        /// from the authenticated attachment and compares the full grant owner.
+        grant_id: String,
+        attachment_id: String,
+        attachment_generation: u64,
+        method: String,
+        url: String,
+        headers: Vec<(String, String)>,
+        body_len: Option<u64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    BrowserRequestChunk {
+        stream_id: u64,
+        seq: u64,
+        b64: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    BrowserRequestEnd { stream_id: u64 },
+    /// Add bytes to the response window. The host sends no response chunk
+    /// unless this requester has granted enough credit.
+    #[serde(rename_all = "camelCase")]
+    BrowserCredit { stream_id: u64, bytes: u64 },
+    #[serde(rename_all = "camelCase")]
+    BrowserCancel {
+        stream_id: u64,
+        reason: Option<String>,
+    },
+
+    // ── v4: contribution-owned ordered semantic streams ───────────────
+    #[serde(rename_all = "camelCase")]
+    RemoteAck {
+        tab_id: String,
+        epoch: String,
+        frame_seq: u64,
+    },
+    #[serde(rename_all = "camelCase")]
+    RemoteResnapshot {
+        tab_id: String,
+        epoch: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RemoteIntent {
+        tab_id: String,
+        attachment_id: String,
+        attachment_generation: u64,
+        intent_id: String,
+        name: String,
+        args: serde_json::Value,
+    },
 }
 
 /// Host -> client messages for a shared terminal session.
@@ -143,6 +203,11 @@ pub enum RemoteHostMsg {
         /// v2 onwards. Absent for a v1 client, which only ever sees terminals.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_type: Option<SharedTabType>,
+        /// v4 server-issued identity; clients must echo both fields on intents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attachment_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attachment_generation: Option<u64>,
     },
     /// What this viewer may do. Sent exactly once per viewer, right after its
     /// join is accepted and always before the snapshot, so clients can render
@@ -190,38 +255,6 @@ pub enum RemoteHostMsg {
     },
     Pong,
 
-    // ── v2: agent tabs ───────────────────────────────────────────────────
-    /// One session event, verbatim.
-    ///
-    /// Carried as JSON rather than as a typed event so this crate stays free of
-    /// the agent runtime: it is compiled into the browser wasm client too, and
-    /// the whole turn loop has no business going there. Both ends recover the
-    /// type at their own edge.
-    #[serde(rename_all = "camelCase")]
-    AgentEvent {
-        event: serde_json::Value,
-    },
-    /// Everything that happened before this viewer arrived, in order.
-    ///
-    /// Separate from `AgentEvent` so a client can tell catching up from
-    /// watching, and can render the backlog in one pass rather than animating
-    /// its way through a run that already finished.
-    #[serde(rename_all = "camelCase")]
-    AgentSnapshot {
-        events: Vec<serde_json::Value>,
-    },
-    /// Somebody else answered a permission request first.
-    ///
-    /// Sent to whoever lost the race, rather than dropping their answer in
-    /// silence: a button that does nothing and says nothing is indistinguishable
-    /// from a broken one.
-    #[serde(rename_all = "camelCase")]
-    AgentDecisionTaken {
-        call_id: String,
-        /// Who decided, for display. "the host" or a viewer's name.
-        by: String,
-    },
-
     // ── v3: app-level shares ────────────────────────────────────────────
     /// Answer to a client Rpc: the command's result, or its error text.
     #[serde(rename_all = "camelCase")]
@@ -259,10 +292,73 @@ pub enum RemoteHostMsg {
         head: String,
         body: Option<String>,
     },
+
+    // ── v4: Browser http-stream-v2 ───────────────────────────────────
+    #[serde(rename_all = "camelCase")]
+    BrowserResponseHead {
+        stream_id: u64,
+        status: u16,
+        headers: Vec<(String, String)>,
+        final_url: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    BrowserResponseChunk {
+        stream_id: u64,
+        seq: u64,
+        b64: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    BrowserResponseEnd {
+        stream_id: u64,
+    },
+    #[serde(rename_all = "camelCase")]
+    BrowserResponseError {
+        stream_id: u64,
+        code: String,
+        message: String,
+    },
+
+    // ── v4: contribution-owned ordered semantic streams ───────────────
+    #[serde(rename_all = "camelCase")]
+    ContributionSnapshot {
+        tab_id: String,
+        kind: String,
+        epoch: String,
+        snapshot_revision: u64,
+        last_frame_seq: u64,
+        state: serde_json::Value,
+    },
+    #[serde(rename_all = "camelCase")]
+    ContributionFrame {
+        tab_id: String,
+        kind: String,
+        epoch: String,
+        frame_seq: u64,
+        payload: serde_json::Value,
+    },
+    #[serde(rename_all = "camelCase")]
+    IntentResult {
+        attachment_id: String,
+        attachment_generation: u64,
+        intent_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ok: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        err: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    PrivateStream {
+        attachment_id: String,
+        attachment_generation: u64,
+        stream_id: String,
+        seq: u64,
+        fin: bool,
+        payload_b64: String,
+    },
 }
 
 /// Highest protocol version this build speaks.
-pub const REMOTE_PROTO_VERSION: u32 = 3;
+pub const REMOTE_PROTO_VERSION: u32 = 4;
 
 /// The version that only knew how to share a terminal. Still spoken, because
 /// clients in the wild are built against it.
@@ -296,13 +392,8 @@ pub fn announce_proto(ticket_proto: Option<u32>) -> u32 {
 /// frame it was not built to parse. Its decoder fails the whole connection on
 /// an unknown variant, so this is the difference between an old client working
 /// and an old client dropping.
-pub fn agent_payloads_allowed(proto: u32) -> bool {
-    proto >= 2
-}
-
 /// Can the app-level payload family be sent to a client speaking `proto`?
-/// Same rule as the agent family: an older client's decoder fails the whole
-/// connection on an unknown variant.
+/// An older client's decoder fails the whole connection on an unknown variant.
 pub fn app_payloads_allowed(proto: u32) -> bool {
     proto >= 3
 }
@@ -377,6 +468,8 @@ mod tests {
             cols: 80,
             rows: 24,
             tab_type: None,
+            attachment_id: None,
+            attachment_generation: None,
         };
         assert_eq!(serde_json::to_string(&welcome).unwrap(), v1_wire::WELCOME);
 
@@ -428,7 +521,7 @@ mod tests {
         assert!(Access::Steer.may_steer());
         assert!(
             !Access::Steer.may_approve(),
-            "someone allowed to talk to the agent is not thereby allowed to authorise it"
+            "steering does not grant approval authority"
         );
         assert!(Access::Approve.may_steer());
         assert!(Access::Approve.may_approve());
@@ -466,65 +559,32 @@ mod tests {
     }
 
     #[test]
-    fn agent_payloads_are_withheld_from_a_v1_client() {
-        // Its decoder fails the connection on an unknown variant, so this is
-        // the difference between an old client working and an old client
-        // dropping mid-session.
-        assert!(!agent_payloads_allowed(1));
-        assert!(agent_payloads_allowed(2));
-    }
-
-    #[test]
-    fn agent_frames_round_trip_with_their_payload_intact() {
-        let event = serde_json::json!({ "type": "assistant_text", "delta": "hi" });
-        let frame = RemoteHostMsg::AgentEvent {
-            event: event.clone(),
-        };
-        let json = serde_json::to_string(&frame).unwrap();
-        match serde_json::from_str::<RemoteHostMsg>(&json).unwrap() {
-            RemoteHostMsg::AgentEvent { event: got } => assert_eq!(got, event),
-            other => panic!("{other:?}"),
+    fn retired_v2_requests_decode_into_unsupported_only_variants() {
+        let cases = [
+            (r#"{"type":"agentPrompt","text":"hello"}"#, "prompt"),
+            (
+                r#"{"type":"agentAnswer","callId":"c1","allow":false,"reason":"no"}"#,
+                "answer",
+            ),
+            (r#"{"type":"agentCancel"}"#, "cancel"),
+        ];
+        for (json, expected) in cases {
+            let decoded: RemoteClientMsg = serde_json::from_str(json).unwrap();
+            let actual = match decoded {
+                RemoteClientMsg::RetiredPrompt { .. } => "prompt",
+                RemoteClientMsg::RetiredAnswer { .. } => "answer",
+                RemoteClientMsg::RetiredCancel => "cancel",
+                other => panic!("unexpected compatibility decode: {other:?}"),
+            };
+            assert_eq!(actual, expected);
         }
-
-        let answer = RemoteClientMsg::AgentAnswer {
-            call_id: "c1".into(),
-            allow: false,
-            reason: Some("not that one".into()),
-        };
-        let json = serde_json::to_string(&answer).unwrap();
-        assert!(json.contains("\"callId\""), "camelCase on the wire: {json}");
-        match serde_json::from_str::<RemoteClientMsg>(&json).unwrap() {
-            RemoteClientMsg::AgentAnswer {
-                call_id,
-                allow,
-                reason,
-            } => {
-                assert_eq!(call_id, "c1");
-                assert!(!allow);
-                assert_eq!(reason.as_deref(), Some("not that one"));
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_welcome_for_an_agent_tab_says_so() {
-        let frame = RemoteHostMsg::Welcome {
-            proto: 2,
-            tab_title: "Agent".into(),
-            cols: 0,
-            rows: 0,
-            tab_type: Some(SharedTabType::Agent),
-        };
-        let json = serde_json::to_string(&frame).unwrap();
-        assert!(json.contains("\"tabType\":\"agent\""), "{json}");
     }
 
     #[test]
     fn v3_frames_round_trip_and_withhold_from_older_clients() {
         // The app payload family: round-trips intact, and is never sent to a
         // client below v3, whose decoder fails the connection on an unknown
-        // variant (the same rule the agent family rests on).
+        // variant.
         assert!(!app_payloads_allowed(2));
         assert!(!app_payloads_allowed(1));
         assert!(app_payloads_allowed(3));
@@ -591,21 +651,152 @@ mod tests {
             cols: 0,
             rows: 0,
             tab_type: Some(SharedTabType::App),
+            attachment_id: None,
+            attachment_generation: None,
         };
         let json = serde_json::to_string(&frame).unwrap();
         assert!(json.contains("\"tabType\":\"app\""), "{json}");
 
-        // The v2 wire: an agent welcome from before this change parses to
-        // exactly what it did, and a v2 terminal welcome carries no tabType.
+        // A v2 terminal welcome keeps its established wire shape.
         let v2 = RemoteHostMsg::Welcome {
             proto: 2,
             tab_title: "zsh".into(),
             cols: 80,
             rows: 24,
             tab_type: Some(SharedTabType::Terminal),
+            attachment_id: None,
+            attachment_generation: None,
         };
         let json = serde_json::to_string(&v2).unwrap();
         assert!(json.contains("\"tabType\":\"terminal\""), "{json}");
         assert_eq!(negotiate(2), 2, "a v2 client stays on v2");
+    }
+
+    #[test]
+    fn v4_contribution_frames_and_attachment_identity_round_trip() {
+        assert_eq!(negotiate(4), 4);
+        assert_eq!(announce_proto(Some(4)), 4);
+
+        let welcome = RemoteHostMsg::Welcome {
+            proto: 4,
+            tab_title: "Tabverse".into(),
+            cols: 0,
+            rows: 0,
+            tab_type: Some(SharedTabType::App),
+            attachment_id: Some("attachment-7".into()),
+            attachment_generation: Some(1),
+        };
+        let json = serde_json::to_string(&welcome).unwrap();
+        assert!(json.contains(r#""attachmentId":"attachment-7""#), "{json}");
+        assert!(json.contains(r#""attachmentGeneration":1"#), "{json}");
+
+        let one_tab = RemoteHostMsg::Welcome {
+            proto: 4,
+            tab_title: "Files".into(),
+            cols: 0,
+            rows: 0,
+            tab_type: Some(SharedTabType::Contribution),
+            attachment_id: Some("attachment-8".into()),
+            attachment_generation: Some(1),
+        };
+        let json = serde_json::to_string(&one_tab).unwrap();
+        assert!(json.contains(r#""tabType":"contribution""#), "{json}");
+
+        let snapshot = RemoteHostMsg::ContributionSnapshot {
+            tab_id: "browser-1".into(),
+            kind: "browser".into(),
+            epoch: "epoch-1".into(),
+            snapshot_revision: 8,
+            last_frame_seq: 13,
+            state: serde_json::json!({"url": "http://intranet/"}),
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        match serde_json::from_str::<RemoteHostMsg>(&json).unwrap() {
+            RemoteHostMsg::ContributionSnapshot {
+                tab_id,
+                kind,
+                snapshot_revision,
+                last_frame_seq,
+                ..
+            } => {
+                assert_eq!(tab_id, "browser-1");
+                assert_eq!(kind, "browser");
+                assert_eq!((snapshot_revision, last_frame_seq), (8, 13));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let intent = RemoteClientMsg::RemoteIntent {
+            tab_id: "browser-1".into(),
+            attachment_id: "attachment-7".into(),
+            attachment_generation: 1,
+            intent_id: "intent-1".into(),
+            name: "browser.navigate".into(),
+            args: serde_json::json!({"url": "http://intranet/"}),
+        };
+        let json = serde_json::to_string(&intent).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<RemoteClientMsg>(&json).unwrap(),
+            RemoteClientMsg::RemoteIntent {
+                attachment_generation: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn browser_http_stream_v2_frames_preserve_binary_and_flow_control_fields() {
+        let open = RemoteClientMsg::BrowserOpen {
+            stream_id: 9,
+            tab_id: "browser-1".into(),
+            grant_id: "browser-grant-v1:attachment-7:3:browser-1".into(),
+            attachment_id: "attachment-7".into(),
+            attachment_generation: 3,
+            method: "POST".into(),
+            url: "https://intranet/upload".into(),
+            headers: vec![("content-type".into(), "application/octet-stream".into())],
+            body_len: Some(5),
+        };
+        let json = serde_json::to_string(&open).unwrap();
+        assert!(json.contains(r#""type":"browserOpen""#), "{json}");
+        assert!(matches!(
+            serde_json::from_str::<RemoteClientMsg>(&json).unwrap(),
+            RemoteClientMsg::BrowserOpen {
+                stream_id: 9,
+                grant_id,
+                attachment_generation: 3,
+                body_len: Some(5),
+                ..
+            } if grant_id == "browser-grant-v1:attachment-7:3:browser-1"
+        ));
+
+        for frame in [
+            RemoteHostMsg::BrowserResponseHead {
+                stream_id: 9,
+                status: 200,
+                headers: vec![("content-type".into(), "application/octet-stream".into())],
+                final_url: "https://intranet/final".into(),
+            },
+            RemoteHostMsg::BrowserResponseChunk {
+                stream_id: 9,
+                seq: 0,
+                b64: "AP8=".into(),
+            },
+            RemoteHostMsg::BrowserResponseEnd { stream_id: 9 },
+            RemoteHostMsg::BrowserResponseError {
+                stream_id: 10,
+                code: "unsupported-sse".into(),
+                message: "not enabled".into(),
+            },
+        ] {
+            let json = serde_json::to_string(&frame).unwrap();
+            serde_json::from_str::<RemoteHostMsg>(&json).unwrap();
+        }
+        let credit = serde_json::to_string(&RemoteClientMsg::BrowserCredit {
+            stream_id: 9,
+            bytes: 65_536,
+        })
+        .unwrap();
+        assert!(credit.contains(r#""bytes":65536"#), "{credit}");
     }
 }

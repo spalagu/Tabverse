@@ -17,7 +17,7 @@ function renderSettings(): Document {
   return new DOMParser().parseFromString(html, "text/html");
 }
 
-const EXPECTED_SECTION_COUNT = 18;
+const EXPECTED_SECTION_COUNT = 19;
 
 describe("settings section anchors", () => {
   it("gives every rendered section an id, all distinct", () => {

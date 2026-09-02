@@ -74,6 +74,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   //
   // ── General: the app itself, before any of its domains. ──
   section("status", STR.settings.status, "general"),
+  section("plugins", STR.settings.plugins, "general"),
   section("appearance", STR.settings.appearance, "general"),
   section("default-apps", STR.settings.defaultApps, "general"),
   section("keyboard", STR.settings.keyboard, "general"),

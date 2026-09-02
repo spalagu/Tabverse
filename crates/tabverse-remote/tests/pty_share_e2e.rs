@@ -1000,15 +1000,6 @@ async fn a_client_speaking_v1_still_joins_and_drives_a_terminal() -> anyhow::Res
             ),
             other => panic!("{other:?}"),
         }
-        assert!(
-            !seen.iter().any(|e| matches!(
-                e,
-                RemoteHostMsg::AgentEvent { .. }
-                    | RemoteHostMsg::AgentSnapshot { .. }
-                    | RemoteHostMsg::AgentDecisionTaken { .. }
-            )),
-            "no v2-only payload may reach a v1 client"
-        );
     }
 
     // And it can actually work: the session is usable, not merely accepted.
@@ -1079,6 +1070,8 @@ async fn a_new_viewer_greets_a_v1_host_in_v1() -> anyhow::Result<()> {
                         cols: 80,
                         rows: 24,
                         tab_type: None,
+                        attachment_id: None,
+                        attachment_generation: None,
                     },
                 )
                 .await;

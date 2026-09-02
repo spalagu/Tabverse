@@ -70,7 +70,9 @@ export async function startShare(
   const { invoke } = await import("@tauri-apps/api/core");
   const res = await invoke<{ shareId: string; ticket: string }>("share_start", {
     tabId,
+    kind: tab.type,
     title: tab.title,
+    browserUrl: tab.url,
     ttlSecs,
     access: level,
   });

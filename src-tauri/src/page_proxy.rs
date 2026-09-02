@@ -58,7 +58,7 @@ pub struct PageProxy {
 impl PageProxy {
     /// Bind 127.0.0.1 on a port the OS picks, and start accepting.
     ///
-    /// Binding before returning is deliberate — the agent_login.rs rule: if
+    /// Binding before returning is deliberate: if
     /// the port cannot be had, the caller finds out now, while it can still
     /// say so, rather than after pointing pages at a proxy that is not
     /// there. A dynamic port, because nothing upstream may depend on a

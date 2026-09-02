@@ -1,6 +1,3 @@
-mod agent_bridge;
-mod agent_http;
-mod agent_login;
 mod basic_auth;
 #[cfg(target_os = "windows")]
 mod basic_auth_win;
@@ -68,6 +65,7 @@ pub mod page_proxy;
 mod passwords;
 mod profiles;
 mod remote_proxy;
+mod resident;
 mod templates;
 mod terminal_helper;
 mod transfer;
@@ -83,7 +81,6 @@ use std::sync::{Arc, Mutex};
 use base64::Engine as _;
 use tabverse_fs::{FileMeta, FsBackend, Inspection, Listing};
 use tabverse_proto::{RemoteHostMsg, TermEvent};
-use tabverse_remote::source::agent::AgentSource;
 use tabverse_remote::source::terminal::TerminalSource;
 use tabverse_remote::{
     join, JoinHandle, LocalSink, RemoteHub, SessionBridge, SourceRegistry, Viewport,
@@ -188,6 +185,7 @@ impl LocalSink for WebviewSink {
 
 struct AppState {
     helper: terminal_helper::TerminalHelper,
+    resident: resident::ResidentBridge,
     hub: Arc<RemoteHub>,
     bridges: Arc<Mutex<HashMap<String, Arc<SessionBridge>>>>,
     helper_backlog: Arc<Mutex<HashMap<String, Vec<HelperFrame>>>>,
@@ -585,6 +583,29 @@ async fn state_list(app: AppHandle) -> Result<Vec<String>, String> {
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn state_migrate_session_v2(
+    app: AppHandle,
+) -> Result<tabverse_fs::session_migration::MigrationReport, String> {
+    let dir = state_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tabverse_fs::session_migration::migrate_session_v1_to_v2(&dir).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn state_restore_session_backup(app: AppHandle, sha256: String) -> Result<(), String> {
+    let dir = state_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        tabverse_fs::session_migration::restore_session_backup(&dir, &sha256)
+            .map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 const THEME_SCOPE: &str = "theme";
 
 /// The saved theme preference. Anything unreadable — no file, bad JSON, an
@@ -795,7 +816,7 @@ fn helper_session(
         .ok_or_else(|| format!("unknown helper session {id}"))?;
     let client = state
         .helper
-        .current()
+        .session(id)
         .ok_or_else(|| "terminal helper is not connected".to_string())?;
     Ok((client, session, generation))
 }
@@ -806,6 +827,8 @@ fn term_create(
     state: State<'_, AppState>,
     on_event: Channel<TermEvent>,
     tab_id: Option<String>,
+    owner_key: Option<String>,
+    resident_runtime_id: Option<String>,
     cols: u16,
     rows: u16,
     cwd: Option<String>,
@@ -820,8 +843,15 @@ fn term_create(
         profile,
         run_on_start,
     })?;
-    let request = serde_json::json!({"shell":opts.shell,"cwd":opts.cwd,"cols":opts.cols,"rows":opts.rows,"env":opts.env,"shell_integration":opts.shell_integration,"run_on_start":opts.run_on_start});
-    let client = state.helper.ensure(&app, helper_callback(&state, &app))?;
+    let request = serde_json::json!({"shell":opts.shell,"cwd":opts.cwd,"cols":opts.cols,"rows":opts.rows,"env":opts.env,"shell_integration":opts.shell_integration,"run_on_start":opts.run_on_start,"owner_key":owner_key});
+    let client = match resident_runtime_id.as_deref() {
+        Some(runtime_id) => {
+            state
+                .helper
+                .ensure_resident(&app, runtime_id, helper_callback(&state, &app))?
+        }
+        None => state.helper.ensure(&app, helper_callback(&state, &app))?,
+    };
     let spawned = client
         .request(
             &HelperFrame::new(
@@ -836,6 +866,7 @@ fn term_create(
         )
         .map_err(|e| e.to_string())?;
     let id = spawned.session_id.to_hex();
+    state.helper.register_session(&id, client.clone());
     state
         .helper_generations
         .lock()
@@ -942,7 +973,10 @@ fn term_kill(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(
         .get(&id)
         .copied()
         .unwrap_or(0);
-    let client = state.helper.ensure(&app, helper_callback(&state, &app))?;
+    let client = state
+        .helper
+        .session(&id)
+        .ok_or_else(|| "terminal helper is not connected".to_string())?;
     client
         .request(
             &HelperFrame::new(HelperKind::Terminate, session, generation, Vec::new()),
@@ -963,6 +997,7 @@ fn term_kill(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(
     }
     state.bridges.lock().unwrap().remove(&id);
     state.helper_generations.lock().unwrap().remove(&id);
+    state.helper.forget_session(&id);
     let _ = app.emit("background-tasks-changed", ());
     Ok(())
 }
@@ -993,21 +1028,31 @@ fn term_detach(app: AppHandle, state: State<'_, AppState>, id: String) -> Result
         share_commands::tab_runtime_died(&state.hub, &state.sources, &state.share_glue, &tab_id);
     }
     state.bridges.lock().unwrap().remove(&id);
+    state.helper.forget_session(&id);
     let _ = app.emit("background-tasks-changed", ());
     Ok(())
 }
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn term_attach(
     app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     tab_id: Option<String>,
+    resident_runtime_id: Option<String>,
     cols: u16,
     rows: u16,
     on_event: Channel<TermEvent>,
 ) -> Result<String, String> {
     let session = HelperSessionId::from_hex(&id).map_err(|e| e.to_string())?;
-    let client = state.helper.ensure(&app, helper_callback(&state, &app))?;
+    let client = match resident_runtime_id.as_deref() {
+        Some(runtime_id) => {
+            state
+                .helper
+                .ensure_resident(&app, runtime_id, helper_callback(&state, &app))?
+        }
+        None => state.helper.ensure(&app, helper_callback(&state, &app))?,
+    };
     let snapshot = client
         .request(
             &HelperFrame::new(HelperKind::Attach, session, 0, Vec::new()),
@@ -1021,6 +1066,7 @@ fn term_attach(
         .lock()
         .unwrap()
         .insert(id.clone(), snapshot.generation);
+    state.helper.register_session(&id, client.clone());
     let bridge = SessionBridge::new(Arc::new(WebviewSink { channel: on_event }));
     install_helper_bridge(&state, &id, bridge.clone());
     bridge.dispatch_data(&snapshot.payload);
@@ -1074,6 +1120,26 @@ fn term_helper_list(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let client = state.helper.ensure(&app, helper_callback(&state, &app))?;
+    let list = client
+        .request(
+            &HelperFrame::new(HelperKind::List, HelperSessionId::default(), 0, Vec::new()),
+            HelperKind::List,
+            None,
+            std::time::Duration::from_secs(3),
+        )
+        .map_err(|e| e.to_string())?;
+    serde_json::from_slice(&list.payload).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn term_resident_list(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    runtime_id: String,
+) -> Result<serde_json::Value, String> {
+    let client = state
+        .helper
+        .ensure_resident(&app, &runtime_id, helper_callback(&state, &app))?;
     let list = client
         .request(
             &HelperFrame::new(HelperKind::List, HelperSessionId::default(), 0, Vec::new()),
@@ -3401,71 +3467,6 @@ fn home_dir() -> String {
         .unwrap_or_else(|| "/".to_string())
 }
 
-// ---- agent sign-in ---------------------------------------------------------
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LoginStarted {
-    /// Where to send the browser.
-    url: String,
-    interval_secs: u64,
-}
-
-/// Begin signing in to a ChatGPT subscription.
-///
-/// Returns what the user has to do. The waiting is the caller's, one poll at a
-/// time, so the interface can show a countdown and offer to cancel rather than
-/// blocking on a fifteen-minute call.
-#[tauri::command]
-fn agent_login_start() -> Result<LoginStarted, String> {
-    // Browser, not device code. OpenAI answers 404 to the device endpoints for
-    // ordinary accounts — upstream's own message for that status says as much
-    // and sends the caller to browser login.
-    let pending = agent_login::start("tabverse").map_err(|e| format!("{e:#}"))?;
-    let url = pending.url.clone();
-    *login_in_flight().lock().unwrap() = Some(pending);
-    Ok(LoginStarted {
-        url,
-        // Nothing on this side rate-limits us, but the interface polls on this
-        // and a tight loop against our own mutex is still waste.
-        interval_secs: 1,
-    })
-}
-
-/// The one sign-in that may be in flight, held here rather than handed to the
-/// interface because it carries the PKCE verifier.
-fn login_in_flight() -> &'static std::sync::Mutex<Option<agent_login::Pending>> {
-    static PENDING: std::sync::OnceLock<std::sync::Mutex<Option<agent_login::Pending>>> =
-        std::sync::OnceLock::new();
-    PENDING.get_or_init(|| std::sync::Mutex::new(None))
-}
-
-/// One poll. "pending" is the ordinary answer, not an error.
-#[tauri::command]
-fn agent_login_poll() -> Result<String, String> {
-    use agent_login::Progress;
-    let held = login_in_flight().lock().unwrap();
-    let Some(pending) = held.as_ref() else {
-        return Err("no sign-in is in progress".to_string());
-    };
-    match pending.progress() {
-        Progress::Waiting => Ok("pending".to_string()),
-        Progress::Done => Ok("ready".to_string()),
-        Progress::Failed(why) => Err(why),
-    }
-}
-
-/// Whether there is a usable sign-in on this machine.
-#[tauri::command]
-fn agent_login_status() -> bool {
-    agent_http::stored_token().is_some()
-}
-
-#[tauri::command]
-fn agent_logout() -> Result<(), String> {
-    agent_http::forget_token().map_err(|e| format!("{e:#}"))
-}
-
 #[tauri::command]
 async fn remote_join(
     state: State<'_, AppState>,
@@ -3498,47 +3499,6 @@ fn remote_input(state: State<'_, AppState>, id: String, data_b64: String) -> Res
     let joins = state.joins.lock().unwrap();
     let h = joins.get(&id).ok_or_else(|| "unknown join".to_string())?;
     h.send_input(&bytes);
-    Ok(())
-}
-
-/// Say something to a shared agent. Needs Steer, which the host enforces.
-///
-/// The three below are separate commands rather than one with a verb, because
-/// they need different permissions and a single entry point would make that
-/// distinction a runtime argument instead of a call site.
-#[tauri::command]
-fn remote_agent_prompt(state: State<'_, AppState>, id: String, text: String) -> Result<(), String> {
-    let joins = state.joins.lock().unwrap();
-    let h = joins.get(&id).ok_or_else(|| "unknown join".to_string())?;
-    h.send(tabverse_proto::RemoteClientMsg::AgentPrompt { text });
-    Ok(())
-}
-
-/// Decide a pending permission request. Needs Approve.
-#[tauri::command]
-fn remote_agent_answer(
-    state: State<'_, AppState>,
-    id: String,
-    call_id: String,
-    allow: bool,
-    reason: Option<String>,
-) -> Result<(), String> {
-    let joins = state.joins.lock().unwrap();
-    let h = joins.get(&id).ok_or_else(|| "unknown join".to_string())?;
-    h.send(tabverse_proto::RemoteClientMsg::AgentAnswer {
-        call_id,
-        allow,
-        reason,
-    });
-    Ok(())
-}
-
-/// Stop the turn in progress. Needs Steer.
-#[tauri::command]
-fn remote_agent_cancel(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let joins = state.joins.lock().unwrap();
-    let h = joins.get(&id).ok_or_else(|| "unknown join".to_string())?;
-    h.send(tabverse_proto::RemoteClientMsg::AgentCancel);
     Ok(())
 }
 
@@ -3953,101 +3913,6 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
-// ---- agent tab -------------------------------------------------------------
-// One session per tab. The registry owns the threads; these are thin.
-
-#[tauri::command]
-fn agent_start(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    registry: State<'_, Arc<agent_bridge::AgentRegistry>>,
-    session_id: String,
-    cwd: String,
-    on_event: tauri::ipc::Channel<tabverse_agent::event::SessionEvent>,
-) -> Result<String, String> {
-    // A tab whose state directory cannot be resolved still gets to run; it
-    // simply has no memory across restarts, which beats refusing to start.
-    let log_dir = state_dir(&app).ok();
-    let id = registry
-        .start(session_id.clone(), cwd, log_dir, on_event)
-        .map_err(|e| format!("{e:#}"))?;
-    if let Some(hooks) = registry.agent_hooks(&id) {
-        state
-            .sources
-            .register(&session_id, Arc::new(AgentSource::new(hooks)));
-        state
-            .share_glue
-            .session_tabs
-            .lock()
-            .unwrap()
-            .insert(id.clone(), session_id);
-    }
-    Ok(id)
-}
-
-#[tauri::command]
-fn agent_prompt(
-    registry: State<'_, Arc<agent_bridge::AgentRegistry>>,
-    id: String,
-    text: String,
-) -> Result<(), String> {
-    registry.prompt(&id, text).map_err(|e| format!("{e:#}"))
-}
-
-#[tauri::command]
-fn agent_cancel(
-    registry: State<'_, Arc<agent_bridge::AgentRegistry>>,
-    id: String,
-) -> Result<(), String> {
-    registry.cancel(&id).map_err(|e| format!("{e:#}"))
-}
-
-/// Answer a pending approval. Returns false when nothing was waiting on that
-/// call — a stale click, or a request that already timed out.
-#[tauri::command]
-fn agent_answer(
-    registry: State<'_, Arc<agent_bridge::AgentRegistry>>,
-    id: String,
-    call_id: String,
-    allow: bool,
-    reason: Option<String>,
-) -> Result<bool, String> {
-    registry
-        .answer(&id, &call_id, allow, reason)
-        .map_err(|e| format!("{e:#}"))
-}
-
-#[tauri::command]
-fn agent_close(
-    state: State<'_, AppState>,
-    registry: State<'_, Arc<agent_bridge::AgentRegistry>>,
-    id: String,
-) {
-    close_agent_tab(
-        &state.hub,
-        &state.sources,
-        &state.share_glue,
-        &registry,
-        &id,
-    );
-}
-
-fn close_agent_tab(
-    hub: &Arc<RemoteHub>,
-    sources: &SourceRegistry,
-    glue: &share_commands::ShareGlue,
-    registry: &agent_bridge::AgentRegistry,
-    id: &str,
-) {
-    // The lookup is its own statement so its lock is released before
-    // tab_runtime_died takes the same one (the term_kill discipline).
-    let tab_id = glue.session_tabs.lock().unwrap().get(id).cloned();
-    if let Some(tab_id) = tab_id {
-        share_commands::tab_runtime_died(hub, sources, glue, &tab_id);
-    }
-    registry.close(id);
-}
-
 pub fn run() {
     // The resident helper is the same signed executable in a windowless mode.
     // It answers before Tauri, plugins, HTTP clients, or webviews exist.
@@ -4134,6 +3999,7 @@ pub fn run() {
         })
         .manage(AppState {
             helper: terminal_helper::TerminalHelper::new(),
+            resident: resident::ResidentBridge::new(),
             hub: RemoteHub::new(),
             bridges: Arc::new(Mutex::new(HashMap::new())),
             helper_backlog: Arc::new(Mutex::new(HashMap::new())),
@@ -4164,7 +4030,6 @@ pub fn run() {
         // Holds whatever the system asked us to open before the interface
         // existed to receive it (system_open.rs).
         .manage(system_open::Pending::default())
-        .manage(std::sync::Arc::new(agent_bridge::AgentRegistry::new()))
         .setup(|app| {
             {
                 let main_cfg = app
@@ -4175,6 +4040,19 @@ pub fn run() {
                     .find(|w| w.label == "main")
                     .cloned()
                     .ok_or("no main window in tauri.conf.json")?;
+                #[cfg(target_os = "macos")]
+                let mut main_cfg = main_cfg;
+                // AP-12 needs a real WebView/process measurement without
+                // repeatedly stealing the user's desktop. The ordinary app
+                // never sets this test-only environment switch.
+                #[cfg(target_os = "macos")]
+                let hidden_acceptance =
+                    std::env::var_os("TABVERSE_HIDDEN_WINDOW_ACCEPTANCE").is_some();
+                #[cfg(target_os = "macos")]
+                if hidden_acceptance {
+                    app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+                    main_cfg.visible = false;
+                }
                 #[cfg(target_os = "macos")]
                 let traffic_light_position = main_cfg.traffic_light_position.clone();
                 let mut wb = tauri::WebviewWindowBuilder::from_config(app.handle(), &main_cfg)?;
@@ -4198,7 +4076,11 @@ pub fn run() {
                         ));
                     }
                 }
-                wb.build()?;
+                let _main_window = wb.build()?;
+                #[cfg(target_os = "macos")]
+                if hidden_acceptance {
+                    _main_window.hide()?;
+                }
                 #[cfg(target_os = "macos")]
                 if let (Some(window), Some(position)) =
                     (app.get_window("main"), traffic_light_position)
@@ -4250,15 +4132,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            agent_start,
-            agent_prompt,
-            agent_cancel,
-            agent_answer,
-            agent_close,
-            agent_login_start,
-            agent_login_poll,
-            agent_login_status,
-            agent_logout,
             term_create,
             term_write,
             term_resize,
@@ -4266,7 +4139,16 @@ pub fn run() {
             term_detach,
             term_attach,
             term_helper_list,
+            term_resident_list,
             term_helper_kill_all,
+            resident::resident_descriptor,
+            resident::resident_ensure,
+            resident::resident_list,
+            resident::resident_attach,
+            resident::resident_poll,
+            resident::resident_intent,
+            resident::resident_detach,
+            resident::resident_stop,
             home_dir,
             app_health,
             page_coverable,
@@ -4277,6 +4159,10 @@ pub fn run() {
             share_commands::app_share_start,
             share_commands::app_share_stop,
             share_commands::app_share_snapshot_deliver,
+            share_commands::app_share_contribution_snapshot,
+            share_commands::app_share_contribution_frame,
+            share_commands::app_share_intent_result,
+            share_commands::app_share_private_stream,
             share_commands::app_share_set_active_tab,
             share_commands::app_share_term_snapshot,
             share_commands::app_share_broadcast_action,
@@ -4286,9 +4172,6 @@ pub fn run() {
             share_commands::share_stop,
             remote_join,
             remote_input,
-            remote_agent_prompt,
-            remote_agent_answer,
-            remote_agent_cancel,
             remote_viewport,
             remote_ping,
             remote_leave,
@@ -4318,6 +4201,8 @@ pub fn run() {
             state_load,
             state_delete,
             state_list,
+            state_migrate_session_v2,
+            state_restore_session_backup,
             set_theme,
             theme_pref_save,
             theme_pref_load,
@@ -4624,120 +4509,6 @@ mod page_coverage_tests {
             is_coverable_platform(),
             "this suite runs on macOS 14+, so the probe must find the gate open"
         );
-    }
-}
-
-#[cfg(test)]
-mod agent_tab_close_tests {
-    use super::*;
-    use std::sync::Mutex as StdMutex;
-    use std::time::Duration;
-    use tabverse_proto::Access;
-    use tabverse_remote::ShareOpts;
-
-    /// Poll `pred` over the collected frames until it holds, or panic with
-    /// `what`. Polling rather than a fixed sleep: a slow machine should make
-    /// the test slower, not red.
-    fn wait_for(
-        seen: &Arc<StdMutex<Vec<RemoteHostMsg>>>,
-        what: &str,
-        pred: impl Fn(&[RemoteHostMsg]) -> bool,
-    ) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        loop {
-            {
-                let frames = seen.lock().unwrap();
-                if pred(&frames) {
-                    return;
-                }
-                if std::time::Instant::now() > deadline {
-                    panic!("timed out waiting for {what}; saw {frames:?}");
-                }
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    #[test]
-    fn closing_a_shared_agent_tab_ends_its_viewers_with_a_reason() {
-        let work = tempfile::tempdir().unwrap();
-        let registry = agent_bridge::AgentRegistry::new();
-        let channel = tauri::ipc::Channel::new(|_| Ok(()));
-        let agent_id = registry
-            .start(
-                "tab-close".to_string(),
-                work.path().display().to_string(),
-                None,
-                channel,
-            )
-            .unwrap();
-
-        // The same wiring agent_start does: adapter registered under the tab
-        // id, session row mapping the registry handle back to the tab.
-        let hub = RemoteHub::new();
-        let sources = SourceRegistry::default();
-        let glue = share_commands::ShareGlue::default();
-        let hooks = registry.agent_hooks(&agent_id).unwrap();
-        sources.register("tab-close", Arc::new(AgentSource::new(hooks)));
-        glue.session_tabs
-            .lock()
-            .unwrap()
-            .insert(agent_id.clone(), "tab-close".to_string());
-
-        // The same wiring share_start does: resolve the source through the
-        // registry, bind it into a share, record the share row.
-        let source = sources
-            .get("tab-close")
-            .expect("the registered runtime is the one that shares");
-        let (share, ticket) = tauri::async_runtime::block_on(hub.share_start(ShareOpts {
-            title: "Agent".into(),
-            source,
-            on_presence: Arc::new(|_| {}),
-            ttl: None,
-            access: Access::View,
-        }))
-        .unwrap();
-        glue.share_sessions
-            .lock()
-            .unwrap()
-            .insert(share.id.clone(), agent_id.clone());
-
-        let seen: Arc<StdMutex<Vec<RemoteHostMsg>>> = Arc::new(StdMutex::new(Vec::new()));
-        let sink = {
-            let seen = Arc::clone(&seen);
-            Arc::new(move |m| seen.lock().unwrap().push(m))
-                as Arc<dyn Fn(RemoteHostMsg) + Send + Sync>
-        };
-        let viewer = tauri::async_runtime::block_on(join(&ticket, "watcher", sink)).unwrap();
-        wait_for(&seen, "the welcome", |ms| {
-            ms.iter()
-                .any(|m| matches!(m, RemoteHostMsg::Welcome { .. }))
-        });
-
-        // The user closes the tab.
-        close_agent_tab(&hub, &sources, &glue, &registry, &agent_id);
-
-        // The viewer is told, with the reason the hub gives every share it
-        // stops — not left on a stream that silently fell quiet.
-        wait_for(&seen, "the End frame after the tab closed", |ms| {
-            ms.iter().any(
-                |m| matches!(m, RemoteHostMsg::End { reason } if reason == "host stopped sharing"),
-            )
-        });
-        assert!(
-            sources.get("tab-close").is_none(),
-            "the dead tab must leave the source registry"
-        );
-        assert!(
-            glue.session_tabs.lock().unwrap().is_empty(),
-            "the session row dies with its runtime"
-        );
-        assert!(
-            glue.share_sessions.lock().unwrap().is_empty(),
-            "the share row dies with its runtime"
-        );
-
-        tauri::async_runtime::block_on(viewer.leave());
     }
 }
 

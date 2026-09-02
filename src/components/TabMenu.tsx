@@ -73,6 +73,7 @@ export function TabMenu() {
   const mutedTabs = useStore((s) => s.mutedTabs);
   const closeTabs = useStore((s) => s.closeTabs);
   const archiveTabs = useStore((s) => s.archiveTabs);
+  const setTabResidentPolicy = useStore((s) => s.setTabResidentPolicy);
 
   useEffect(() => {
     if (!menu) return;
@@ -191,7 +192,7 @@ export function TabMenu() {
 
   // Keep the menu on screen when the click happens near an edge.
   const width = 210;
-  const height = 260;
+  const height = 330;
   const x = Math.min(menu.x, window.innerWidth - width - 8);
   const y = Math.min(menu.y, window.innerHeight - height - 8);
 
@@ -300,6 +301,26 @@ export function TabMenu() {
           {STR.common.tabMenu.saveLayout}
         </button>
       )}
+      <div className="ctx-sep" />
+      <div className="ctx-title">{STR.common.tabMenu.residentPolicy}</div>
+      {([
+        ["inherit", STR.common.tabMenu.residentInherit],
+        ["on", STR.common.tabMenu.residentOn],
+        ["off", STR.common.tabMenu.residentOff],
+      ] as const).map(([policy, label]) => (
+        <button
+          key={policy}
+          className={`ctx-item${(tab.residentPolicy ?? "inherit") === policy ? " active" : ""}`}
+          role="menuitemradio"
+          aria-checked={(tab.residentPolicy ?? "inherit") === policy}
+          onClick={() => {
+            setTabResidentPolicy(tab.id, policy);
+            closeMenu();
+          }}
+        >
+          {label}
+        </button>
+      ))}
       {tab.dormant !== true && (
         <>
           <div className="ctx-sep" />

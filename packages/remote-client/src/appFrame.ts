@@ -17,17 +17,69 @@ export type AppHostFrame =
   | { type: "actionApplied"; name: string; args: unknown }
   | { type: "appSnapshot"; state: unknown }
   | { type: "clipSync"; seq: number; text: string }
-  | { type: "proxyRes"; id: number; head: string; body?: string };
+  | { type: "proxyRes"; id: number; head: string; body?: string }
+  | {
+      type: "browserResponseHead";
+      streamId: number;
+      status: number;
+      headers: Array<[string, string]>;
+      finalUrl: string;
+    }
+  | { type: "browserResponseChunk"; streamId: number; seq: number; b64: string }
+  | { type: "browserResponseEnd"; streamId: number }
+  | { type: "browserResponseError"; streamId: number; code: string; message: string }
+  | {
+      type: "contributionSnapshot";
+      tabId: string;
+      kind: string;
+      epoch: string;
+      snapshotRevision: number;
+      lastFrameSeq: number;
+      state: unknown;
+    }
+  | {
+      type: "contributionFrame";
+      tabId: string;
+      kind: string;
+      epoch: string;
+      frameSeq: number;
+      payload: unknown;
+    }
+  | {
+      type: "intentResult";
+      attachmentId: string;
+      attachmentGeneration: number;
+      intentId: string;
+      ok?: unknown;
+      err?: string;
+    }
+  | {
+      type: "privateStream";
+      attachmentId: string;
+      attachmentGeneration: number;
+      streamId: string;
+      seq: number;
+      fin: boolean;
+      payloadB64: string;
+    };
 
 /** The frame families this dispatcher can be handed wholesale; non-v3
  * frames pass through untouched (the caller's v1/v2 handling stays). */
-export function isAppFrame(frame: { type: string }): boolean {
+export function isAppFrame(frame: { type: string }): frame is AppHostFrame {
   return (
     frame.type === "rpcResult" ||
     frame.type === "actionApplied" ||
     frame.type === "appSnapshot" ||
     frame.type === "clipSync" ||
-    frame.type === "proxyRes"
+    frame.type === "proxyRes" ||
+    frame.type === "browserResponseHead" ||
+    frame.type === "browserResponseChunk" ||
+    frame.type === "browserResponseEnd" ||
+    frame.type === "browserResponseError" ||
+    frame.type === "contributionSnapshot" ||
+    frame.type === "contributionFrame" ||
+    frame.type === "intentResult" ||
+    frame.type === "privateStream"
   );
 }
 
@@ -36,6 +88,10 @@ export interface AppFrameSinks {
   onSnapshot(state: unknown): void;
   onClip(seq: number, text: string): void;
   onProxy(id: number, head: string, body?: string): void;
+  onContributionSnapshot?(frame: Extract<AppHostFrame, { type: "contributionSnapshot" }>): void;
+  onContributionFrame?(frame: Extract<AppHostFrame, { type: "contributionFrame" }>): void;
+  onIntentResult?(frame: Extract<AppHostFrame, { type: "intentResult" }>): void;
+  onPrivateStream?(frame: Extract<AppHostFrame, { type: "privateStream" }>): void;
 }
 
 /** Milliseconds before an rpc() rejects: a host that never answers must
@@ -134,6 +190,23 @@ export function dispatchAppFrame(frame: unknown, sinks: AppFrameSinks): boolean 
       return true;
     case "proxyRes":
       sinks.onProxy(Number(f.id), String(f.head), f.body === undefined ? undefined : String(f.body));
+      return true;
+    case "browserResponseHead":
+    case "browserResponseChunk":
+    case "browserResponseEnd":
+    case "browserResponseError":
+      return true;
+    case "contributionSnapshot":
+      sinks.onContributionSnapshot?.(f as unknown as Extract<AppHostFrame, { type: "contributionSnapshot" }>);
+      return true;
+    case "contributionFrame":
+      sinks.onContributionFrame?.(f as unknown as Extract<AppHostFrame, { type: "contributionFrame" }>);
+      return true;
+    case "intentResult":
+      sinks.onIntentResult?.(f as unknown as Extract<AppHostFrame, { type: "intentResult" }>);
+      return true;
+    case "privateStream":
+      sinks.onPrivateStream?.(f as unknown as Extract<AppHostFrame, { type: "privateStream" }>);
       return true;
     default:
       return false;

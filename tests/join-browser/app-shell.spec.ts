@@ -5,7 +5,7 @@ const appSnapshot = {
   tabs: [
     { id: "terminal", type: "terminal", title: "Build shell", groupId: "work" },
     { id: "browser", type: "browser", title: "Project docs", groupId: "work", url: "https://example.test/docs" },
-    { id: "agent", type: "agent", title: "Review agent" },
+    { id: "files", type: "files", title: "Project files" },
   ],
   groups: [{ id: "work", name: "Work", colorIndex: 0, collapsed: false }],
   activeTabId: "terminal",
@@ -41,6 +41,10 @@ test("renders the same replayed app shell across desktop and mobile widths", asy
     await expect(page.locator(".app-shell-side")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Tabs" })).toBeVisible();
     await page.getByRole("button", { name: "Tabs" }).click();
+    // App shares deliberately use actual size on narrow screens. Wait for
+    // the responsive fit effect before taking the visual snapshot so the
+    // test cannot capture the transient desktop default.
+    await expect(page.locator("#zoom")).toHaveText("100%");
   }
 
   await expect(page.getByRole("tab", { name: "Build shell" })).toBeVisible();

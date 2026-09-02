@@ -1,41 +1,33 @@
-import {
-  TAB_TYPES,
-  supportsTab,
-  type TabType,
-  type WorkbenchRuntime,
-} from "@tabverse/runtime-contracts";
+import type { TabContribution } from "@tabverse/tab-contracts";
+import type { TabType } from "@tabverse/runtime-contracts";
 
 export interface TabDefinition {
   readonly type: TabType;
   readonly label: string;
   readonly hint: string;
+  readonly icon: string;
+  readonly order?: number;
+  readonly groupLabel?: string;
+  readonly launch?: "tab" | "dialog";
+  readonly creation?: {
+    readonly field: string;
+    readonly fieldLabel: string;
+    readonly placeholder: string;
+    readonly submitLabel: string;
+    readonly defaultScheme?: string;
+  };
 }
 
-/** The one renderer-facing registry for every Tabverse tab type. */
-export const TAB_DEFINITIONS: readonly TabDefinition[] = [
-  { type: "terminal", label: "Terminal", hint: "A shell session" },
-  { type: "files", label: "Files", hint: "Explorer with git status and previews" },
-  { type: "browser", label: "Browser", hint: "Embedded web page, loaded by the host" },
-  { type: "agent", label: "Agent", hint: "A coding agent working in a folder" },
-  { type: "remote", label: "Join remote…", hint: "Join a shared Tabverse session" },
-  { type: "settings", label: "Settings", hint: "Preferences" },
-] as const;
-
-const byType = new Map(TAB_DEFINITIONS.map((definition) => [definition.type, definition]));
-
-export function tabDefinition(type: TabType): TabDefinition {
-  const definition = byType.get(type);
-  if (definition === undefined) throw new Error(`No Workbench definition for ${type}`);
-  return definition;
-}
-
-export function tabDefinitionsForRuntime(
-  runtime: WorkbenchRuntime
+/** Project UI metadata from enabled contributions; no kind list lives here. */
+export function tabDefinitionsFromContributions(
+  contributions: readonly TabContribution<unknown>[],
+  options: { readonly remoteOnly?: boolean } = {},
 ): readonly TabDefinition[] {
-  return TAB_DEFINITIONS.filter((definition) => supportsTab(runtime, definition.type));
-}
-
-/** Fails at module load if the runtime contract gains a tab without a UI entry. */
-if (TAB_DEFINITIONS.length !== TAB_TYPES.length) {
-  throw new Error("Workbench tab registry does not cover every TabType");
+  return contributions
+    .filter((contribution) => !options.remoteOnly || contribution.remote !== undefined)
+    .map(({ manifest }) => ({ type: manifest.kind, ...manifest.presentation }))
+    .sort((left, right) =>
+      (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER) ||
+      left.type.localeCompare(right.type),
+    );
 }

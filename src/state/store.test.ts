@@ -4,7 +4,6 @@ import {
   FOLDER_PREVIEW_WIDTH,
   anyOverlayOpen,
   contentObstructionX,
-  inheritedCwd,
   markFreshRun,
   pointerPastSidebar,
   sessionSnapshot,
@@ -54,7 +53,8 @@ describe("session persistence", () => {
   it.each([
     [null, "missing"],
     ["{ not json", "invalid-json"],
-    [JSON.stringify({ version: 2, tabs: [] }), "unsupported-version"],
+    [JSON.stringify({ version: 3, tabs: [] }), "unsupported-version"],
+    [JSON.stringify({ version: 2, tabs: [] }), "empty-tabs"],
     [JSON.stringify({ version: 1, tabs: "not-an-array" }), "invalid-shape"],
     [JSON.stringify({ version: 1, tabs: [] }), "empty-tabs"],
   ] as const)(
@@ -106,6 +106,60 @@ describe("session persistence", () => {
     const custom = s.groups.filter((g) => !g.preset);
     expect(custom).toHaveLength(1);
     expect(s.tabs.find((t) => t.id === a)?.groupId).toBe(custom[0].id);
+  });
+
+  it("restores an unknown plugin kind as retained state instead of rejecting the session", async () => {
+    const id = useStore.getState().addTab({
+      type: "future.diagram",
+      title: "Architecture",
+      pluginState: {
+        schema: "tabverse-tab-state/v1",
+        kind: "future.diagram",
+        contributionVersion: 2,
+        stateVersion: 3,
+        payload: { nodes: ["kept"] },
+      },
+    });
+    await flushAll();
+    useStore.setState({ tabs: [], groups: withPresetGroups([]), activeTabId: null });
+
+    expect(await useStore.getState().restoreSession()).toBe(true);
+    expect(useStore.getState().tabs.find((tab) => tab.id === id)).toMatchObject({
+      type: "future.diagram",
+      title: "Architecture",
+      pluginState: {
+        kind: "future.diagram",
+        contributionVersion: 2,
+        stateVersion: 3,
+        payload: { nodes: ["kept"] },
+      },
+    });
+    expect(sessionSnapshot(useStore.getState()).tabs[0].pluginState).toMatchObject({
+      payload: { nodes: ["kept"] },
+    });
+  });
+
+  it("round-trips each Tab resident override and defaults old sessions to inherit", async () => {
+    const terminal = useStore.getState().addTab({ type: "terminal" });
+    useStore.getState().setTabResidentPolicy(terminal, "on");
+    expect(
+      sessionSnapshot(useStore.getState()).tabs.find((tab) => tab.id === terminal)
+        ?.residentPolicy
+    ).toBe("on");
+
+    useStore.setState({ tabs: [], groups: withPresetGroups([]), activeTabId: null });
+    expect(await useStore.getState().restoreSession()).toBe(true);
+    expect(useStore.getState().tabs.find((tab) => tab.id === terminal)?.residentPolicy).toBe(
+      "on"
+    );
+
+    await flushAll();
+    const legacy = sessionSnapshot(useStore.getState());
+    delete legacy.tabs[0].residentPolicy;
+    localStorage.setItem(CARRIER_KEY, JSON.stringify(legacy));
+    useStore.setState({ tabs: [], groups: withPresetGroups([]), activeTabId: null });
+    expect(await useStore.getState().restoreSession()).toBe(true);
+    expect(useStore.getState().tabs[0].residentPolicy).toBe("inherit");
   });
 
   it("does not restore a group whose only members were dropped remote tabs", async () => {
@@ -1719,7 +1773,7 @@ describe("revealing a path from a tool call", () => {
   it("a second reference to the same file lands again rather than being swallowed", () => {
     // The whole reason `reveal` carries a nonce: the path is unchanged, so an
     // effect keyed on the path alone would ignore every reference after the
-    // first — which is exactly what an agent does, repeatedly.
+    // first — which is exactly what external automation does, repeatedly.
     const st = useStore.getState();
     const existing = st.addTab({ type: "files", cwd: "/work" });
 
@@ -1766,244 +1820,6 @@ describe("revealing a path from a tool call", () => {
     const tab = useStore.getState().tabs.find((t) => t.id === id);
     expect(tab?.dormant).toBeUndefined();
     expect(tab?.reveal?.path).toBe("/work/a.rs");
-  });
-});
-
-describe("where a new agent tab works", () => {
-  beforeEach(reset);
-
-  // Found by running the built app: the menu says "a coding agent working in a
-  // folder" but never asked which, so it fell back to the home directory and
-  // the agent's first glob walked the whole home tree for three minutes.
-
-  it("inherits the folder of the tab the user is looking at", () => {
-    const st = useStore.getState();
-    const files = st.addTab({ type: "files", cwd: "/work/api" });
-    expect(useStore.getState().activeTabId).toBe(files);
-
-    const agent = useStore.getState().addTab({ type: "agent" });
-
-    expect(useStore.getState().tabs.find((t) => t.id === agent)?.cwd).toBe("/work/api");
-  });
-
-  it("falls back to the most recently used folder when the active tab has none", () => {
-    const st = useStore.getState();
-    st.addTab({ type: "files", cwd: "/work/api" });
-    // A browser tab stands for no directory, so it cannot answer the question.
-    useStore.getState().addTab({ type: "browser", url: "https://example.com" });
-
-    const agent = useStore.getState().addTab({ type: "agent" });
-
-    expect(useStore.getState().tabs.find((t) => t.id === agent)?.cwd).toBe("/work/api");
-  });
-
-  it("leaves cwd unset when nothing in the window stands for a folder", () => {
-    // Undefined, not a guess: AgentView keeps its own fallback and the user
-    // sees whatever it lands on.
-    const agent = useStore.getState().addTab({ type: "agent" });
-    expect(useStore.getState().tabs.find((t) => t.id === agent)?.cwd).toBeUndefined();
-  });
-
-  it("never overrides a folder the caller named", () => {
-    const st = useStore.getState();
-    st.addTab({ type: "files", cwd: "/work/api" });
-
-    const agent = useStore.getState().addTab({ type: "agent", cwd: "/elsewhere" });
-
-    expect(useStore.getState().tabs.find((t) => t.id === agent)?.cwd).toBe("/elsewhere");
-  });
-
-  it("does not hand a folder to tab types that did not ask for one", () => {
-    const st = useStore.getState();
-    st.addTab({ type: "files", cwd: "/work/api" });
-
-    const browser = useStore.getState().addTab({ type: "browser" });
-
-    expect(useStore.getState().tabs.find((t) => t.id === browser)?.cwd).toBeUndefined();
-  });
-
-  describe("inheritedCwd", () => {
-    const tab = (id: string, type: string, cwd?: string, lastActiveAt?: number) =>
-      ({ id, type, cwd, lastActiveAt }) as Parameters<typeof inheritedCwd>[0][number];
-
-    it("prefers the active tab over a more recently used one", () => {
-      const tabs = [
-        tab("a", "files", "/active", 1),
-        tab("b", "terminal", "/recent", 999),
-      ];
-      expect(inheritedCwd(tabs, "a")).toBe("/active");
-    });
-
-    it("takes the newest by use when the active tab is not rooted anywhere", () => {
-      const tabs = [
-        tab("browser", "browser", undefined, 999),
-        tab("old", "files", "/old", 1),
-        tab("new", "terminal", "/new", 5),
-      ];
-      expect(inheritedCwd(tabs, "browser")).toBe("/new");
-    });
-
-    it("answers undefined rather than inventing a directory", () => {
-      expect(inheritedCwd([tab("b", "browser", undefined, 1)], "b")).toBeUndefined();
-      expect(inheritedCwd([], null)).toBeUndefined();
-    });
-  });
-});
-
-describe("putting an agent's command in a terminal", () => {
-  beforeEach(reset);
-
-  it("uses the terminal already rooted under the agent's folder", () => {
-    const st = useStore.getState();
-    const term = st.addTab({ type: "terminal", cwd: "/work/api" });
-    st.addTab({ type: "browser", url: "https://example.com" });
-
-    useStore.getState().showCommand("cargo test", "/work/api");
-
-    const s = useStore.getState();
-    expect(s.tabs.filter((t) => t.type === "terminal")).toHaveLength(1);
-    expect(s.activeTabId).toBe(term);
-    expect(s.tabs.find((t) => t.id === term)?.command).toEqual({
-      text: "cargo test",
-      nonce: 1,
-    });
-  });
-
-  it("prefers the deepest terminal when several contain the folder", () => {
-    const st = useStore.getState();
-    st.addTab({ type: "terminal", cwd: "/work" });
-    const inner = useStore.getState().addTab({ type: "terminal", cwd: "/work/api" });
-
-    useStore.getState().showCommand("cargo test", "/work/api");
-
-    expect(useStore.getState().activeTabId).toBe(inner);
-  });
-
-  it("opens a terminal in the right folder when there is none", () => {
-    useStore.getState().showCommand("cargo test", "/work/api");
-
-    const terminals = useStore.getState().tabs.filter((t) => t.type === "terminal");
-    expect(terminals).toHaveLength(1);
-    expect(terminals[0].cwd).toBe("/work/api");
-    expect(terminals[0].command?.text).toBe("cargo test");
-  });
-
-  it("lands the same command again rather than being swallowed", () => {
-    // An agent runs the same test command over and over; an effect keyed on the
-    // text alone would ignore every one after the first.
-    const st = useStore.getState();
-    const term = st.addTab({ type: "terminal", cwd: "/work" });
-
-    useStore.getState().showCommand("cargo test", "/work");
-    useStore.getState().showCommand("cargo test", "/work");
-
-    expect(useStore.getState().tabs.find((t) => t.id === term)?.command?.nonce).toBe(2);
-  });
-
-  it("wakes a shelved terminal rather than letting the command vanish", () => {
-    const st = useStore.getState();
-    const id = st.addTab({ type: "terminal", cwd: "/work" });
-    useStore.setState((s) => ({
-      tabs: s.tabs.map((t) => (t.id === id ? { ...t, dormant: true as const } : t)),
-    }));
-
-    useStore.getState().showCommand("ls", "/work");
-
-    const tab = useStore.getState().tabs.find((t) => t.id === id);
-    expect(tab?.dormant).toBeUndefined();
-    expect(tab?.command?.text).toBe("ls");
-  });
-
-  it("does not hijack a terminal sitting in an unrelated folder", () => {
-    const st = useStore.getState();
-    st.addTab({ type: "terminal", cwd: "/somewhere/else" });
-
-    useStore.getState().showCommand("cargo test", "/work/api");
-
-    const terminals = useStore.getState().tabs.filter((t) => t.type === "terminal");
-    expect(terminals).toHaveLength(2);
-    expect(terminals.some((t) => t.cwd === "/work/api")).toBe(true);
-  });
-
-  it("is not carried across a restart", () => {
-    // Same reason runOnStart is not: a command nobody asked for should not be
-    // waiting in a terminal after reopening the app.
-    const st = useStore.getState();
-    st.addTab({ type: "terminal", cwd: "/work" });
-    useStore.getState().showCommand("rm -rf build", "/work");
-
-    const saved = sessionSnapshot(useStore.getState());
-    expect(saved.tabs.every((t) => !("command" in t))).toBe(true);
-  });
-});
-
-describe("an agent tab's lifecycle", () => {
-  beforeEach(reset);
-
-  const HOUR = 60 * 60 * 1000;
-
-  const idleAgent = (idleMs: number, busy: boolean) => {
-    const id = useStore.getState().addTab({ type: "agent" });
-    useStore.getState().setTabBusy(id, busy);
-    useStore.setState((s) => ({
-      tabs: s.tabs.map((t) =>
-        t.id === id ? { ...t, lastActiveAt: Date.now() - idleMs } : t,
-      ),
-    }));
-    return id;
-  };
-
-  it("never shelves an agent that is mid-run", () => {
-    // The pane is the runtime: shelving one that is working kills the work.
-    const working = idleAgent(25 * HOUR, true);
-    useStore.getState().addTab({ type: "terminal" }); // something else in front
-
-    useStore.getState().runArchiveScan();
-
-    expect(useStore.getState().tabs.map((t) => t.id)).toContain(working);
-    expect(useStore.getState().archive).toHaveLength(0);
-  });
-
-  it("shelves an idle one, keeping the identity its log is filed under", () => {
-    const idle = idleAgent(25 * HOUR, false);
-    useStore.getState().addTab({ type: "terminal" });
-
-    useStore.getState().runArchiveScan();
-
-    const s = useStore.getState();
-    expect(s.tabs.map((t) => t.id)).not.toContain(idle);
-    const entry = s.archive.find((e) => e.id === idle);
-    expect(entry?.type).toBe("agent");
-    // The id is what the session log is named after, so waking it has to bring
-    // back the same id or the history is orphaned.
-    expect(entry?.id).toBe(idle);
-  });
-
-  it("becomes shelvable again once the run ends", () => {
-    const id = idleAgent(25 * HOUR, true);
-    useStore.getState().addTab({ type: "terminal" });
-    useStore.getState().runArchiveScan();
-    expect(useStore.getState().tabs.map((t) => t.id)).toContain(id);
-
-    // The turn finishes; the view reports it.
-    useStore.getState().setTabBusy(id, false);
-    useStore.setState((s) => ({
-      tabs: s.tabs.map((t) =>
-        t.id === id ? { ...t, lastActiveAt: Date.now() - 25 * HOUR } : t,
-      ),
-    }));
-    useStore.getState().runArchiveScan();
-
-    expect(useStore.getState().tabs.map((t) => t.id)).not.toContain(id);
-  });
-
-  it("does not carry busy across a restart", () => {
-    // busy describes a live process. Persisting it would leave a tab that can
-    // never be shelved after a crash mid-run.
-    const id = idleAgent(1 * HOUR, true);
-    const saved = sessionSnapshot(useStore.getState());
-    expect(saved.tabs.find((t) => t.id === id)).toBeDefined();
-    expect(saved.tabs.every((t) => !("busy" in t))).toBe(true);
   });
 });
 

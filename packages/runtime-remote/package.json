@@ -6,7 +6,11 @@
   "type": "module",
   "dependencies": {
     "@tabverse/remote-client": "file:../remote-client",
+    "@tabverse/remote-protocol": "file:../remote-protocol",
     "@tabverse/runtime-contracts": "file:../runtime-contracts",
+    "@tabverse/tab-browser": "file:../tab-browser",
+    "@tabverse/tab-files": "file:../tab-files",
+    "@tabverse/tab-terminal": "file:../tab-terminal",
     "@tabverse/workbench": "file:../workbench",
     "zustand": "^5.0.0"
   },

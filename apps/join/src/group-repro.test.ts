@@ -1,11 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { sessionSnapshot, useStore, withPresetGroups } from "../../../src/state/store";
 import {
   applyMirrorSnapshot,
+  configureRemoteTabContributions,
   useRemoteMirrorStore,
 } from "@tabverse/runtime-remote/app-mirror";
+import { createRemoteTestContributions } from "@tabverse/test-runtime";
 
 describe("field repro: the host's own snapshot round-trips groups", () => {
+  beforeEach(() => configureRemoteTabContributions(createRemoteTestContributions()));
   it("sessionSnapshot output, fed to the mirror, keeps the tree", () => {
     // Host side: build a real grouped state the way the host store holds it.
     useStore.setState({

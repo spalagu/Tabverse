@@ -1,0 +1,17 @@
+{
+  "name": "@tabverse/plugin-kernel",
+  "private": true,
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "@tabverse/tab-contracts": "file:../tab-contracts"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

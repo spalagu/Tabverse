@@ -355,8 +355,7 @@ button.ghost {
 
   /* Under 16px iOS zooms toward a focused input; on a phone every input
      the user can reach gets the floor. */
-  #ticket,
-  .agent-input {
+  #ticket {
     font-size: 16px;
   }
 }

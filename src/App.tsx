@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "react";
-import { WorkbenchRuntimeProvider } from "@tabverse/workbench/runtime";
-import { desktopRuntime } from "@tabverse/runtime-desktop";
+import { installDesktopTabViews } from "./desktopTabViews";
 
 /**
  * One thing the system handed over. Mirrors `Opened` in
@@ -36,17 +35,19 @@ import { ArchivePanel } from "./components/ArchivePanel";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { DownloadsPanel } from "./components/DownloadsPanel";
 import { useGlobalKeys } from "./keys";
-import { detachTerminalTab, listenToMenuCommands } from "./appCommands";
+import { listenToMenuCommands } from "./appCommands";
 import { initDownloads } from "./downloads";
 import { loadZoomMemory } from "./zoomMemory";
 import { coreLog } from "./errlog";
 import { flushAll } from "./persist";
+import { flushConfigWrites } from "./state/config";
 import {
-  configGet,
-  flushConfigWrites,
-  terminalBackgroundTasksOf,
-} from "./state/config";
-import { prepareTerminalQuit } from "./quitPolicy";
+  detachResidentForAppExit,
+  reconcileResidentRemoteTabs,
+  reconcileResidentTerminalTabs,
+  residentTakeoverFailures,
+  takeOverResidentRuntimes,
+} from "./residentRuntime";
 import {
   recoverOrInitializeSession,
   type SessionRecoveryOutcome,
@@ -65,10 +66,23 @@ import {
   useStore,
   type PageDialog as PageDialogState,
   pointerPastSidebar,
-  sessionSnapshot,
 } from "./state/store";
 import { bootMirrorBroadcast } from "./state/mirrorBroadcast";
 import { applyMirrorAction } from "./state/mirrorActions";
+import { desktopPluginComposition } from "./pluginComposition";
+import {
+  createContributionBridge,
+  type ContributionAckEvent,
+  type ContributionIntentEvent,
+  type ContributionResnapshotEvent,
+  type ContributionSnapshotRequestEvent,
+} from "./share/framework/contributionBridge";
+import {
+  isRemoteAppActionAllowed,
+  remoteAppSnapshot,
+} from "./share/framework/remoteBoundary";
+import { fsApi } from "./backend/fs";
+import { getTerm } from "./termRegistry";
 
 type PageDialogKind = PageDialogState["kind"];
 
@@ -269,31 +283,141 @@ function DesktopApp() {
 
   useEffect(() => {
     if (!isTauri) return;
-    let stop: (() => void) | null = null;
     let cancelled = false;
-    void import("@tauri-apps/api/event").then(({ listen }) =>
-      listen("app-share-snapshot-request", () => {
-        void import("@tauri-apps/api/core").then(({ invoke }) => {
-          void invoke("app_share_snapshot_deliver", {
-            // The app-share overlay rides beside the session shape: the
-            // files tabs' live open files and browsing directories are UI
-            // facts the disk session deliberately does not carry, and the
-            // mirror needs them.
-            snapshot: {
-              ...sessionSnapshot(useStore.getState()),
-              filesOpenPath: useStore.getState().filesOpenPath,
-              filesOpenDir: useStore.getState().filesOpenDir,
-            },
-          }).catch((e) => coreLog("error", `app_share_snapshot_deliver failed: ${e}`));
-        });
-      }).then((fn) => {
-        if (cancelled) fn();
-        else stop = fn;
-      })
-    );
+    let cleanup: (() => void) | null = null;
+    void Promise.all([
+      import("@tauri-apps/api/core"),
+      import("@tauri-apps/api/event"),
+    ]).then(async ([{ invoke }, { listen }]) => {
+      const bridge = createContributionBridge({
+        composition: desktopPluginComposition(),
+        invoke: (command, args) => invoke(command, args),
+        executeIntent: async (tabId, name, payload) => {
+          if (name === "terminal.input") {
+            const terminal = getTerm(tabId);
+            if (terminal === undefined) throw new Error("terminal is not attached");
+            terminal.write(payload as string);
+            return null;
+          }
+          if (name === "files.open") {
+            useStore.getState().setFilesOpenPath(
+              tabId,
+              (payload as { path: string }).path,
+            );
+            return null;
+          }
+          if (name === "files.write") {
+            const write = payload as { path: string; content: string };
+            await fsApi.write(write.path, write.content);
+            return null;
+          }
+          if (name === "browser.navigate") {
+            useStore.getState().setTabUrl(
+              tabId,
+              (payload as { url: string }).url,
+            );
+            return null;
+          }
+          throw new Error(`unsupported remote intent: ${name}`);
+        },
+        reportError: (message) =>
+          coreLog("error", `contribution bridge failed: ${message}`),
+      });
+      const sync = () => {
+        const state = useStore.getState();
+        const selected = state.appShare === null
+          ? state.tabs.filter((tab) => tab.share !== undefined)
+          : state.tabs;
+        const tabs = selected.map((tab) =>
+          tab.type === "files"
+            ? {
+                ...tab,
+                openPath: state.filesOpenPath[tab.id],
+                cwd: state.filesOpenDir[tab.id] ?? tab.cwd,
+              }
+            : tab,
+        );
+        if (tabs.length === 0) return bridge.clear();
+        return bridge.sync(tabs, state.activeTabId);
+      };
+      const stopStore = useStore.subscribe((state, previous) => {
+        if (
+          state.appShare !== previous.appShare ||
+          state.tabs !== previous.tabs ||
+          state.filesOpenPath !== previous.filesOpenPath ||
+          state.filesOpenDir !== previous.filesOpenDir ||
+          state.activeTabId !== previous.activeTabId
+        ) {
+          void sync().catch(() => {});
+        }
+      });
+      if (useStore.getState().appShare !== null) await sync();
+      const stopSnapshot = await listen("app-share-snapshot-request", () => {
+        const state = useStore.getState();
+        void bridge
+          .sync(state.tabs, state.activeTabId)
+          .then(() => bridge.snapshotAll())
+          .then(() =>
+            invoke("app_share_snapshot_deliver", {
+              snapshot: remoteAppSnapshot(useStore.getState()),
+            }),
+          )
+          .catch((e) =>
+            coreLog("error", `app_share_snapshot_deliver failed: ${e}`),
+          );
+      });
+      const stopIntent = await listen<ContributionIntentEvent>(
+        "app-share-remote-intent",
+        (event) => {
+          void bridge.handleIntent(event.payload).catch(() => {});
+        },
+      );
+      const stopTabSnapshot = await listen<ContributionSnapshotRequestEvent>(
+        "tab-share-contribution-snapshot-request",
+        (event) => {
+          const state = useStore.getState();
+          const tab = state.tabs.find((candidate) => candidate.id === event.payload.tabId);
+          if (tab === undefined || tab.share === undefined) return;
+          void sync()
+            .then(() => bridge.snapshotTab(event.payload.tabId, event.payload.viewer))
+            .catch(() => {});
+        },
+      );
+      const stopAck = await listen<ContributionAckEvent>(
+        "app-share-remote-ack",
+        (event) => {
+          void bridge.handleAck(event.payload).catch(() => {});
+        },
+      );
+      const stopResnapshot = await listen<ContributionResnapshotEvent>(
+        "app-share-remote-resnapshot",
+        (event) => {
+          void bridge.handleResnapshot(event.payload).catch(() => {});
+        },
+      );
+      if (cancelled) {
+        stopStore();
+        stopSnapshot();
+        stopIntent();
+        stopTabSnapshot();
+        stopAck();
+        stopResnapshot();
+        await bridge.dispose();
+      } else {
+        cleanup = () => {
+          stopStore();
+          stopSnapshot();
+          stopIntent();
+          stopTabSnapshot();
+          stopAck();
+          stopResnapshot();
+          void bridge.dispose();
+        };
+      }
+    }).catch((e) => coreLog("error", `contribution bridge setup failed: ${e}`));
     return () => {
       cancelled = true;
-      stop?.();
+      cleanup?.();
     };
   }, []);
 
@@ -303,6 +427,14 @@ function DesktopApp() {
     let cancelled = false;
     void import("@tauri-apps/api/event").then(({ listen }) =>
       listen<{ name: string; args: unknown }>("app-share-action", (e) => {
+        if (!isRemoteAppActionAllowed(
+          useStore.getState(),
+          e.payload.name,
+          e.payload.args,
+        )) {
+          coreLog("warn", `app-share action dropped at remote boundary: ${e.payload.name}`);
+          return;
+        }
         const applied = applyMirrorAction(e.payload.name, e.payload.args);
         if (!applied) {
           coreLog(
@@ -616,6 +748,23 @@ function DesktopApp() {
         } else {
           outcome = "restored";
         }
+        if (isTauri && outcome !== "preserved") {
+          try {
+            const residentReplays = await takeOverResidentRuntimes();
+            reconcileResidentRemoteTabs(residentReplays);
+            await reconcileResidentTerminalTabs(residentReplays);
+            for (const failure of residentTakeoverFailures()) {
+              coreLog(
+                "warn",
+                `resident takeover failed for ${failure.runtime.runtimeId}: ${String(failure.error)}`,
+              );
+            }
+          } catch (error) {
+            // First run and installations without a Supervisor are normal.
+            // A failed takeover must never make session recovery unusable.
+            coreLog("warn", `resident takeover unavailable: ${String(error)}`);
+          }
+        }
         // A preserved session has no trustworthy live-tab list. Do not let
         // orphan sweeping erase its per-tab files while recovery is pending.
         if (outcome !== "preserved") void sweepOrphanTabState();
@@ -689,54 +838,18 @@ function DesktopApp() {
           resolvingClose = true;
           void (async () => {
             try {
-              let backgroundTasksOn = false;
-              try {
-                backgroundTasksOn =
-                  terminalBackgroundTasksOf((await configGet()).values) === true;
-              } catch {
-                // The opt-in was not proved: preserve stop-on-quit.
-              }
-              const tabs = useStore
-                .getState()
-                .tabs.filter((tab) => tab.type === "terminal");
-              const busy = tabs.filter((tab) => tab.busy === true).length;
-              const result = await prepareTerminalQuit({
-                backgroundTasksOn,
-                busyCount: busy,
-                choose: () =>
-                  confirmChoose(STR.term.backgroundQuitAsk({ count: busy }), [
-                    {
-                      label: STR.term.backgroundQuitKeep,
-                      value: "background",
-                    },
-                    {
-                      label: STR.term.backgroundQuitStop,
-                      value: "stop",
-                      danger: true,
-                    },
-                  ]) as Promise<"background" | "stop" | null>,
-                detachAll: async () => {
-                  const detached = await Promise.all(
-                    tabs.map((tab) => detachTerminalTab(tab))
-                  );
-                  const allDetached = detached.every(Boolean);
-                  if (allDetached) {
-                    for (const tab of tabs) useStore.getState().closeTab(tab.id);
-                  }
-                  return allDetached;
-                },
-                killAll: async () => {
-                  const { invoke } = await import("@tauri-apps/api/core");
-                  await invoke("term_helper_kill_all");
-                },
-              });
-              if (result === "cancel") {
-                resolvingClose = false;
-                return;
-              }
+              // Only the Supervisor may own work beyond GUI lifetime. Kill
+              // every legacy helper session; resident sessions use separate
+              // worker endpoints and are detached below.
+              const { invoke } = await import("@tauri-apps/api/core");
+              await invoke("term_helper_kill_all");
               closing = true;
               await Promise.race([
-                Promise.all([flushAll(), flushConfigWrites()]),
+                Promise.all([
+                  flushAll(),
+                  flushConfigWrites(),
+                  detachResidentForAppExit(),
+                ]),
                 new Promise((resolve) => setTimeout(resolve, 1500)),
               ]);
               await win.destroy();
@@ -888,11 +1001,8 @@ function DesktopApp() {
   );
 }
 
-/** Desktop injects native capabilities once; shared children never inspect Tauri. */
+installDesktopTabViews();
+
 export default function App() {
-  return (
-    <WorkbenchRuntimeProvider runtime={desktopRuntime}>
-      <DesktopApp />
-    </WorkbenchRuntimeProvider>
-  );
+  return <DesktopApp />;
 }

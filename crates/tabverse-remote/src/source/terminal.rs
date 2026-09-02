@@ -80,19 +80,20 @@ impl ShareSource for TerminalSource {
                 (self.write_pty)(&bytes);
                 Ok(InputOutcome::Applied)
             }
-            // The hub routes agent frames only to agent shares, so one landing
-            // here is a hub bug. An error the hub logs beats a silent drop.
-            InputPayload::AgentPrompt { .. }
-            | InputPayload::AgentAnswer { .. }
-            | InputPayload::AgentCancel => {
-                anyhow::bail!("a terminal source cannot take agent input")
-            }
-            // And the app-share frames only to app shares (same rule, same
+            // The app-share frames only route to app shares (same rule, same
             // stance: an error the hub logs beats a silent drop).
             InputPayload::Rpc { .. }
             | InputPayload::Action { .. }
             | InputPayload::ClipPush { .. }
-            | InputPayload::ProxyReq { .. } => {
+            | InputPayload::ProxyReq { .. }
+            | InputPayload::BrowserOpen { .. }
+            | InputPayload::BrowserRequestChunk { .. }
+            | InputPayload::BrowserRequestEnd { .. }
+            | InputPayload::BrowserCredit { .. }
+            | InputPayload::BrowserCancel { .. }
+            | InputPayload::RemoteAck { .. }
+            | InputPayload::RemoteResnapshot { .. }
+            | InputPayload::RemoteIntent { .. } => {
                 anyhow::bail!("a terminal source cannot take app-share input")
             }
         }

@@ -64,7 +64,7 @@ enum Outcome {
 /// stdin is null: nothing this module runs may be answered interactively,
 /// and a child that asks gets EOF, not a keystroke. Output is drained on
 /// threads so a transfer that fills the pipe buffer cannot wedge the poll
-/// loop — the same deadlock the agent bash tool documents.
+/// loop — the same deadlock an in-process command runner can trigger.
 fn run_scp(caller_args: &[String]) -> Result<String> {
     let mut cmd = Command::new(scp_bin());
     let mut all = base_args();

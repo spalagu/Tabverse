@@ -43,7 +43,7 @@ afterEach(() => {
 });
 
 /** Add a tab of the given type, open the dialog on it, render. */
-function openOn(type: "terminal" | "agent"): string {
+function openOn(type: "terminal"): string {
   const id = useStore.getState().addTab({ type });
   act(() => {
     useStore.getState().setShareDialogTab(id);
@@ -92,19 +92,6 @@ describe("capability-driven level options", () => {
     expect(radios().find((r) => r.checked)?.value).toBe("steer");
   });
 
-  it("an agent offers view, steer and approve, defaulting to view", () => {
-    openOn("agent");
-    expect(radios().map((r) => r.value)).toEqual(["view", "steer", "approve"]);
-    expect(radios().find((r) => r.checked)?.value).toBe("view");
-  });
-
-  it("reopening on another type re-reads that type's default", () => {
-    openOn("terminal");
-    expect(radios().find((r) => r.checked)?.value).toBe("steer");
-    const agentId = useStore.getState().addTab({ type: "agent" });
-    act(() => useStore.getState().setShareDialogTab(agentId));
-    expect(radios().find((r) => r.checked)?.value).toBe("view");
-  });
 });
 
 describe("the start flow", () => {
@@ -122,12 +109,12 @@ describe("the start flow", () => {
   });
 
   it("passes the explicit no-expiry choice as null", async () => {
-    const id = openOn("agent");
+    const id = openOn("terminal");
     const ttl = container.querySelector<HTMLSelectElement>("#share-ttl-select");
     await setSelect(ttl!, "never");
     await act(async () => buttonByText("Start sharing").click());
     expect(mocks.startShare).toHaveBeenCalledWith(id, {
-      access: "view",
+      access: "steer",
       ttlSecs: null,
     });
   });
@@ -135,7 +122,7 @@ describe("the start flow", () => {
 
 describe("the shared state", () => {
   function openShared(
-    type: "terminal" | "agent",
+    type: "terminal",
     viewers: ShareState["viewers"]
   ): string {
     const id = useStore.getState().addTab({ type });
@@ -181,18 +168,6 @@ describe("the shared state", () => {
     expect(
       [...selects[0]!.querySelectorAll("option")].map((o) => o.value)
     ).toEqual(["view", "steer"]);
-  });
-
-  it("an agent roster's dropdown offers all three declared levels", () => {
-    openShared("agent", twoViewers);
-    const sel = container.querySelector<HTMLSelectElement>(
-      ".share-viewer-access"
-    );
-    expect([...sel!.querySelectorAll("option")].map((o) => o.value)).toEqual([
-      "view",
-      "steer",
-      "approve",
-    ]);
   });
 
   it("falls back to Viewer #id when the Hello carried no name", () => {

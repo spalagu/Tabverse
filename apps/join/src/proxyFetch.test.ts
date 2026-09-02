@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createBrowserStreamClient,
   createProxyClient,
   installProxyFetchPatch,
   PROXY_PATH_PREFIX,
@@ -7,6 +8,104 @@ import {
   proxyUrlFor,
   targetFromProxyUrl,
 } from "@tabverse/remote-client/proxy-fetch";
+
+function streamRig() {
+  const calls: Array<{ fn: string; args: unknown[] }> = [];
+  const client = createBrowserStreamClient({
+    open: (frame) => calls.push({ fn: "open", args: [frame] }),
+    requestChunk: (...args) => calls.push({ fn: "requestChunk", args }),
+    requestEnd: (...args) => calls.push({ fn: "requestEnd", args }),
+    credit: (...args) => calls.push({ fn: "credit", args }),
+    cancel: (...args) => calls.push({ fn: "cancel", args }),
+  }, () => ({ id: "attachment-7", generation: 3 }));
+  return { calls, client };
+}
+
+describe("http-stream-v2 client", () => {
+  it("uploads binary requests in chunks and builds a credited ReadableStream from Head, Chunk, and End", async () => {
+    const { calls, client } = streamRig();
+    const input = new Uint8Array([0, 255, 1, 128, 2]);
+    const pending = client.requestViaHost("browser-tab", "https://intranet.test/upload", {
+      method: "POST",
+      body: input,
+      headers: { "content-type": "application/octet-stream" },
+    });
+    await settleMicrotasks();
+    const open = calls.find((call) => call.fn === "open")?.args[0] as {
+      streamId: number;
+      tabId: string;
+      attachmentId: string;
+      attachmentGeneration: number;
+      bodyLen?: number;
+    };
+    expect(open).toMatchObject({
+      tabId: "browser-tab",
+      attachmentId: "attachment-7",
+      attachmentGeneration: 3,
+      bodyLen: input.byteLength,
+    });
+    expect(calls.map((call) => call.fn)).toEqual([
+      "open",
+      "requestChunk",
+      "credit",
+      "requestEnd",
+    ]);
+
+    expect(client.consume({
+      type: "browserResponseHead",
+      streamId: open.streamId,
+      status: 200,
+      headers: [["content-type", "application/octet-stream"]],
+      finalUrl: "https://intranet.test/final",
+    })).toBe(true);
+    const response = await pending;
+    client.consume({
+      type: "browserResponseChunk",
+      streamId: open.streamId,
+      seq: 0,
+      b64: btoa(String.fromCharCode(9, 0, 255)),
+    });
+    client.consume({ type: "browserResponseEnd", streamId: open.streamId });
+    expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual([9, 0, 255]);
+    expect(response.headers.get("x-tabverse-final-url")).toBe(
+      "https://intranet.test/final",
+    );
+    expect(calls.filter((call) => call.fn === "credit").at(-1)?.args[1]).toBe(3);
+  });
+
+  it("cancels out-of-order responses immediately while AbortSignal stops only its own stream", async () => {
+    const { calls, client } = streamRig();
+    const abort = new AbortController();
+    const pending = client.requestViaHost("browser-tab", "http://host.test/slow", {
+      signal: abort.signal,
+    });
+    await settleMicrotasks();
+    const streamId = (calls[0].args[0] as { streamId: number }).streamId;
+    client.consume({
+      type: "browserResponseHead",
+      streamId,
+      status: 200,
+      headers: [],
+      finalUrl: "http://host.test/slow",
+    });
+    const response = await pending;
+    const reading = response.text();
+    client.consume({
+      type: "browserResponseChunk",
+      streamId,
+      seq: 2,
+      b64: btoa("late"),
+    });
+    await expect(reading).rejects.toThrow("chunk gap");
+    expect(calls.some((call) => call.fn === "cancel" && call.args[0] === streamId)).toBe(true);
+
+    const second = client.requestViaHost("browser-tab", "http://host.test/abort", {
+      signal: abort.signal,
+    });
+    abort.abort();
+    await expect(second).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
 
 /** One sent ProxyReq, as the wasm seam would carry it. */
 interface Sent {

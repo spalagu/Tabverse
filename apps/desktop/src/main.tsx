@@ -37,8 +37,12 @@ import { installErrorReporting } from "../../../src/errlog";
 import "../../../src/share/capabilities";
 import { markPlatform } from "../../../src/platform";
 import { bootstrapTheme } from "../../../src/theme/themeController";
+import { startDesktopPluginComposition } from "../../../src/pluginComposition";
 
 installErrorReporting();
+void startDesktopPluginComposition().catch((error: unknown) => {
+  console.error("Desktop plugin composition failed to start", error);
+});
 // Before the first paint: the window-control inset it selects decides where
 // the sidebar's own controls sit, and a correction after paint is a visible
 // jump on every launch.

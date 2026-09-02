@@ -78,11 +78,24 @@ async function proxyViaPage(request: Request): Promise<Response> {
     );
     channel.port1.onmessage = (e: MessageEvent) => {
       clearTimeout(timer);
-      const d = e.data as { status: number; contentType: string; bodyB64: string };
-      const bytes =
+      const d = e.data as {
+        status: number;
+        contentType: string;
+        finalUrl?: string;
+        bodyB64: string;
+      };
+      let bytes =
         d.bodyB64.length > 0
           ? Uint8Array.from(atob(d.bodyB64), (c) => c.charCodeAt(0))
           : undefined;
+      if (
+        bytes !== undefined &&
+        d.contentType.toLowerCase().includes("text/css") &&
+        typeof d.finalUrl === "string"
+      ) {
+        const css = new TextDecoder().decode(bytes);
+        bytes = new TextEncoder().encode(rewriteCssUrls(css, d.finalUrl));
+      }
       resolve(
         new Response(bytes, {
           status: d.status,
@@ -94,6 +107,27 @@ async function proxyViaPage(request: Request): Promise<Response> {
       channel.port2,
     ]);
   });
+}
+
+function proxyPath(target: string): string {
+  const url = new URL(target);
+  return `/__tabverse_proxy/${url.protocol.slice(0, -1)}/${url.host}${url.pathname}${url.search}`;
+}
+
+function rewriteCssUrls(css: string, stylesheetUrl: string): string {
+  return css.replace(
+    /url\(\s*(["']?)(.*?)\1\s*\)/gi,
+    (all, quote: string, raw: string) => {
+      if (/^(?:data|blob):/i.test(raw.trim())) return all;
+      try {
+        const target = new URL(raw, stylesheetUrl);
+        if (!/^https?:$/.test(target.protocol)) return all;
+        return `url(${quote}${proxyPath(target.href)}${quote})`;
+      } catch {
+        return all;
+      }
+    },
+  );
 }
 
 async function cacheFirst(request: Request): Promise<Response> {

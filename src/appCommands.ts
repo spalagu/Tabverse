@@ -1,9 +1,6 @@
-import { confirmChoose } from "./components/Confirm";
 import { runFileCloseClaim } from "./components/files/fileCloseKey";
 import { leaves } from "./paneTree";
-import { configGet, terminalBackgroundTasksOf } from "./state/config";
 import { useStore, type Tab } from "./state/store";
-import { STR } from "./strings";
 import { stopAppShare } from "./share/framework/actions";
 import { coreLog } from "./errlog";
 import { getPaneTerm, getTerm, type TermApi } from "./termRegistry";
@@ -240,48 +237,9 @@ export function closeTabAsking(tabId: string): void {
   const isTauri =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-  if (isTauri && tab?.type === "terminal" && tab.busy === true) {
-    void (async () => {
-      let backgroundTasksOn = false;
-      try {
-        backgroundTasksOn =
-          terminalBackgroundTasksOf((await configGet()).values) === true;
-      } catch {
-        // A missing configuration answer means the opt-in was not proved.
-        // Preserve today's stop-on-close behavior.
-      }
-      if (!shouldAskBeforeClosingBusyTerminal(tab, backgroundTasksOn, true)) {
-        useStore.getState().closeTab(tabId);
-        return;
-      }
-      const choice = await confirmChoose(
-        STR.term.backgroundCloseAsk({ title: tab.title }),
-        [
-          {
-            label: STR.term.backgroundKeepRunning,
-            value: "background",
-          },
-          {
-            label: STR.term.backgroundStopTask,
-            value: "stop",
-            danger: true,
-          },
-        ]
-      );
-      if (choice === "stop") {
-        useStore.getState().closeTab(tabId);
-      } else if (choice === "background") {
-        if (await detachTerminalTab(tab)) {
-          useStore.getState().closeTab(tabId);
-        } else {
-          await confirmChoose(STR.term.backgroundDetachFailed, [
-            { label: STR.common.dismiss, value: "dismiss" },
-          ]);
-        }
-      }
-    })();
-    return;
-  }
+  // Explicit Tab close is an explicit stop. Continuity belongs to App exit
+  // and is owned by ResidentSupervisor; the legacy GUI-spawned helper must
+  // never turn this action into an untracked background process.
   if (!isTauri || tab?.type !== "browser" || !tab.url || tab.dormant === true) {
     st.closeTab(tabId);
     return;

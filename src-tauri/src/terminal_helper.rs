@@ -1,6 +1,7 @@
 //! Resident terminal helper process mode and lazy GUI connection.
 
 use std::{
+    collections::HashMap,
     fs,
     io::{self, Read, Write},
     net::SocketAddr,
@@ -32,8 +33,21 @@ struct EndpointRecord {
     port: u16,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResidentEndpointRecord {
+    schema_version: u16,
+    runtime_id: String,
+    tab_id: String,
+    pid: u32,
+    port: u16,
+    token_hex: String,
+}
+
 pub struct TerminalHelper {
     client: Mutex<Option<Arc<HelperClient>>>,
+    resident_clients: Mutex<HashMap<String, Arc<HelperClient>>>,
+    session_clients: Mutex<HashMap<String, Arc<HelperClient>>>,
 }
 
 impl Default for TerminalHelper {
@@ -46,6 +60,8 @@ impl TerminalHelper {
     pub fn new() -> Self {
         Self {
             client: Mutex::new(None),
+            resident_clients: Mutex::new(HashMap::new()),
+            session_clients: Mutex::new(HashMap::new()),
         }
     }
 
@@ -111,14 +127,116 @@ impl TerminalHelper {
         ))
     }
 
-    pub fn current(&self) -> Option<Arc<HelperClient>> {
-        self.client
+    pub fn ensure_resident(
+        &self,
+        app: &AppHandle,
+        runtime_id: &str,
+        on_event: HelperEventCallback,
+    ) -> Result<Arc<HelperClient>, String> {
+        validate_runtime_id(runtime_id)?;
+        if let Some(client) = self.resident_clients.lock().unwrap().get(runtime_id) {
+            if client.is_alive() {
+                return Ok(Arc::clone(client));
+            }
+        }
+        let path = crate::state_dir(app)?
+            .join("resident/runtime-endpoints")
+            .join(format!("{runtime_id}.json"));
+        let deadline = Instant::now() + CONNECT_DEADLINE;
+        let mut last_error = "resident terminal endpoint did not appear".to_string();
+        while Instant::now() < deadline {
+            match connect_resident_record(&path, runtime_id, Arc::clone(&on_event)) {
+                Ok(client) => {
+                    let client = Arc::new(client);
+                    self.resident_clients
+                        .lock()
+                        .unwrap()
+                        .insert(runtime_id.to_string(), Arc::clone(&client));
+                    return Ok(client);
+                }
+                Err(error) => last_error = error,
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        Err(format!(
+            "resident terminal worker did not become ready: {last_error}"
+        ))
+    }
+
+    pub fn register_session(&self, id: &str, client: Arc<HelperClient>) {
+        self.session_clients
             .lock()
             .unwrap()
-            .as_ref()
+            .insert(id.to_string(), client);
+    }
+
+    pub fn session(&self, id: &str) -> Option<Arc<HelperClient>> {
+        self.session_clients
+            .lock()
+            .unwrap()
+            .get(id)
             .filter(|client| client.is_alive())
             .cloned()
     }
+
+    pub fn forget_session(&self, id: &str) {
+        self.session_clients.lock().unwrap().remove(id);
+    }
+}
+
+fn connect_resident_record(
+    path: &Path,
+    expected_runtime_id: &str,
+    on_event: HelperEventCallback,
+) -> Result<HelperClient, String> {
+    owner_only(path)?;
+    let bytes = fs::read(path).map_err(|e| format!("read resident terminal endpoint: {e}"))?;
+    let record: ResidentEndpointRecord = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("parse resident terminal endpoint: {e}"))?;
+    if record.schema_version != 1 || record.runtime_id != expected_runtime_id {
+        return Err("resident terminal endpoint has a different identity".into());
+    }
+    let token: [u8; 32] = hex::decode(&record.token_hex)
+        .map_err(|_| "resident terminal token is invalid".to_string())?
+        .try_into()
+        .map_err(|_| "resident terminal token has the wrong length".to_string())?;
+    let endpoint = SocketAddr::from(([127, 0, 0, 1], record.port));
+    let (client, _, _) =
+        HelperClient::connect(endpoint, AuthToken::new(token), rand::random(), on_event)
+            .map_err(|e| e.to_string())?;
+    Ok(client)
+}
+
+fn validate_runtime_id(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err("resident terminal runtime id is invalid".into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn owner_only(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path)
+        .map_err(|e| format!("inspect resident terminal endpoint: {e}"))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode & 0o077 != 0 {
+        return Err("resident terminal endpoint permissions are not owner-only".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn owner_only(path: &Path) -> Result<(), String> {
+    fs::metadata(path)
+        .map(|_| ())
+        .map_err(|e| format!("inspect resident terminal endpoint: {e}"))
 }
 
 fn connect_record(
@@ -235,6 +353,16 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn resident_runtime_id_cannot_escape_the_endpoint_directory() {
+        for invalid in ["", "../runtime", "nested/runtime", "/runtime", "has space"] {
+            assert!(validate_runtime_id(invalid).is_err(), "{invalid}");
+        }
+        for valid in ["runtime-1", "runtime_2", "runtime.3"] {
+            validate_runtime_id(valid).unwrap();
+        }
     }
 
     #[test]

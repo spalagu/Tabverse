@@ -1,6 +1,6 @@
 # Tabverse
 
-Tabverse is a cross-platform workspace for terminals, AI agents, files, and
+Tabverse is a cross-platform workspace for terminals, files, and
 the web. It keeps the tools around a task in one tabbed app and lets you share
 live work with another browser when collaboration is faster than switching
 apps or explaining from screenshots.
@@ -9,8 +9,6 @@ apps or explaining from screenshots.
 
 - **Terminal workspace** — run real shells, split panes, search scrollback,
   revisit command blocks, and restore sessions after a restart.
-- **Agent tabs** — follow conversations, tool calls, permission decisions,
-  and cancellations beside the files and terminals involved in the work.
 - **Files and previews** — browse files with Git status, edit with a diff
   against HEAD, and preview common document, image, media, and data formats.
 - **Built-in browser** — keep relevant pages in native web views with focused

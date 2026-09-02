@@ -17,7 +17,8 @@ const h = vi.hoisted(() => {
   const termInstances: Array<{ write: ReturnType<typeof vi.fn> }> = [];
   const channels: MockChannel[] = [];
   const invokeCalls: Array<{ cmd: string; args?: unknown }> = [];
-  return { termInstances, channels, invokeCalls };
+  const residentReplays: unknown[] = [];
+  return { termInstances, channels, invokeCalls, residentReplays };
 });
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -30,6 +31,9 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (cmd: string, args?: unknown) => {
     h.invokeCalls.push({ cmd, args });
     if (cmd === "remote_join") return "join-1";
+    if (cmd === "resident_poll") {
+      return h.residentReplays.shift() ?? { events: [] };
+    }
     return undefined;
   },
 }));
@@ -128,6 +132,7 @@ beforeEach(() => {
   h.termInstances.length = 0;
   h.channels.length = 0;
   h.invokeCalls.length = 0;
+  h.residentReplays.length = 0;
   host = document.createElement("div");
   document.body.appendChild(host);
   act(() => {
@@ -171,26 +176,7 @@ describe("RemoteView renderer dispatch", () => {
     // Neither renderer exists yet — the welcome has not named the kind.
     expect(h.termInstances).toHaveLength(0);
     expect(host.querySelector(".xterm")).toBeNull();
-    expect(host.querySelector(".agent-view")).toBeNull();
     expect(host.querySelector(".remote-connecting")).not.toBeNull();
-  });
-
-  it("an agent welcome never constructs a Terminal", async () => {
-    const ch = await mountJoined();
-    await act(async () => {
-      ch.onmessage(welcome({ tabType: "agent" }));
-    });
-    // The dispatch claim itself: no xterm object, no xterm DOM.
-    expect(h.termInstances).toHaveLength(0);
-    expect(host.querySelector(".xterm")).toBeNull();
-    // The transcript pane is what mounted instead.
-    expect(host.querySelector(".agent-view")).not.toBeNull();
-    expect(host.textContent).toContain("Shared agent");
-    // Agent frames keep flowing into the transcript, still without xterm.
-    await act(async () => {
-      ch.onmessage({ type: "agentSnapshot", events: [] });
-    });
-    expect(h.termInstances).toHaveLength(0);
   });
 
   it("a terminal welcome constructs exactly one Terminal and feeds it", async () => {
@@ -201,7 +187,6 @@ describe("RemoteView renderer dispatch", () => {
     await flush();
     expect(h.termInstances).toHaveLength(1);
     expect(host.querySelector(".xterm")).not.toBeNull();
-    expect(host.querySelector(".agent-view")).toBeNull();
     const term = h.termInstances[0];
     // The pre-welcome status line was buffered and replayed on mount.
     expect(
@@ -230,29 +215,28 @@ describe("RemoteView renderer dispatch", () => {
     await flush();
     expect(h.termInstances).toHaveLength(1);
     expect(host.querySelector(".xterm")).not.toBeNull();
-    expect(host.querySelector(".agent-view")).toBeNull();
   });
 
-  it("the agent composer still drives remote_agent_prompt (actions threading)", async () => {
-    const ch = await mountJoined();
-    await act(async () => {
-      ch.onmessage(welcome({ tabType: "agent" }));
-      ch.onmessage({ type: "mode", readOnly: false, access: "steer" });
+  it("a resident Remote attaches to Supervisor replay and never starts a GUI-owned join", async () => {
+    h.residentReplays.push({
+      events: [{ seq: 1, payload: welcome({ tabType: "terminal" }) }],
     });
-    const input = host.querySelector<HTMLTextAreaElement>(".agent-input")!;
-    expect(input).not.toBeNull();
     await act(async () => {
-      const proto = Object.getPrototypeOf(input) as object;
-      const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
-      setter.call(input, "run the tests");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
+      root.render(
+        createElement(RemoteView, {
+          tab,
+          active: true,
+          residentRuntimeId: "runtime-remote-1",
+        }),
+      );
     });
-    const sendBtn = [...host.querySelectorAll("button")].find(
-      (b) => b.textContent === "Send"
-    )!;
-    await act(async () => sendBtn.click());
-    const prompt = h.invokeCalls.find((c) => c.cmd === "remote_agent_prompt");
-    expect(prompt).toBeDefined();
-    expect(prompt!.args).toMatchObject({ id: "join-1", text: "run the tests" });
+    await flush();
+    expect(h.invokeCalls).toContainEqual({
+      cmd: "resident_poll",
+      args: { runtimeId: "runtime-remote-1", lastAckSeq: 0 },
+    });
+    expect(h.invokeCalls.some((call) => call.cmd === "remote_join")).toBe(false);
+    expect(h.termInstances).toHaveLength(1);
   });
+
 });

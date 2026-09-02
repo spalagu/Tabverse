@@ -527,7 +527,7 @@ export function FilesView({ tab, active }: Props) {
    * would see their double-click do nothing.
    */
   // A tool call the user clicked. Unlike `openPath` this fires again for the
-  // same file, which is the normal case: an agent references one file many
+  // same file, which is the normal case: automation references one file many
   // times over a run, and each click has to land.
   const lastReveal = useRef(0);
   useEffect(() => {

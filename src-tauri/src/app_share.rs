@@ -7,7 +7,7 @@
 //! carries the clipboard and remote-proxy frames to their owners elsewhere
 //! in the app. The hub keeps policy (kind floor, access checks, version
 //! withholding); this adapter is mechanism only, the same split the
-//! terminal and agent sources live by.
+//! terminal sources live by.
 //!
 //! WHAT IT DOES NOT DO. It does not read the store itself — the store lives
 //! in the webview, in another language, and the seam this source speaks is
@@ -36,21 +36,6 @@ pub struct RpcEntry {
     pub steer_only: bool,
     pub handler: RpcHandler,
 }
-
-/// One viewer verb for the agent session behind the ACTIVE tab.
-pub enum AgentCmd {
-    Prompt(String),
-    Cancel,
-}
-
-/// Glue-injected: point the named tab's agent session at a share (Some) or
-/// away from one (None); on bind, the session's history is the return —
-/// the catch-up a viewer fronts an agent tab with. None when the tab runs
-/// no agent session (the common case: bind is a query, not an assertion).
-pub type AgentBindFn =
-    Arc<dyn Fn(&str, Option<Arc<Share>>) -> Option<Vec<serde_json::Value>> + Send + Sync>;
-/// Glue-injected: run one viewer verb against the named tab's session.
-pub type AgentInputFn = Arc<dyn Fn(&str, AgentCmd) -> Result<(), String> + Send + Sync>;
 
 /// Glue-injected: apply a store action in the webview (an event the React
 /// side listens for), and hand back nothing — the confirmation is the
@@ -88,6 +73,8 @@ pub struct AppShareSource {
     snapshot: SnapshotFn,
     write_clipboard: WriteClipboard,
     proxy: ProxyFn,
+    browser_router: Arc<crate::remote_proxy::BrowserRequestRouter>,
+    resident_browser: Mutex<Option<crate::remote_proxy::ResidentBrowserExchange>>,
     binding: Mutex<Option<ShareBinding>>,
     /// Hands the webview-ask path an AppHandle without the source holding
     /// one from construction (the app handle does not exist yet when
@@ -101,13 +88,173 @@ pub struct AppShareSource {
     /// is tapped for its session and viewer keystrokes are written into
     /// its terminal. None = a non-terminal tab fronts, no terminal stream.
     active_tab: Mutex<Option<String>>,
-    agent_bind: Mutex<AgentBindFn>,
-    agent_input: Mutex<AgentInputFn>,
-    /// The tab whose agent session is currently bound — the bind's own
-    /// bookkeeping, so switching away releases it and rebinding the same
-    /// tab does not duplicate its history.
-    agent_bound_tab: Mutex<Option<String>>,
     clip_watch: Mutex<Option<crate::clipboard_watch::ClipboardWatch>>,
+}
+
+/// One Single Tab share. It reuses the same v4 contribution event seam as
+/// Whole App Share and may wrap a legacy source (Terminal) for v1-v3 clients.
+pub struct ContributionShareSource<R: tauri::Runtime = tauri::Wry> {
+    tab_id: String,
+    app: tauri::AppHandle<R>,
+    base: Option<Arc<dyn ShareSource>>,
+    binding: Mutex<Option<ShareBinding>>,
+}
+
+impl<R: tauri::Runtime> ContributionShareSource<R> {
+    pub fn new(
+        tab_id: String,
+        app: tauri::AppHandle<R>,
+        base: Option<Arc<dyn ShareSource>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            tab_id,
+            app,
+            base,
+            binding: Mutex::new(None),
+        })
+    }
+
+    pub fn bound_share(&self) -> Option<Arc<Share>> {
+        self.binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|binding| binding.share.clone())
+    }
+
+    fn emit(&self, name: &str, payload: serde_json::Value) {
+        use tauri::Emitter;
+        let _ = self.app.emit(name, payload);
+    }
+}
+
+impl<R: tauri::Runtime> ShareSource for ContributionShareSource<R> {
+    fn kind(&self) -> SharedTabType {
+        match self.base.as_ref().map(|source| source.kind()) {
+            Some(SharedTabType::Terminal) => SharedTabType::Terminal,
+            _ => SharedTabType::Contribution,
+        }
+    }
+
+    fn grid(&self) -> Option<tabverse_remote::source::Viewport> {
+        self.base.as_ref().and_then(|source| source.grid())
+    }
+
+    fn request_snapshot(&self, viewer: ViewerId) {
+        if let Some(base) = &self.base {
+            if base.kind() == SharedTabType::Terminal {
+                base.request_snapshot(viewer);
+            }
+        }
+        self.emit(
+            "tab-share-contribution-snapshot-request",
+            serde_json::json!({ "viewer": viewer, "tabId": self.tab_id }),
+        );
+    }
+
+    fn inject_input(
+        &self,
+        viewer: ViewerId,
+        access: Access,
+        payload: InputPayload,
+    ) -> anyhow::Result<InputOutcome> {
+        match payload {
+            InputPayload::RemoteAck {
+                tab_id,
+                epoch,
+                frame_seq,
+            } => {
+                self.emit(
+                    "app-share-remote-ack",
+                    serde_json::json!({
+                        "viewer": viewer,
+                        "tabId": tab_id,
+                        "epoch": epoch,
+                        "frameSeq": frame_seq,
+                    }),
+                );
+                Ok(InputOutcome::Applied)
+            }
+            InputPayload::RemoteResnapshot { tab_id, epoch } => {
+                self.emit(
+                    "app-share-remote-resnapshot",
+                    serde_json::json!({
+                        "viewer": viewer,
+                        "tabId": tab_id,
+                        "epoch": epoch,
+                    }),
+                );
+                Ok(InputOutcome::Applied)
+            }
+            InputPayload::RemoteIntent {
+                tab_id,
+                attachment_id,
+                attachment_generation,
+                intent_id,
+                name,
+                args,
+            } => {
+                self.emit(
+                    "app-share-remote-intent",
+                    serde_json::json!({
+                        "viewer": viewer,
+                        "access": access,
+                        "tabId": tab_id,
+                        "attachmentId": attachment_id,
+                        "attachmentGeneration": attachment_generation,
+                        "intentId": intent_id,
+                        "name": name,
+                        "args": args,
+                    }),
+                );
+                Ok(InputOutcome::Applied)
+            }
+            other => self
+                .base
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("semantic Tab accepts only declared v4 input"))?
+                .inject_input(viewer, access, other),
+        }
+    }
+
+    fn apply_viewport(&self, joint: Option<tabverse_remote::source::Viewport>) {
+        if let Some(base) = &self.base {
+            base.apply_viewport(joint);
+        }
+    }
+
+    fn viewer_detached(&self, viewer: ViewerId) {
+        if let Some(base) = &self.base {
+            base.viewer_detached(viewer);
+        }
+    }
+
+    fn update_browser_grant(&self, tab_id: &str, url: &str) -> anyhow::Result<()> {
+        self.base
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Browser share has no network grant owner"))?
+            .update_browser_grant(tab_id, url)
+    }
+
+    fn bind(&self, binding: ShareBinding) {
+        if let Some(base) = &self.base {
+            base.bind(binding.clone());
+        }
+        *self
+            .binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(binding);
+    }
+
+    fn unbind(&self) {
+        if let Some(base) = &self.base {
+            base.unbind();
+        }
+        *self
+            .binding
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+    }
 }
 
 impl AppShareSource {
@@ -121,14 +268,11 @@ impl AppShareSource {
             rpc: Mutex::new(HashMap::new()),
             dispatch_action: Mutex::new(dispatch_action),
             term_input: Mutex::new(Arc::new(|_| {})),
-            agent_bind: Mutex::new(Arc::new(|_tab, _target| None)),
-            agent_input: Mutex::new(Arc::new(|_tab, _cmd| {
-                Err("the agent seam is not installed".into())
-            })),
-            agent_bound_tab: Mutex::new(None),
             snapshot,
             write_clipboard,
             proxy,
+            browser_router: Arc::new(crate::remote_proxy::BrowserRequestRouter::default()),
+            resident_browser: Mutex::new(None),
             binding: Mutex::new(None),
             app: Mutex::new(None),
             seq: AtomicU64::new(0),
@@ -161,12 +305,44 @@ impl AppShareSource {
         );
     }
 
-    pub fn set_agent_seams(&self, bind: AgentBindFn, input: AgentInputFn) {
-        *self.agent_bind.lock().unwrap_or_else(|e| e.into_inner()) = bind;
-        *self.agent_input.lock().unwrap_or_else(|e| e.into_inner()) = input;
-        // The seams arriving late must not miss a tab that already fronts:
-        // re-derive the binding from the active-tab fact as of now.
-        self.rebind_agent();
+    /// The host serializer's already-sanitized Browser rows are the explicit
+    /// network grant roots for Whole App Share. Settings/private rows never
+    /// reach this method because `app_snapshot_for_wire` removed them first.
+    pub fn sync_browser_grants(&self, snapshot: &serde_json::Value) {
+        let tabs = snapshot
+            .get("tabs")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|tab| {
+                let kind = tab
+                    .get("kind")
+                    .or_else(|| tab.get("type"))
+                    .and_then(serde_json::Value::as_str)?;
+                if kind != "browser" {
+                    return None;
+                }
+                Some((
+                    tab.get("id")?.as_str()?.to_string(),
+                    tab.get("url")?.as_str()?.to_string(),
+                ))
+            })
+            .collect();
+        self.browser_router.sync_authorized_tabs(tabs);
+    }
+
+    pub fn authorize_browser_tab(&self, tab_id: String, url: String) -> Result<(), String> {
+        self.browser_router.authorize_tab(tab_id, url)
+    }
+
+    pub fn set_resident_browser_exchange(
+        &self,
+        exchange: crate::remote_proxy::ResidentBrowserExchange,
+    ) {
+        *self
+            .resident_browser
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(exchange);
     }
 
     /// Register one write command: Steer only. A view-level caller gets an
@@ -331,43 +507,8 @@ impl AppShareSource {
     /// bridge reports every change; Rust keeps no second opinion about
     /// focus — the webview owns that fact.
     ///
-    /// An agent tab also BINDS here: the session's events are pointed at
-    /// the share and its history goes out as the catch-up, the same
-    /// fronting semantics the terminal stream has (a viewer fronts an
-    /// agent tab with its transcript, not a placeholder).
     pub fn set_active_tab(&self, tab_id: Option<String>) {
         *self.active_tab.lock().unwrap_or_else(|e| e.into_inner()) = tab_id;
-        self.rebind_agent();
-    }
-
-    /// Point the agent seam at whatever the active tab now fronts. Idempotent
-    /// per tab; a no-op until the seams exist (pre-start, tests).
-    fn rebind_agent(&self) {
-        let bind = self
-            .agent_bind
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let active = self.active_tab();
-        let mut bound = self
-            .agent_bound_tab
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if bound.as_deref() == active.as_deref() {
-            return; // same tab (or both none): nothing moved
-        }
-        if let Some(prev) = bound.take() {
-            let _ = bind(&prev, None);
-        }
-        let Some(tab) = active else { return };
-        let Some(share) = self.bound() else { return };
-        let share2 = Arc::clone(&share);
-        if let Some(history) = bind(&tab, Some(share)) {
-            *bound = Some(tab);
-            for event in history {
-                share2.broadcast_agent_event(event);
-            }
-        }
     }
 
     /// The fronting tab the bridge last named — what the output tap and the
@@ -406,7 +547,7 @@ impl ShareSource for AppShareSource {
         SharedTabType::App
     }
 
-    /// Gridless at welcome, like the agent source: the app share fronts
+    /// Gridless at welcome: the app share fronts
     /// many tabs, so no single grid rides the Welcome. The ACTIVE
     /// terminal's real grid travels its snapshot instead, and viewer
     /// viewports flow back through `apply_viewport` to cap that terminal
@@ -431,7 +572,7 @@ impl ShareSource for AppShareSource {
 
     fn inject_input(
         &self,
-        _viewer: ViewerId,
+        viewer: ViewerId,
         access: Access,
         payload: InputPayload,
     ) -> anyhow::Result<InputOutcome> {
@@ -445,7 +586,8 @@ impl ShareSource for AppShareSource {
                     .cloned();
                 let Some(entry) = entry else {
                     if let Some(share) = self.bound() {
-                        share.broadcast_rpc_result(
+                        share.send_rpc_result(
+                            viewer,
                             id,
                             None,
                             Some(format!("no such command: {cmd}")),
@@ -455,7 +597,12 @@ impl ShareSource for AppShareSource {
                 };
                 if entry.steer_only && !access.may_steer() {
                     if let Some(share) = self.bound() {
-                        share.broadcast_rpc_result(id, None, Some("steer access required".into()));
+                        share.send_rpc_result(
+                            viewer,
+                            id,
+                            None,
+                            Some("steer access required".into()),
+                        );
                     }
                     return Ok(InputOutcome::Applied);
                 }
@@ -471,7 +618,7 @@ impl ShareSource for AppShareSource {
                             Err(text) => (None, Some(text)),
                         };
                         if let Some(share) = share {
-                            share.broadcast_rpc_result(id, ok, err);
+                            share.send_rpc_result(viewer, id, ok, err);
                         }
                     });
                 if spawned.is_err() {
@@ -509,12 +656,12 @@ impl ShareSource for AppShareSource {
                     .spawn(move || match proxy(&head, body.as_deref()) {
                         Ok((resp_head, resp_body)) => {
                             if let Some(share) = share {
-                                share.broadcast_proxy_res(id, resp_head, resp_body);
+                                share.send_proxy_res(viewer, id, resp_head, resp_body);
                             }
                         }
                         Err(text) => {
                             if let Some(share) = share {
-                                share.broadcast_rpc_result(id, None, Some(text));
+                                share.send_rpc_result(viewer, id, None, Some(text));
                             }
                         }
                     });
@@ -524,6 +671,111 @@ impl ShareSource for AppShareSource {
                 if spawned.is_err() {
                     anyhow::bail!("the remote proxy could not spawn its thread");
                 }
+                Ok(InputOutcome::Applied)
+            }
+            InputPayload::BrowserOpen {
+                stream_id,
+                tab_id,
+                grant_id,
+                attachment_id,
+                attachment_generation,
+                method,
+                url,
+                headers,
+                body_len,
+            } => {
+                self.browser_router
+                    .bind_attachment(viewer, attachment_id.clone(), attachment_generation)
+                    .map_err(anyhow::Error::msg)?;
+                self.browser_router
+                    .open(
+                        viewer,
+                        stream_id,
+                        tab_id,
+                        grant_id,
+                        attachment_id,
+                        attachment_generation,
+                        access,
+                        method,
+                        url,
+                        headers,
+                        body_len,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                Ok(InputOutcome::Applied)
+            }
+            InputPayload::BrowserRequestChunk {
+                stream_id,
+                seq,
+                b64,
+            } => {
+                if let Err(error) = self
+                    .browser_router
+                    .request_chunk(viewer, stream_id, seq, &b64)
+                {
+                    self.browser_router.cancel(viewer, stream_id);
+                    return Err(anyhow::Error::msg(error));
+                }
+                Ok(InputOutcome::Applied)
+            }
+            InputPayload::BrowserRequestEnd { stream_id } => {
+                let execution = match self.browser_router.request_end(viewer, stream_id) {
+                    Ok(execution) => execution,
+                    Err(error) => {
+                        self.browser_router.cancel(viewer, stream_id);
+                        return Err(anyhow::Error::msg(error));
+                    }
+                };
+                let router = Arc::clone(&self.browser_router);
+                let resident = self
+                    .resident_browser
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                let share = self.bound();
+                let sink: crate::remote_proxy::BrowserResponseSink = Arc::new(move |event| {
+                    let Some(share) = &share else { return };
+                    match event {
+                        crate::remote_proxy::BrowserEvent::Head {
+                            status,
+                            headers,
+                            final_url,
+                        } => share.send_browser_response_head(
+                            viewer, stream_id, status, headers, final_url,
+                        ),
+                        crate::remote_proxy::BrowserEvent::Chunk { seq, b64 } => {
+                            share.send_browser_response_chunk(viewer, stream_id, seq, b64)
+                        }
+                        crate::remote_proxy::BrowserEvent::End => {
+                            share.send_browser_response_end(viewer, stream_id)
+                        }
+                        crate::remote_proxy::BrowserEvent::Error { code, message } => {
+                            share.send_browser_response_error(viewer, stream_id, code, message)
+                        }
+                    }
+                });
+                std::thread::Builder::new()
+                    .name("tabverse-browser-request".into())
+                    .spawn(move || match resident {
+                        Some(exchange) => {
+                            router.execute_resident_or_local(execution, sink, exchange)
+                        }
+                        None => router.execute(execution, sink),
+                    })
+                    .map_err(|_| anyhow::anyhow!("the Browser request could not spawn"))?;
+                Ok(InputOutcome::Applied)
+            }
+            InputPayload::BrowserCredit { stream_id, bytes } => {
+                self.browser_router
+                    .credit(viewer, stream_id, bytes)
+                    .map_err(anyhow::Error::msg)?;
+                Ok(InputOutcome::Applied)
+            }
+            InputPayload::BrowserCancel {
+                stream_id,
+                reason: _,
+            } => {
+                self.browser_router.cancel(viewer, stream_id);
                 Ok(InputOutcome::Applied)
             }
             InputPayload::Bytes(bytes) => {
@@ -544,37 +796,65 @@ impl ShareSource for AppShareSource {
                 emit(&bytes);
                 Ok(InputOutcome::Applied)
             }
-            InputPayload::AgentPrompt { text } => {
-                let Some(tab) = self.active_tab() else {
-                    anyhow::bail!("no tab fronts the app share");
-                };
-                let input = self
-                    .agent_input
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                if let Err(e) = input(&tab, AgentCmd::Prompt(text)) {
-                    anyhow::bail!("agent input for tab {tab}: {e}");
+            InputPayload::RemoteAck {
+                tab_id,
+                epoch,
+                frame_seq,
+            } => {
+                use tauri::Emitter;
+                if let Some(app) = self.app.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                    let _ = app.emit(
+                        "app-share-remote-ack",
+                        serde_json::json!({
+                            "viewer": viewer,
+                            "tabId": tab_id,
+                            "epoch": epoch,
+                            "frameSeq": frame_seq,
+                        }),
+                    );
                 }
                 Ok(InputOutcome::Applied)
             }
-            InputPayload::AgentCancel => {
-                let Some(tab) = self.active_tab() else {
-                    anyhow::bail!("no tab fronts the app share");
-                };
-                let input = self
-                    .agent_input
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                if let Err(e) = input(&tab, AgentCmd::Cancel) {
-                    anyhow::bail!("agent input for tab {tab}: {e}");
+            InputPayload::RemoteResnapshot { tab_id, epoch } => {
+                use tauri::Emitter;
+                if let Some(app) = self.app.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                    let _ = app.emit(
+                        "app-share-remote-resnapshot",
+                        serde_json::json!({
+                            "viewer": viewer,
+                            "tabId": tab_id,
+                            "epoch": epoch,
+                        }),
+                    );
                 }
                 Ok(InputOutcome::Applied)
             }
-            InputPayload::AgentAnswer { .. } => {
-                anyhow::bail!("an app source cannot take agent approvals")
-            } // (Prompt/Cancel routed above; Answer refused above.)
+            InputPayload::RemoteIntent {
+                tab_id,
+                attachment_id,
+                attachment_generation,
+                intent_id,
+                name,
+                args,
+            } => {
+                use tauri::Emitter;
+                if let Some(app) = self.app.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                    let _ = app.emit(
+                        "app-share-remote-intent",
+                        serde_json::json!({
+                            "viewer": viewer,
+                            "access": access,
+                            "tabId": tab_id,
+                            "attachmentId": attachment_id,
+                            "attachmentGeneration": attachment_generation,
+                            "intentId": intent_id,
+                            "name": name,
+                            "args": args,
+                        }),
+                    );
+                }
+                Ok(InputOutcome::Applied)
+            }
         }
     }
 
@@ -597,6 +877,7 @@ impl ShareSource for AppShareSource {
     }
 
     fn bind(&self, binding: ShareBinding) {
+        self.browser_router.bind_share(binding.share.id.clone());
         *self.binding.lock().unwrap_or_else(|e| e.into_inner()) = Some(binding);
     }
 
@@ -607,21 +888,17 @@ impl ShareSource for AppShareSource {
         // commands and runtime death all unbind — so no path can leave a
         // polling thread behind.
         self.stop_clipboard_watch();
-        // The bound agent session's fan-out has nowhere to go either: a
-        // share that ends must not keep streaming a session to nobody.
-        if let Some(prev) = self
-            .agent_bound_tab
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            let bind = self
-                .agent_bind
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            let _ = bind(&prev, None);
-        }
+        self.browser_router.clear();
+    }
+
+    fn viewer_detached(&self, viewer: ViewerId) {
+        self.browser_router.cancel_viewer(viewer);
+    }
+
+    fn update_browser_grant(&self, tab_id: &str, url: &str) -> anyhow::Result<()> {
+        self.browser_router
+            .authorize_tab(tab_id.to_string(), url.to_string())
+            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -780,87 +1057,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_verbs_route_by_active_tab_and_binding_follows_the_front() {
-        let src = source(
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(Mutex::new(Vec::new())),
-        );
-        // Recording seams: binds by (tab, bound?), verbs by (tab, cmd).
-        let binds: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
-        let verbs: Arc<Mutex<Vec<(String, &'static str)>>> = Arc::new(Mutex::new(Vec::new()));
-        let b = binds.clone();
-        let v = verbs.clone();
-        src.set_agent_seams(
-            Arc::new(move |tab, target| {
-                let bound = target.is_some();
-                if bound {
-                    b.lock().unwrap().push((tab.to_string(), true));
-                    Some(vec![serde_json::json!({"type": "turn_started"})])
-                } else {
-                    b.lock().unwrap().push((tab.to_string(), false));
-                    None
-                }
-            }),
-            Arc::new(move |tab, cmd| {
-                let which = match cmd {
-                    AgentCmd::Prompt(_) => "prompt",
-                    AgentCmd::Cancel => "cancel",
-                };
-                v.lock().unwrap().push((tab.to_string(), which));
-                Ok(())
-            }),
-        );
-
-        // Without a live share there is nothing to bind a session's
-        // fan-out TO, so a fronting change binds nothing — the gate is
-        // the share. The verbs below still pin the tab-keyed routing.
-        src.set_active_tab(Some("ag1".into()));
-        assert!(
-            binds.lock().unwrap().is_empty(),
-            "no bind without a live share"
-        );
-
-        // Viewer verbs route by the ACTIVE tab (the hub only delivers
-        // them on a live share; this pins the routing itself).
-        src.inject_input(
-            1,
-            Access::Steer,
-            InputPayload::AgentPrompt { text: "hi".into() },
-        )
-        .unwrap();
-        src.inject_input(1, Access::Steer, InputPayload::AgentCancel)
-            .unwrap();
-        assert_eq!(
-            verbs.lock().unwrap().as_slice(),
-            &[("ag1".into(), "prompt"), ("ag1".into(), "cancel")]
-        );
-
-        // No tab fronts: the verb refuses out loud rather than guessing.
-        src.set_active_tab(None);
-        assert!(src
-            .inject_input(
-                1,
-                Access::Steer,
-                InputPayload::AgentPrompt { text: "x".into() }
-            )
-            .is_err());
-
-        src.set_active_tab(Some("ag1".into()));
-        assert!(src
-            .inject_input(
-                1,
-                Access::Steer,
-                InputPayload::AgentAnswer {
-                    call_id: "c1".into(),
-                    allow: true,
-                    reason: None,
-                }
-            )
-            .is_err());
-    }
-
-    #[test]
     fn actions_dispatch_and_clips_write_and_proxies_run() {
         let actions = Arc::new(Mutex::new(Vec::new()));
         let clips = Arc::new(Mutex::new(Vec::new()));
@@ -977,29 +1173,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_frames_are_refused_out_loud() {
-        let src = source(
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(Mutex::new(Vec::new())),
-            Arc::new(Mutex::new(Vec::new())),
-        );
-        for payload in [
-            InputPayload::AgentPrompt {
-                text: String::new(),
-            },
-            InputPayload::AgentCancel,
-        ] {
-            let out = src.inject_input(1, Access::Approve, payload);
-            assert!(out.is_err(), "the app source must refuse, not ignore");
-        }
-    }
-
-    /// The terminal-input seam (the app share's active-terminal channel):
-    /// a viewer's raw bytes must leave as an `app-share-term-input` event
-    /// carrying exactly what arrived, for the webview bridge to write into
-    /// the active terminal. Mock runtime, real event system — the same
-    /// stance as the action-seam test above: glue is what this asserts.
-    #[test]
     fn viewer_bytes_leave_as_an_app_share_term_input_event() {
         use base64::Engine as _;
         use tauri::Listener;
@@ -1039,6 +1212,63 @@ mod tests {
     }
 
     #[test]
+    fn single_tab_source_routes_snapshot_and_declared_intent_over_the_shared_seam() {
+        use tauri::Listener;
+
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let snapshots: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let intents: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let snapshot_sink = snapshots.clone();
+        handle.listen("tab-share-contribution-snapshot-request", move |event| {
+            snapshot_sink
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(event.payload()).unwrap());
+        });
+        let intent_sink = intents.clone();
+        handle.listen("app-share-remote-intent", move |event| {
+            intent_sink
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(event.payload()).unwrap());
+        });
+
+        let source = ContributionShareSource::new("files-1".into(), handle, None);
+        assert_eq!(source.kind(), SharedTabType::Contribution);
+        assert!(source.grid().is_none());
+        source.request_snapshot(9);
+        source
+            .inject_input(
+                9,
+                Access::Steer,
+                InputPayload::RemoteIntent {
+                    tab_id: "files-1".into(),
+                    attachment_id: "attachment-9".into(),
+                    attachment_generation: 1,
+                    intent_id: "intent-1".into(),
+                    name: "files.open".into(),
+                    args: serde_json::json!({"path": "/tmp/a"}),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(snapshots.lock().unwrap()[0]["tabId"], "files-1");
+        assert_eq!(snapshots.lock().unwrap()[0]["viewer"], 9);
+        assert_eq!(intents.lock().unwrap()[0]["name"], "files.open");
+        assert!(source
+            .inject_input(
+                9,
+                Access::Steer,
+                InputPayload::Action {
+                    name: "arbitrary.store.patch".into(),
+                    args: serde_json::Value::Null,
+                },
+            )
+            .is_err());
+    }
+
+    #[test]
     fn the_kind_is_app_and_the_grid_is_none() {
         let src = source(
             Arc::new(Mutex::new(Vec::new())),
@@ -1047,6 +1277,134 @@ mod tests {
         );
         assert_eq!(src.kind(), SharedTabType::App);
         assert!(src.grid().is_none());
+    }
+
+    #[test]
+    fn sanitized_app_snapshot_is_the_only_browser_network_grant_source() {
+        let src = source(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        src.browser_router.bind_share("share-snapshot".into());
+        src.sync_browser_grants(&serde_json::json!({
+            "tabs": [
+                {"id": "browser-1", "kind": "browser", "url": "http://127.0.0.1:18080/a"},
+                {"id": "settings-1", "kind": "settings", "url": "http://127.0.0.1:18081/"}
+            ]
+        }));
+        let attachment = "attachment-1";
+        src.browser_router
+            .bind_attachment(1, attachment.into(), 1)
+            .unwrap();
+        src.browser_router
+            .open(
+                1,
+                1,
+                "browser-1".into(),
+                crate::remote_proxy::BrowserRequestRouter::expected_grant_id(
+                    attachment,
+                    1,
+                    "browser-1",
+                ),
+                attachment.into(),
+                1,
+                Access::View,
+                "GET".into(),
+                "http://127.0.0.1:18080/a".into(),
+                vec![],
+                None,
+            )
+            .unwrap();
+        let denied = src
+            .browser_router
+            .open(
+                1,
+                2,
+                "settings-1".into(),
+                crate::remote_proxy::BrowserRequestRouter::expected_grant_id(
+                    attachment,
+                    1,
+                    "settings-1",
+                ),
+                attachment.into(),
+                1,
+                Access::View,
+                "GET".into(),
+                "http://127.0.0.1:18081/".into(),
+                vec![],
+                None,
+            )
+            .unwrap_err();
+        assert!(denied.starts_with("grant-denied:"));
+
+        src.sync_browser_grants(&serde_json::json!({"tabs": []}));
+        assert!(src.browser_router.request_end(1, 1).is_err());
+    }
+
+    #[test]
+    fn single_tab_browser_contribution_rotates_its_base_network_grant() {
+        let app = tauri::test::mock_app();
+        let base = source(
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        base.browser_router.bind_share("share-single".into());
+        base.authorize_browser_tab("browser-1".into(), "http://127.0.0.1:18080/old".into())
+            .unwrap();
+        let contribution = ContributionShareSource::new(
+            "browser-1".into(),
+            app.handle().clone(),
+            Some(base.clone()),
+        );
+        contribution
+            .update_browser_grant("browser-1", "http://127.0.0.1:18081/new")
+            .unwrap();
+        let attachment = "attachment-1";
+        base.browser_router
+            .bind_attachment(1, attachment.into(), 1)
+            .unwrap();
+        let old = base
+            .browser_router
+            .open(
+                1,
+                1,
+                "browser-1".into(),
+                crate::remote_proxy::BrowserRequestRouter::expected_grant_id(
+                    attachment,
+                    1,
+                    "browser-1",
+                ),
+                attachment.into(),
+                1,
+                Access::View,
+                "GET".into(),
+                "http://127.0.0.1:18080/old".into(),
+                vec![],
+                None,
+            )
+            .unwrap_err();
+        assert!(old.starts_with("origin-denied:"));
+        base.browser_router
+            .open(
+                1,
+                2,
+                "browser-1".into(),
+                crate::remote_proxy::BrowserRequestRouter::expected_grant_id(
+                    attachment,
+                    1,
+                    "browser-1",
+                ),
+                attachment.into(),
+                1,
+                Access::View,
+                "GET".into(),
+                "http://127.0.0.1:18081/new".into(),
+                vec![],
+                None,
+            )
+            .unwrap();
     }
 
     #[test]

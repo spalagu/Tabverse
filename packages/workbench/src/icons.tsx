@@ -72,15 +72,6 @@ export function LinkIcon({ size = 15, className }: IconProps) {
   );
 }
 
-export function AgentIcon({ size = 15, className }: IconProps) {
-  return (
-    <svg {...base(size)} className={className}>
-      <path d="M8 2.5l1.4 3.1 3.1 1.4-3.1 1.4L8 11.5 6.6 8.4 3.5 7l3.1-1.4z" />
-      <path d="M12.5 11.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z" />
-    </svg>
-  );
-}
-
 /** A triangle with a mark in it: something went wrong here. */
 export function AlertIcon({ size = 15, className }: IconProps) {
   return (
@@ -92,14 +83,19 @@ export function AlertIcon({ size = 15, className }: IconProps) {
   );
 }
 
-export const TAB_ICONS = {
+const BUILTIN_TAB_ICONS: Readonly<Record<string, typeof TerminalIcon>> = {
   terminal: TerminalIcon,
   files: FilesIcon,
   browser: GlobeIcon,
   settings: GearIcon,
   remote: LinkIcon,
-  agent: AgentIcon,
 };
+
+/** Unknown plugin kinds retain a visible warning glyph instead of crashing. */
+export const TAB_ICONS: Readonly<Record<string, typeof TerminalIcon>> = new Proxy(
+  BUILTIN_TAB_ICONS,
+  { get: (icons, kind: string) => icons[kind] ?? AlertIcon },
+);
 
 export function FolderIcon({
   size = 14,

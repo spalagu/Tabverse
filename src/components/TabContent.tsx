@@ -1,29 +1,28 @@
 import {
   Fragment,
+  isValidElement,
   useEffect,
   useRef,
   useState,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import {
-  WorkbenchTabHost,
-  defineTabViewRenderers,
-} from "@tabverse/workbench/tab-view";
+  resolveTabStateEnvelope,
+  type TabInstanceScope,
+} from "@tabverse/tab-contracts";
 import {
   nextSplitCandidate,
   SPLIT_MAX_PANES,
   useStore,
   type Tab,
 } from "../state/store";
-import { layout, splitRects, type PaneRect } from "../paneTree";
-import { BrowserView } from "./BrowserView";
-import { FilesView } from "./files/FilesView";
-import { AgentView } from "./AgentView";
-import { SettingsView } from "./SettingsView";
-import { RemoteView } from "./RemoteView";
-import { TerminalView } from "./TerminalView";
+import {
+  DesktopTabHostFactsProvider,
+  installDesktopTabViews,
+} from "../desktopTabViews";
 import {
   CloseIcon,
   MoreIcon,
@@ -34,91 +33,121 @@ import {
 import { STR } from "../strings";
 import { formatKeys, HINT_KEYS } from "../strings/formatKeys";
 import { keysFor } from "../shortcuts";
-import { fsApi, type FileMeta } from "../backend/fs";
-import { describeError, type ErrorDescription } from "../strings/errors";
 import { LoadingState } from "./state/LoadingState";
-import { ErrorState } from "./state/ErrorState";
-import { Preview } from "./files/Preview";
+import { desktopPluginComposition } from "../pluginComposition";
+import { prepareResidentRuntime, stopResidentTab } from "../residentRuntime";
 
-interface DesktopTabViewContext {
+installDesktopTabViews();
+
+function PluginProvidedTabView({
+  tab,
+  active,
+  pageCoverable,
+  pageProxyDown,
+}: {
+  readonly tab: Tab;
+  readonly active: boolean;
   readonly pageCoverable: boolean;
   readonly pageProxyDown: boolean;
-}
+}) {
+  const [instance, setInstance] = useState<TabInstanceScope | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [catalogRevision, setCatalogRevision] = useState(0);
+  const [residentPolicyRevision, setResidentPolicyRevision] = useState(0);
+  const [residentRuntimeId, setResidentRuntimeId] = useState<string | null | undefined>(
+    undefined,
+  );
 
-const DESKTOP_TAB_RENDERERS = defineTabViewRenderers<
-  Tab,
-  DesktopTabViewContext
->({
-  terminal: ({ tab, active }) => <TerminalPanes tab={tab} active={active} />,
-  files: ({ tab, active }) =>
-    // A files tab that is a peek shows the preview matrix alone, not a
-    // workspace: no tree, panes or terminal panel come with it.
-    tab.peek === true ? <FilePeek tab={tab} /> : <FilesView tab={tab} active={active} />,
-  browser: ({ tab, active }) => <BrowserView tab={tab} active={active} />,
-  agent: ({ tab, active }) => <AgentView tab={tab} active={active} />,
-  remote: ({ tab, active }) => <RemoteView tab={tab} active={active} />,
-  settings: ({ context }) => (
-    <SettingsView
-      isCoverable={context.pageCoverable}
-      pageProxyDown={context.pageProxyDown}
-    />
-  ),
-});
+  useEffect(() => {
+    const changed = () => setCatalogRevision((revision) => revision + 1);
+    window.addEventListener("tabverse-plugin-catalog-changed", changed);
+    return () => window.removeEventListener("tabverse-plugin-catalog-changed", changed);
+  }, []);
 
-export function FilePeek({ tab }: { tab: Tab }) {
-  const [meta, setMeta] = useState<FileMeta | null>(null);
-  const [error, setError] = useState<ErrorDescription | null>(null);
+  useEffect(() => {
+    const changed = () => setResidentPolicyRevision((revision) => revision + 1);
+    window.addEventListener("tabverse-resident-policy-changed", changed);
+    return () => window.removeEventListener("tabverse-resident-policy-changed", changed);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    setMeta(null);
-    setError(null);
-    const path = tab.openPath;
-    if (path === undefined) return;
-    fsApi.read(path).then(
-      (m) => {
-        if (!cancelled) setMeta(m);
-      },
-      (e) => {
-        if (!cancelled) setError(describeError(e, STR.errors.actions.readFile));
+    let created: TabInstanceScope | null = null;
+    setInstance(null);
+    setFailure(null);
+    setResidentRuntimeId(undefined);
+    void desktopPluginComposition().createInstance(tab.type, tab.id).then(async (scope) => {
+      created = scope;
+      if (cancelled) {
+        await scope.dispose();
+        return;
       }
-    );
+      const resident = await prepareResidentRuntime(tab, scope.contribution.resident);
+      if (cancelled) return;
+      setResidentRuntimeId(resident?.runtimeId ?? null);
+      setInstance(scope);
+    }).catch((error: unknown) => {
+      if (!cancelled) setFailure(error instanceof Error ? error.message : String(error));
+    });
     return () => {
       cancelled = true;
+      if (created !== null) void created.dispose();
+      if (!useStore.getState().tabs.some((candidate) => candidate.id === tab.id)) {
+        void stopResidentTab(tab.id);
+      }
     };
-  }, [tab.openPath]);
+  }, [catalogRevision, residentPolicyRevision, tab.id, tab.residentPolicy, tab.type]);
 
-  if (error !== null) {
+  if (failure !== null) {
     return (
-      <div className="file-peek">
-        <div className="file-peek-center">
-          <ErrorState inline error={error} />
-        </div>
+      <div className="state-error" data-missing-plugin-kind={tab.type}>
+        Plugin “{tab.type}” is unavailable. Saved Tab state has been retained. {failure}
       </div>
     );
   }
-  if (meta === null) {
-    return (
-      <div className="file-peek">
-        <div className="file-peek-center">
-          <LoadingState label={STR.files.viewers.loading({ name: peekFileName(tab) })} />
+  if (instance === null || residentRuntimeId === undefined) {
+    return <LoadingState label={`Loading ${tab.type} plugin…`} />;
+  }
+  let state: unknown = tab;
+  if (tab.pluginState !== undefined) {
+    const resolution = resolveTabStateEnvelope(tab.pluginState, instance.contribution);
+    if (resolution.status === "placeholder") {
+      return (
+        <div className="state-error" data-missing-plugin-kind={tab.type}>
+          Plugin “{tab.type}” cannot read this saved state. {resolution.reason}: {resolution.detail}
         </div>
-      </div>
-    );
+      );
+    }
+    state = resolution.state;
+  }
+  const output = instance.contribution.view.render({
+    tabId: tab.id,
+    state,
+    active,
+    services: instance,
+  });
+  if (
+    output !== null &&
+    typeof output === "object" &&
+    !Array.isArray(output) &&
+    !isValidElement(output)
+  ) {
+    return <div className="state-error">{tab.type} plugin returned an unsupported view descriptor.</div>;
   }
   return (
-    <div className="file-peek">
-      <Preview meta={meta} />
-    </div>
+    <DesktopTabHostFactsProvider
+      value={{
+        pageCoverable,
+        pageProxyDown,
+        residentRuntimeId: residentRuntimeId ?? undefined,
+      }}
+    >
+      {output as ReactNode}
+    </DesktopTabHostFactsProvider>
   );
 }
 
-/** The name the peek's loading line says — the file's own name, or the
- * path's last word when it names none. */
-function peekFileName(tab: Tab): string {
-  const path = tab.openPath ?? "";
-  return path.split("/").filter(Boolean).pop() ?? path;
-}
+export { FilePeek } from "./files/FilePeek";
 
 /** The running share before pane `i` — where its leading edge sits (0–1). */
 function cumBefore(ratios: number[], i: number): number {
@@ -239,121 +268,6 @@ function outerDividerStyle(position: number, vertical: boolean): CSSProperties {
   return vertical
     ? { top: `calc(${position * 100}% - 3px)` }
     : { left: `calc(${position * 100}% - 3px)` };
-}
-
-/** How much of an edge a pane gives back to a seam, in px (3 + 3 = the 6). */
-const SEAM = 3;
-
-/** Distances below this are the rounding of dividing by a sum, not a gap. */
-const EDGE_EPS = 1e-6;
-
-/**
- * One pane's box inside the tab's content area.
- *
- * The inset is per EDGE and not per pane, because in a tree a pane can be
- * against the window on one side and against a seam on the other — the outer
- * layer's row-of-panes version could decide it from the index alone.
- */
-function paneRectStyle(rect: PaneRect): CSSProperties {
-  const padL = rect.x > EDGE_EPS ? SEAM : 0;
-  const padT = rect.y > EDGE_EPS ? SEAM : 0;
-  const padR = rect.x + rect.w < 1 - EDGE_EPS ? SEAM : 0;
-  const padB = rect.y + rect.h < 1 - EDGE_EPS ? SEAM : 0;
-  return {
-    position: "absolute",
-    left: `calc(${rect.x * 100}% + ${padL}px)`,
-    top: `calc(${rect.y * 100}% + ${padT}px)`,
-    width: `calc(${rect.w * 100}% - ${padL + padR}px)`,
-    height: `calc(${rect.h * 100}% - ${padT + padB}px)`,
-  };
-}
-
-function TerminalPanes({ tab, active }: { tab: Tab; active: boolean }) {
-  const rects: PaneRect[] = tab.panes
-    ? layout(tab.panes)
-    : [{ id: tab.id, x: 0, y: 0, w: 1, h: 1 }];
-  const multi = rects.length > 1;
-  const zoomed =
-    tab.zoomedPaneId !== undefined &&
-    rects.some((r) => r.id === tab.zoomedPaneId)
-      ? tab.zoomedPaneId
-      : null;
-  const focusId = tab.activePaneId ?? rects[0]?.id;
-  const seams = tab.panes && zoomed === null ? splitRects(tab.panes) : [];
-  const setPaneRatio = useStore((s) => s.setPaneRatio);
-  return (
-    <div className="term-panes" style={{ position: "absolute", inset: 0 }}>
-      {rects.map((r) => {
-        const shown = zoomed === null || zoomed === r.id;
-        const box = zoomed === r.id ? { ...r, x: 0, y: 0, w: 1, h: 1 } : r;
-        return (
-          <div
-            key={r.id}
-            className={`term-pane-slot${shown ? "" : " pane-hidden"}`}
-            style={paneRectStyle(box)}
-            data-pane-id={r.id}
-          >
-            <TerminalView
-              tab={tab}
-              active={active}
-              paneId={tab.panes ? r.id : undefined}
-            />
-          </div>
-        );
-      })}
-      {/* The focus ring only means something with more than one pane: on a
-          single terminal it would be a box drawn around the whole tab. */}
-      {multi && focusId !== undefined && (
-        <div
-          className="split-focus-ring"
-          style={paneRectStyle(
-            zoomed !== null
-              ? { id: focusId, x: 0, y: 0, w: 1, h: 1 }
-              : (rects.find((r) => r.id === focusId) ?? rects[0])
-          )}
-          aria-hidden
-        />
-      )}
-      {seams.flatMap(({ node, rect }) =>
-        node.children.slice(0, -1).map((_, i) => {
-          const share = node.ratios
-            .slice(0, i + 1)
-            .reduce((a, b) => a + b, 0) / node.ratios.reduce((a, b) => a + b, 0);
-          const at = node.vertical
-            ? rect.y + share * rect.h
-            : rect.x + share * rect.w;
-          const style: CSSProperties = node.vertical
-            ? {
-                top: `calc(${at * 100}% - ${SEAM}px)`,
-                left: `${rect.x * 100}%`,
-                right: "auto",
-                width: `${rect.w * 100}%`,
-              }
-            : {
-                left: `calc(${at * 100}% - ${SEAM}px)`,
-                top: `${rect.y * 100}%`,
-                bottom: "auto",
-                height: `${rect.h * 100}%`,
-              };
-          // The strip reports a fraction of the whole surface; this split
-          // owns only its own rectangle, so the fraction is mapped into it.
-          const within = (p: number) =>
-            node.vertical
-              ? (p - rect.y) / Math.max(rect.h, EDGE_EPS)
-              : (p - rect.x) / Math.max(rect.w, EDGE_EPS);
-          return (
-            <SplitDivider
-              key={`${node.id}-${i}`}
-              vertical={node.vertical}
-              style={style}
-              onMove={(p) => setPaneRatio(tab.id, node.id, i, within(p))}
-              onDrop={(p) => setPaneRatio(tab.id, node.id, i, within(p), true)}
-            />
-          );
-        })
-      )}
-    </div>
-  );
 }
 
 function PaneActions({
@@ -788,11 +702,11 @@ export function TabContent() {
               }
             >
               {isPeek ? <PeekActions tab={t} /> : null}
-              <WorkbenchTabHost
+              <PluginProvidedTabView
                 tab={t}
                 active={t.id === activeTabId}
-                context={{ pageCoverable, pageProxyDown }}
-                renderers={DESKTOP_TAB_RENDERERS}
+                pageCoverable={pageCoverable}
+                pageProxyDown={pageProxyDown}
               />
             </div>
           );
