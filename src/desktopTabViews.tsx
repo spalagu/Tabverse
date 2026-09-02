@@ -37,11 +37,16 @@ export function DesktopTabHostFactsProvider({
 
 function useDesktopTabHostFacts(): DesktopTabHostFacts {
   const facts = useContext(DesktopTabHostContext);
-  if (facts === null) throw new Error("desktop Tab view is outside its plugin host");
+  if (facts === null)
+    throw new Error("desktop Tab view is outside its plugin host");
   return facts;
 }
 
-function DesktopTerminalTab({ request }: { readonly request: TerminalTabViewRequest }) {
+function DesktopTerminalTab({
+  request,
+}: {
+  readonly request: TerminalTabViewRequest;
+}) {
   const { residentRuntimeId } = useDesktopTabHostFacts();
   return (
     <TerminalPanes
@@ -52,18 +57,38 @@ function DesktopTerminalTab({ request }: { readonly request: TerminalTabViewRequ
   );
 }
 
-function DesktopFilesTab({ request }: { readonly request: FilesTabViewRequest }) {
+function DesktopFilesTab({
+  request,
+}: {
+  readonly request: FilesTabViewRequest;
+}) {
   const tab = request.state as unknown as Tab;
-  return tab.peek === true
-    ? <FilePeek tab={tab} />
-    : <FilesView tab={tab} active={request.active} />;
+  return tab.peek === true ? (
+    <FilePeek tab={tab} />
+  ) : (
+    <FilesView tab={tab} active={request.active} />
+  );
 }
 
-function DesktopBrowserTab({ request }: { readonly request: BrowserTabViewRequest }) {
-  return <BrowserView tab={request.state as unknown as Tab} active={request.active} />;
+function DesktopBrowserTab({
+  request,
+}: {
+  readonly request: BrowserTabViewRequest;
+}) {
+  return (
+    <BrowserView
+      tab={request.state as unknown as Tab}
+      active={request.active}
+      session={request.session}
+    />
+  );
 }
 
-function DesktopRemoteTab({ request }: { readonly request: RemoteTabViewRequest }) {
+function DesktopRemoteTab({
+  request,
+}: {
+  readonly request: RemoteTabViewRequest;
+}) {
   const { residentRuntimeId } = useDesktopTabHostFacts();
   return (
     <RemoteView
@@ -76,23 +101,30 @@ function DesktopRemoteTab({ request }: { readonly request: RemoteTabViewRequest 
 
 function DesktopSettingsTab() {
   const { pageCoverable, pageProxyDown } = useDesktopTabHostFacts();
-  return <SettingsView isCoverable={pageCoverable} pageProxyDown={pageProxyDown} />;
+  return (
+    <SettingsView isCoverable={pageCoverable} pageProxyDown={pageProxyDown} />
+  );
 }
 
-export const renderDesktopTerminalTab = (request: TerminalTabViewRequest): ReactNode =>
-  <DesktopTerminalTab request={request} />;
+export const renderDesktopTerminalTab = (
+  request: TerminalTabViewRequest,
+): ReactNode => <DesktopTerminalTab request={request} />;
 
-export const renderDesktopFilesTab = (request: FilesTabViewRequest): ReactNode =>
-  <DesktopFilesTab request={request} />;
+export const renderDesktopFilesTab = (
+  request: FilesTabViewRequest,
+): ReactNode => <DesktopFilesTab request={request} />;
 
-export const renderDesktopBrowserTab = (request: BrowserTabViewRequest): ReactNode =>
-  <DesktopBrowserTab request={request} />;
+export const renderDesktopBrowserTab = (
+  request: BrowserTabViewRequest,
+): ReactNode => <DesktopBrowserTab request={request} />;
 
-export const renderDesktopRemoteTab = (request: RemoteTabViewRequest): ReactNode =>
-  <DesktopRemoteTab request={request} />;
+export const renderDesktopRemoteTab = (
+  request: RemoteTabViewRequest,
+): ReactNode => <DesktopRemoteTab request={request} />;
 
-export const renderDesktopSettingsTab = (_request: SettingsTabViewRequest): ReactNode =>
-  <DesktopSettingsTab />;
+export const renderDesktopSettingsTab = (
+  _request: SettingsTabViewRequest,
+): ReactNode => <DesktopSettingsTab />;
 
 export function installDesktopTabViews(): void {
   installDesktopViewBindings({

@@ -6,10 +6,14 @@ import type {
 import { createObservedRemoteState } from "@tabverse/remote-protocol";
 import {
   createBrowserRuntimePlugin,
+  type BrowserSessionPort,
   type BrowserRemoteFrame,
   type BrowserTabState,
   type BrowserTabViewRequest,
 } from "@tabverse/tab-browser";
+import { createTauriBrowserSessionPort } from "./browser";
+
+export { createTauriBrowserSessionPort } from "./browser";
 import {
   createTerminalRuntimePlugin,
   type TerminalCommand,
@@ -40,10 +44,11 @@ export type {
   ResidentTakeoverFailure,
 } from "./resident";
 
-export const DESKTOP_TERMINAL_RUNTIME_PLUGIN_ID =
-  "tabverse.runtime.terminal";
+export const DESKTOP_TERMINAL_RUNTIME_PLUGIN_ID = "tabverse.runtime.terminal";
 
-function objectState(input: unknown): input is Readonly<Record<string, unknown>> {
+function objectState(
+  input: unknown,
+): input is Readonly<Record<string, unknown>> {
   return input !== null && typeof input === "object" && !Array.isArray(input);
 }
 
@@ -53,7 +58,8 @@ function nativeResident<State extends Readonly<Record<string, unknown>>>(
   return {
     capability: "continuous",
     runtimeKind,
-    descriptor: () => invoke<RuntimeDescriptor>("resident_descriptor", { runtimeKind }),
+    descriptor: () =>
+      invoke<RuntimeDescriptor>("resident_descriptor", { runtimeKind }),
     initialStateSchema: {
       id: `${runtimeKind}.resident-initial/v1`,
       validate: (input): input is State => objectState(input),
@@ -104,7 +110,10 @@ export function createDesktopTerminalRuntimePlugin<Output>(
     throw new Error(`desktop terminal command is not bound: ${command}`);
   },
 ) {
-  const remote = createObservedRemoteState<TerminalTabState, TerminalRemoteFrame>({
+  const remote = createObservedRemoteState<
+    TerminalTabState,
+    TerminalRemoteFrame
+  >({
     equals: sameRemoteState,
   });
   return createTerminalRuntimePlugin({
@@ -163,20 +172,29 @@ export function createDesktopSettingsRuntimePlugin<Output>(
 
 export function createDesktopBrowserRuntimePlugin<Output>(
   render: (request: BrowserTabViewRequest) => Output,
+  session: BrowserSessionPort = createTauriBrowserSessionPort(),
 ) {
-  const remote = createObservedRemoteState<BrowserTabState, BrowserRemoteFrame>({
-    equals: sameRemoteState,
-  });
+  const remote = createObservedRemoteState<BrowserTabState, BrowserRemoteFrame>(
+    {
+      equals: sameRemoteState,
+    },
+  );
   return createBrowserRuntimePlugin({
     id: BROWSER_RUNTIME_PLUGIN_ID,
     service: {
       runtimeKind: "desktop",
+      session,
       remoteState: remote.state,
       residentNetworkTask: nativeResident<BrowserTabState>("browser-network"),
       render: (args) => {
         const state = browserRemoteState(args.state);
         remote.observe(args.tabId, state, { type: "replace", state });
-        return render({ runtimeKind: "desktop", kind: "browser", ...args });
+        return render({
+          runtimeKind: "desktop",
+          kind: "browser",
+          session,
+          ...args,
+        });
       },
     },
   });

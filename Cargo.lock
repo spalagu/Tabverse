@@ -6876,6 +6876,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-notification",
  "tauri-plugin-window-state",
+ "tauri-runtime-cef",
  "tempfile",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
@@ -7074,7 +7075,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 [[package]]
 name = "tauri"
 version = "2.11.5"
-source = "git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69#3158a834eadbece24b9709e9ce45c32062492b69"
+source = "git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07#0f3325d8a5065b7be484d09a3800cb598c2dfb07"
 dependencies = [
  "anyhow",
  "bytes",
@@ -7111,7 +7112,7 @@ dependencies = [
  "tauri-runtime",
  "tauri-runtime-cef",
  "tauri-runtime-wry",
- "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69)",
+ "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07)",
  "thiserror 2.0.19",
  "tokio",
  "tray-icon",
@@ -7125,7 +7126,7 @@ dependencies = [
 [[package]]
 name = "tauri-build"
 version = "2.6.3"
-source = "git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69#3158a834eadbece24b9709e9ce45c32062492b69"
+source = "git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07#0f3325d8a5065b7be484d09a3800cb598c2dfb07"
 dependencies = [
  "anyhow",
  "cargo_toml",
@@ -7137,7 +7138,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69)",
+ "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07)",
  "tauri-winres",
  "walkdir",
 ]
@@ -7145,7 +7146,7 @@ dependencies = [
 [[package]]
 name = "tauri-codegen"
 version = "2.6.3"
-source = "git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69#3158a834eadbece24b9709e9ce45c32062492b69"
+source = "git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07#0f3325d8a5065b7be484d09a3800cb598c2dfb07"
 dependencies = [
  "base64 0.22.1",
  "brotli",
@@ -7160,7 +7161,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "syn 2.0.119",
- "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69)",
+ "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07)",
  "thiserror 2.0.19",
  "time",
  "url",
@@ -7171,14 +7172,14 @@ dependencies = [
 [[package]]
 name = "tauri-macros"
 version = "2.6.3"
-source = "git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69#3158a834eadbece24b9709e9ce45c32062492b69"
+source = "git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07#0f3325d8a5065b7be484d09a3800cb598c2dfb07"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
  "tauri-codegen",
- "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69)",
+ "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07)",
 ]
 
 [[package]]
@@ -7276,7 +7277,7 @@ dependencies = [
 [[package]]
 name = "tauri-runtime"
 version = "2.11.3"
-source = "git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69#3158a834eadbece24b9709e9ce45c32062492b69"
+source = "git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07#0f3325d8a5065b7be484d09a3800cb598c2dfb07"
 dependencies = [
  "cookie",
  "dpi",
@@ -7288,7 +7289,7 @@ dependencies = [
  "raw-window-handle",
  "serde",
  "serde_json",
- "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69)",
+ "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07)",
  "thiserror 2.0.19",
  "url",
  "windows 0.61.3",
@@ -7297,7 +7298,7 @@ dependencies = [
 [[package]]
 name = "tauri-runtime-cef"
 version = "0.1.0"
-source = "git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69#3158a834eadbece24b9709e9ce45c32062492b69"
+source = "git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07#0f3325d8a5065b7be484d09a3800cb598c2dfb07"
 dependencies = [
  "base64 0.22.1",
  "cef",
@@ -7322,7 +7323,7 @@ dependencies = [
  "sha2 0.10.9",
  "softbuffer",
  "tauri-runtime",
- "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69)",
+ "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07)",
  "url",
  "windows 0.61.3",
  "winit",
@@ -7332,7 +7333,7 @@ dependencies = [
 [[package]]
 name = "tauri-runtime-wry"
 version = "2.11.4"
-source = "git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69#3158a834eadbece24b9709e9ce45c32062492b69"
+source = "git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07#0f3325d8a5065b7be484d09a3800cb598c2dfb07"
 dependencies = [
  "gtk",
  "http",
@@ -7347,7 +7348,7 @@ dependencies = [
  "softbuffer",
  "tao",
  "tauri-runtime",
- "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69)",
+ "tauri-utils 2.9.3 (git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07)",
  "url",
  "webkit2gtk",
  "webview2-com",
@@ -7394,7 +7395,7 @@ dependencies = [
 [[package]]
 name = "tauri-utils"
 version = "2.9.3"
-source = "git+https://github.com/spalagu/tauri.git?rev=3158a834eadbece24b9709e9ce45c32062492b69#3158a834eadbece24b9709e9ce45c32062492b69"
+source = "git+https://github.com/spalagu/tauri.git?rev=0f3325d8a5065b7be484d09a3800cb598c2dfb07#0f3325d8a5065b7be484d09a3800cb598c2dfb07"
 dependencies = [
  "anyhow",
  "brotli",

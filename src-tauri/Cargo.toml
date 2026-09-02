@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = ["runtime-wry"]
 runtime-wry = ["tauri/wry"]
-runtime-cef = ["tauri/cef"]
+runtime-cef = ["tauri/cef", "dep:tauri-runtime-cef"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -32,6 +32,7 @@ tauri = { version = "2.11.5", default-features = false, features = [
   "unstable",
   "x11",
 ] }
+tauri-runtime-cef = { git = "https://github.com/spalagu/tauri.git", rev = "0f3325d8a5065b7be484d09a3800cb598c2dfb07", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

@@ -24,8 +24,8 @@ serde_json = "1"
 # an immutable revision based on Alpha.25 so every developer and CI job resolves
 # the same reviewed CEF runtime and handler fixes.
 [patch.crates-io]
-tauri = { git = "https://github.com/spalagu/tauri.git", rev = "3158a834eadbece24b9709e9ce45c32062492b69" }
-tauri-build = { git = "https://github.com/spalagu/tauri.git", rev = "3158a834eadbece24b9709e9ce45c32062492b69" }
+tauri = { git = "https://github.com/spalagu/tauri.git", rev = "0f3325d8a5065b7be484d09a3800cb598c2dfb07" }
+tauri-build = { git = "https://github.com/spalagu/tauri.git", rev = "0f3325d8a5065b7be484d09a3800cb598c2dfb07" }
 
 [profile.release]
 lto = true

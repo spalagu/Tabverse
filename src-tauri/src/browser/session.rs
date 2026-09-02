@@ -10,6 +10,25 @@ pub enum SessionPhase {
     Crashed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseReason {
+    TabClose,
+    PluginDisable,
+    AppExit,
+    CreateFailed,
+}
+
+impl CloseReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TabClose => "tab-close",
+            Self::PluginDisable => "plugin-disable",
+            Self::AppExit => "app-exit",
+            Self::CreateFailed => "create-failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSnapshot {
     pub tab_id: String,
@@ -18,6 +37,7 @@ pub struct SessionSnapshot {
     pub event_seq: u64,
     pub phase: SessionPhase,
     pub slot_revision: Option<u64>,
+    pub close_reason: Option<CloseReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +112,7 @@ struct SessionRecord {
     event_seq: u64,
     phase: SessionPhase,
     slot_revision: Option<u64>,
+    close_reason: Option<CloseReason>,
 }
 
 impl SessionRecord {
@@ -103,6 +124,7 @@ impl SessionRecord {
             event_seq: self.event_seq,
             phase: self.phase,
             slot_revision: self.slot_revision,
+            close_reason: self.close_reason,
         }
     }
 
@@ -170,6 +192,7 @@ impl BrowserSessionManager {
             event_seq: 0,
             phase: SessionPhase::Creating,
             slot_revision: None,
+            close_reason: None,
         };
         let snapshot = record.snapshot(tab_id);
         ledger.sessions.insert(tab_id.to_owned(), record);
@@ -267,6 +290,7 @@ impl BrowserSessionManager {
         &self,
         tab_id: &str,
         generation: u64,
+        reason: CloseReason,
     ) -> Result<SessionSnapshot, SessionError> {
         let mut ledger = self.ledger.lock().unwrap();
         let record = current_record(&mut ledger, tab_id, generation)?;
@@ -274,8 +298,17 @@ impl BrowserSessionManager {
             SessionPhase::Creating
             | SessionPhase::Ready
             | SessionPhase::Attached
-            | SessionPhase::Crashed => record.advance(SessionPhase::Closing),
-            SessionPhase::Closing => {}
+            | SessionPhase::Crashed => {
+                record.close_reason = Some(reason);
+                record.advance(SessionPhase::Closing);
+            }
+            SessionPhase::Closing if record.close_reason == Some(reason) => {}
+            SessionPhase::Closing => {
+                return Err(SessionError::InvalidTransition {
+                    from: record.phase,
+                    operation: "change close reason for",
+                });
+            }
             phase => {
                 return Err(SessionError::InvalidTransition {
                     from: phase,
@@ -283,6 +316,24 @@ impl BrowserSessionManager {
                 })
             }
         }
+        Ok(record.snapshot(tab_id))
+    }
+
+    pub fn abort_create(
+        &self,
+        tab_id: &str,
+        generation: u64,
+    ) -> Result<SessionSnapshot, SessionError> {
+        let mut ledger = self.ledger.lock().unwrap();
+        let record = current_record(&mut ledger, tab_id, generation)?;
+        if record.phase != SessionPhase::Creating {
+            return Err(SessionError::InvalidTransition {
+                from: record.phase,
+                operation: "abort creation of",
+            });
+        }
+        record.close_reason = Some(CloseReason::CreateFailed);
+        record.advance(SessionPhase::Closed);
         Ok(record.snapshot(tab_id))
     }
 
@@ -317,6 +368,7 @@ impl BrowserSessionManager {
                     return None;
                 }
                 if record.phase != SessionPhase::Closing {
+                    record.close_reason = Some(CloseReason::AppExit);
                     record.advance(SessionPhase::Closing);
                 }
                 Some(record.snapshot(tab_id))
@@ -452,6 +504,9 @@ mod tests {
 
         let closing = manager.request_exit();
         assert_eq!(closing.len(), 2);
+        assert!(closing
+            .iter()
+            .all(|snapshot| snapshot.close_reason == Some(CloseReason::AppExit)));
         assert_eq!(manager.live_count(), 2);
         assert_eq!(
             manager.ensure_session("tab-c", "browser-tab-c"),
@@ -469,6 +524,37 @@ mod tests {
     }
 
     #[test]
+    fn failed_creation_closes_the_generation_and_allows_a_retry() {
+        let manager = BrowserSessionManager::new();
+        let created = manager.ensure_session("tab-a", "browser-tab-a").unwrap();
+        let first = created.snapshot().clone();
+        let aborted = manager.abort_create("tab-a", first.generation).unwrap();
+        assert_eq!(aborted.phase, SessionPhase::Closed);
+        assert_eq!(aborted.close_reason, Some(CloseReason::CreateFailed));
+        assert_eq!(manager.live_count(), 0);
+
+        let retried = manager.ensure_session("tab-a", "browser-tab-a").unwrap();
+        assert_eq!(retried.snapshot().generation, first.generation + 1);
+    }
+
+    #[test]
+    fn a_crashed_session_only_becomes_commandable_after_explicit_recovery() {
+        let manager = BrowserSessionManager::new();
+        let ready = create_ready(&manager, "tab-a");
+        let crashed = manager.renderer_crashed("tab-a", ready.generation).unwrap();
+        assert_eq!(crashed.phase, SessionPhase::Crashed);
+        assert_eq!(
+            manager.accept_command("tab-a", ready.generation),
+            Err(SessionError::NotCommandable {
+                phase: SessionPhase::Crashed,
+            })
+        );
+        let recovered = manager.mark_ready("tab-a", ready.generation).unwrap();
+        assert_eq!(recovered.phase, SessionPhase::Ready);
+        assert!(manager.accept_command("tab-a", ready.generation).is_ok());
+    }
+
+    #[test]
     fn one_hundred_close_cycles_advance_generation_and_reject_stale_commands() {
         let manager = BrowserSessionManager::new();
         let mut previous_generation = None;
@@ -479,7 +565,9 @@ mod tests {
             manager
                 .attach_surface("tab-a", ready.generation, expected)
                 .unwrap();
-            manager.begin_close("tab-a", ready.generation).unwrap();
+            manager
+                .begin_close("tab-a", ready.generation, CloseReason::TabClose)
+                .unwrap();
             manager.confirm_closed("tab-a", ready.generation).unwrap();
             assert_eq!(manager.live_count(), 0);
 

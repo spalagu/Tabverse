@@ -19,6 +19,7 @@ export interface BrowserTabState extends Readonly<Record<string, unknown>> {
 export interface BrowserTabViewRequest extends TabRendererArgs<BrowserTabState> {
   readonly runtimeKind: "desktop" | "remote" | "test";
   readonly kind: typeof BROWSER_KIND;
+  readonly session?: BrowserSessionPort;
 }
 
 export interface BrowserRemoteFrame {
@@ -74,6 +75,7 @@ export interface BrowserSurfaceSlot {
   readonly slotId: string;
   readonly slotRevision: bigint;
   readonly ownerWindowId: string;
+  readonly visible?: boolean;
   readonly bounds: {
     readonly x: number;
     readonly y: number;
@@ -83,7 +85,11 @@ export interface BrowserSurfaceSlot {
 }
 
 export type BrowserCommand =
-  | { readonly type: "navigate"; readonly url: string; readonly navigationId: string }
+  | {
+      readonly type: "navigate";
+      readonly url: string;
+      readonly navigationId: string;
+    }
   | { readonly type: "reload" }
   | { readonly type: "stop" }
   | { readonly type: "back" }
@@ -124,12 +130,28 @@ export interface BrowserEventEnvelope {
     | { readonly type: "navigation-committed"; readonly url: string }
     | { readonly type: "navigation-failed"; readonly safeMessage: string }
     | { readonly type: "title-changed"; readonly title: string }
-    | { readonly type: "history-changed"; readonly canBack: boolean; readonly canForward: boolean }
+    | {
+        readonly type: "history-changed";
+        readonly canBack: boolean;
+        readonly canForward: boolean;
+      }
     | { readonly type: "loading-changed"; readonly loading: boolean }
-    | { readonly type: "permission-requested"; readonly promptId: string; readonly capability: string }
+    | {
+        readonly type: "permission-requested";
+        readonly promptId: string;
+        readonly capability: string;
+      }
     | { readonly type: "auth-requested"; readonly promptId: string }
-    | { readonly type: "download-requested"; readonly downloadId: string; readonly filename: string }
-    | { readonly type: "download-progress"; readonly downloadId: string; readonly received: number }
+    | {
+        readonly type: "download-requested";
+        readonly downloadId: string;
+        readonly filename: string;
+      }
+    | {
+        readonly type: "download-progress";
+        readonly downloadId: string;
+        readonly received: number;
+      }
     | { readonly type: "renderer-crashed" }
     | { readonly type: "session-closed"; readonly reason: BrowserCloseReason };
 }
@@ -143,8 +165,14 @@ export interface BrowserSessionPort {
   readonly capabilities: BrowserEngineCapabilities;
   ensureSession(spec: BrowserSessionSpec): Promise<BrowserSessionHandle>;
   attachSurface(tabId: string, slot: BrowserSurfaceSlot): Promise<void>;
-  command(tabId: string, command: BrowserCommand): Promise<BrowserCommandResult>;
-  subscribe(tabId: string, sink: (event: BrowserEventEnvelope) => void): AsyncDisposable;
+  command(
+    tabId: string,
+    command: BrowserCommand,
+  ): Promise<BrowserCommandResult>;
+  subscribe(
+    tabId: string,
+    sink: (event: BrowserEventEnvelope) => void,
+  ): AsyncDisposable;
   closeSession(tabId: string, reason: BrowserCloseReason): Promise<void>;
 }
 
@@ -152,7 +180,10 @@ export interface BrowserRuntimeService {
   readonly runtimeKind: BrowserTabViewRequest["runtimeKind"];
   /** Present after the Desktop native provider has adopted the session port. */
   readonly session?: BrowserSessionPort;
-  readonly remoteState?: RemoteStateProvider<BrowserTabState, BrowserRemoteFrame>;
+  readonly remoteState?: RemoteStateProvider<
+    BrowserTabState,
+    BrowserRemoteFrame
+  >;
   /** Host-network requests are continuous work; the WebView itself is not. */
   readonly residentNetworkTask?: ContinuousResidentContribution<
     BrowserTabState,
@@ -229,7 +260,8 @@ export function createBrowserPlugin(options: {
         },
         view: {
           requiredServices: [BROWSER_RUNTIME_SERVICE],
-          render: (args) => args.services.get(BROWSER_RUNTIME_SERVICE).render(args),
+          render: (args) =>
+            args.services.get(BROWSER_RUNTIME_SERVICE).render(args),
         },
         state: {
           parse: parseState,
@@ -240,32 +272,39 @@ export function createBrowserPlugin(options: {
             return parseState(input);
           },
         },
-        remote: runtime.remoteState === undefined ? undefined : {
-          protocol: { name: "browser-semantic", minVersion: 4, maxVersion: 4 },
-          state: runtime.remoteState,
-          client: {
-            fold: (_state, frame) => (frame as BrowserRemoteFrame).state,
-            render: (args) => runtime.render(args),
-          },
-          intents: [
-            {
-              name: "browser.navigate",
-              schema: {
-                id: "browser.navigate/v1",
-                validate: (input): input is { readonly url: string } =>
-                  typeof input === "object" &&
-                  input !== null &&
-                  typeof (input as { url?: unknown }).url === "string",
+        remote:
+          runtime.remoteState === undefined
+            ? undefined
+            : {
+                protocol: {
+                  name: "browser-semantic",
+                  minVersion: 4,
+                  maxVersion: 4,
+                },
+                state: runtime.remoteState,
+                client: {
+                  fold: (_state, frame) => (frame as BrowserRemoteFrame).state,
+                  render: (args) => runtime.render(args),
+                },
+                intents: [
+                  {
+                    name: "browser.navigate",
+                    schema: {
+                      id: "browser.navigate/v1",
+                      validate: (input): input is { readonly url: string } =>
+                        typeof input === "object" &&
+                        input !== null &&
+                        typeof (input as { url?: unknown }).url === "string",
+                    },
+                    minAccess: "steer",
+                    idempotent: false,
+                  },
+                ],
+                privateStreams: {
+                  streams: [{ name: "browser.http", minAccess: "view" }],
+                },
+                fallback: "semantic-document",
               },
-              minAccess: "steer",
-              idempotent: false,
-            },
-          ],
-          privateStreams: {
-            streams: [{ name: "browser.http", minAccess: "view" }],
-          },
-          fallback: "semantic-document",
-        },
         resident: {
           capability: "state-only",
           runtimeKind: "browser",

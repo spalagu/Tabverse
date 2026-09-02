@@ -17,6 +17,7 @@
   },
   "exports": {
     ".": "./src/index.ts",
+    "./browser": "./src/browser.ts",
     "./terminal": "./src/terminal.ts"
   }
 }

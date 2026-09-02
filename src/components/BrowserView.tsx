@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { onAppCommand } from "../appCommands";
 import { coreLog } from "../errlog";
 import { recordVisit } from "../history";
@@ -31,15 +37,21 @@ import { STR } from "../strings";
 import { formatKeys, HINT_KEYS } from "../strings/formatKeys";
 import { keysFor } from "../shortcuts";
 import { planeSupported } from "../uiPlane";
+import type {
+  BrowserSessionHandle,
+  BrowserSessionPort,
+} from "@tabverse/tab-browser";
 
-const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const isTauri =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 interface Props {
   tab: Tab;
   active: boolean;
+  session?: BrowserSessionPort;
 }
 
-export function BrowserView({ tab, active }: Props) {
+export function BrowserView({ tab, active, session }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [address, setAddress] = useState(tab.url ?? "");
   const [current, setCurrent] = useState(tab.url ?? "");
@@ -58,7 +70,7 @@ export function BrowserView({ tab, active }: Props) {
   const findTimerRef = useRef<number | null>(null);
   const reportNav = useCallback(
     (signal: NavSignal) => navSignal(tab.id, signal),
-    [tab.id]
+    [tab.id],
   );
   const [navError, setNavError] = useState<BrowserNavigationError | null>(null);
   // A captured login waiting for the user's save/dismiss decision. The
@@ -68,6 +80,8 @@ export function BrowserView({ tab, active }: Props) {
   const zoomRef = useRef(1);
   const pendingFullLoad = useRef(false);
   const createdRef = useRef(false);
+  const sessionRef = useRef<BrowserSessionHandle | null>(null);
+  const slotRevisionRef = useRef(0n);
   // Whether the current navigation produced a real page title; only then may
   // the host-name fallback stay out of the way.
   const gotTitleRef = useRef(false);
@@ -78,7 +92,8 @@ export function BrowserView({ tab, active }: Props) {
   const navTimerRef = useRef<number | null>(null);
   const setTabTitle = useStore((s) => s.setTabTitle);
   const overlayOpen = useStore(
-    (s) => anyOverlayOpen(s) || (s.peekTabId !== null && s.peekTabId !== tab.id)
+    (s) =>
+      anyOverlayOpen(s) || (s.peekTabId !== null && s.peekTabId !== tab.id),
   );
   const isPeek = useStore((s) => s.peekTabId === tab.id);
   const splitShown = useStore((s) => {
@@ -98,17 +113,19 @@ export function BrowserView({ tab, active }: Props) {
   const splitShape = useStore((s) =>
     s.split === null
       ? ""
-      : `${s.split.ids.join(",")}|${s.split.ratios.join(",")}|${s.split.vertical}`
+      : `${s.split.ids.join(",")}|${s.split.ratios.join(",")}|${s.split.vertical}`,
   );
   const contentDragging = useStore((s) => s.contentDrag !== null);
   const previewParksCompanion = useStore(
-    (s) => !active && splitShown && s.folderPreviewGroupId !== null
+    (s) => !active && splitShown && s.folderPreviewGroupId !== null,
   );
 
   const rawInset = useStore(contentObstructionX);
   const peekInset = planeSupported ? 0 : rawInset;
   const frozen = useStore((s) =>
-    s.pageFreeze !== null && s.pageFreeze.tabId === tab.id ? s.pageFreeze : null
+    s.pageFreeze !== null && s.pageFreeze.tabId === tab.id
+      ? s.pageFreeze
+      : null,
   );
   const [freezeInset, setFreezeInset] = useState(0);
   const [freezeReady, setFreezeReady] = useState(false);
@@ -161,7 +178,7 @@ export function BrowserView({ tab, active }: Props) {
   // there is no slot, and creating a webview would mean loading a page the
   // user never asked for.
   useEffect(() => {
-    if (!isTauri || createdRef.current) return;
+    if (!isTauri || session === undefined || createdRef.current) return;
     const url = tab.url;
     if (!url) return;
     const el = hostRef.current;
@@ -171,20 +188,36 @@ export function BrowserView({ tab, active }: Props) {
       const b = bounds();
       if (!b || b.width < 20 || b.height < 20 || createdRef.current) return;
       createdRef.current = true;
-      coreLog("info", `browser_create attempt tab=${tab.id} ${b.width}x${b.height}`);
+      coreLog(
+        "info",
+        `browser_create attempt tab=${tab.id} ${b.width}x${b.height}`,
+      );
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("browser_create", {
+        const handle = await session.ensureSession({
           tabId: tab.id,
-          url: toUrl(url),
+          profileId: "default",
+          initialUrl: toUrl(url),
+          network: { kind: "system" },
+          privateMode: false,
+        });
+        sessionRef.current = handle;
+        slotRevisionRef.current += 1n;
+        await session.attachSurface(tab.id, {
+          slotId: `browser-slot-${tab.id}`,
+          slotRevision: slotRevisionRef.current,
+          ownerWindowId: "main",
+          visible: true,
           bounds: b,
         });
         // Ask the page who it is; the answer also proves it loaded.
         window.setTimeout(() => {
-          void invoke("browser_probe", { tabId: tab.id }).catch(() => {});
+          void import("@tauri-apps/api/core").then(({ invoke }) =>
+            invoke("browser_probe", { tabId: tab.id }).catch(() => {}),
+          );
         }, 800);
       } catch (e) {
         createdRef.current = false;
+        sessionRef.current = null;
         coreLog("error", `browser_create failed: ${e}`);
         setError(describeError(e, STR.errors.actions.showPage));
       }
@@ -194,13 +227,34 @@ export function BrowserView({ tab, active }: Props) {
     const ro = new ResizeObserver(() => void tryCreate());
     ro.observe(el);
     return () => ro.disconnect();
-  }, [tab.id, tab.url, bounds]);
+  }, [tab.id, tab.url, bounds, session]);
+
+  useEffect(() => {
+    if (session === undefined) return;
+    const subscription = session.subscribe(tab.id, (envelope) => {
+      if (sessionRef.current?.sessionGeneration !== envelope.sessionGeneration)
+        return;
+      if (envelope.event.type === "renderer-crashed") {
+        setError({
+          title: "The page process stopped",
+          next: "Reload the tab to create a fresh browser process.",
+          detail: "",
+        });
+      } else if (envelope.event.type === "session-closed") {
+        sessionRef.current = null;
+        createdRef.current = false;
+      }
+    });
+    return () => {
+      void subscription.dispose();
+    };
+  }, [session, tab.id]);
 
   const certBlocked = navError?.kind === "certificate";
 
   // Keep the floating webview aligned with our slot, and park it when hidden.
   useEffect(() => {
-    if (!isTauri) return;
+    if (!isTauri || session === undefined) return;
     let raf = 0;
     const sync = async () => {
       const b = bounds();
@@ -208,20 +262,25 @@ export function BrowserView({ tab, active }: Props) {
       // measure and no webview to park, and asking the core to move one that
       // was never created would be an error per animation frame.
       if (!b || !createdRef.current) return;
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("browser_set_bounds", {
-        tabId: tab.id,
-        bounds: b,
-        visible:
-          (active || splitShown || isPeek) &&
-          !certBlocked &&
-          (!overlayOpen &&
-            !barOpen &&
-            !(frozen !== null && freezeReady) &&
-            !(splitShown && splitDragging) &&
-            !contentDragging &&
-            !previewParksCompanion),
-      }).catch(() => {});
+      slotRevisionRef.current += 1n;
+      const visible =
+        (active || splitShown || isPeek) &&
+        !certBlocked &&
+        !overlayOpen &&
+        !barOpen &&
+        !(frozen !== null && freezeReady) &&
+        !(splitShown && splitDragging) &&
+        !contentDragging &&
+        !previewParksCompanion;
+      await session
+        .attachSurface(tab.id, {
+          slotId: `browser-slot-${tab.id}`,
+          slotRevision: slotRevisionRef.current,
+          ownerWindowId: "main",
+          visible,
+          bounds: b,
+        })
+        .catch(() => {});
     };
     let late = 0;
     const schedule = () => {
@@ -261,13 +320,14 @@ export function BrowserView({ tab, active }: Props) {
     splitShape,
     contentDragging,
     previewParksCompanion,
+    session,
   ]);
 
   useEffect(() => {
     if (!isTauri || !planeSupported || !isPeek) return;
     const t = window.setTimeout(() => {
       void import("@tauri-apps/api/core").then(({ invoke }) =>
-        invoke("browser_plane_raise", { tabId: tab.id }).catch(() => {})
+        invoke("browser_plane_raise", { tabId: tab.id }).catch(() => {}),
       );
     }, 60);
     return () => window.clearTimeout(t);
@@ -284,7 +344,9 @@ export function BrowserView({ tab, active }: Props) {
       }
     }
     void import("@tauri-apps/api/core").then(({ invoke }) =>
-      invoke("browser_set_peek_anchor", { tabId: tab.id, host }).catch(() => {})
+      invoke("browser_set_peek_anchor", { tabId: tab.id, host }).catch(
+        () => {},
+      ),
     );
   }, [tab.id, tab.pinnedUrl]);
 
@@ -293,7 +355,7 @@ export function BrowserView({ tab, active }: Props) {
     return () => {
       useStore.getState().clearScriptCommands(tab.id);
       void import("../favicons").then(({ forgetTabFavicon }) =>
-        forgetTabFavicon(tab.id)
+        forgetTabFavicon(tab.id),
       );
       useStore.getState().setTabAudible(tab.id, false);
       useStore.getState().setTabMuted(tab.id, false);
@@ -301,12 +363,10 @@ export function BrowserView({ tab, active }: Props) {
       // later tab, and inheriting a half-drawn bar would be a bar about
       // nobody's navigation.
       forgetProgress(tab.id);
-      if (!isTauri || !createdRef.current) return;
-      import("@tauri-apps/api/core").then(({ invoke }) =>
-        invoke("browser_close", { tabId: tab.id }).catch(() => {})
-      );
+      if (!isTauri || !createdRef.current || session === undefined) return;
+      void session.closeSession(tab.id, "tab-close").catch(() => {});
     };
-  }, [tab.id]);
+  }, [tab.id, session]);
 
   // Loading state from the engine's page-load phases.
   useEffect(() => {
@@ -380,7 +440,7 @@ export function BrowserView({ tab, active }: Props) {
             // already in history rather than adding a second one.
             recordVisit(currentUrlRef.current, e.payload.title);
           }
-        }
+        },
       ).then((fn) => {
         unlisten = fn;
       });
@@ -403,14 +463,14 @@ export function BrowserView({ tab, active }: Props) {
             return;
           }
           setPwOffer(e.payload);
-        }
+        },
       ).then((fn) => unsubs.push(fn));
       void listen<{ tabId: string; host: string; usernames: string[] }>(
         "browser-password-fillable",
         (e) => {
           if (e.payload.tabId !== tab.id) return;
           setFillable({ host: e.payload.host, usernames: e.payload.usernames });
-        }
+        },
       ).then((fn) => unsubs.push(fn));
     });
     return () => unsubs.forEach((f) => f());
@@ -423,11 +483,11 @@ export function BrowserView({ tab, active }: Props) {
     const { invoke } = await import("@tauri-apps/api/core");
     if (saveIt) {
       await invoke("pw_offer_save", { host: offer.host }).catch((e) =>
-        coreLog("error", `pw_offer_save failed: ${e}`)
+        coreLog("error", `pw_offer_save failed: ${e}`),
       );
     } else {
       await invoke("pw_offer_dismiss", { host: offer.host, never }).catch(
-        () => {}
+        () => {},
       );
     }
   };
@@ -450,17 +510,19 @@ export function BrowserView({ tab, active }: Props) {
     if (!isTauri) return;
     let unlisten: (() => void) | null = null;
     import("@tauri-apps/api/event").then(({ listen }) => {
-      listen<{ tabId: string; total: number; current: number; frames?: number }>(
-        "browser-find-result",
-        (e) => {
-          if (e.payload.tabId !== tab.id) return;
-          setFindResult({
-            total: e.payload.total,
-            current: e.payload.current,
-            frames: e.payload.frames ?? 1,
-          });
-        }
-      ).then((fn) => {
+      listen<{
+        tabId: string;
+        total: number;
+        current: number;
+        frames?: number;
+      }>("browser-find-result", (e) => {
+        if (e.payload.tabId !== tab.id) return;
+        setFindResult({
+          total: e.payload.total,
+          current: e.payload.current,
+          frames: e.payload.frames ?? 1,
+        });
+      }).then((fn) => {
         unlisten = fn;
       });
     });
@@ -511,7 +573,7 @@ export function BrowserView({ tab, active }: Props) {
               reapplyMute(tab.id);
             }
           }
-        }
+        },
       ).then((fn) => {
         unlisten = fn;
       });
@@ -539,7 +601,7 @@ export function BrowserView({ tab, active }: Props) {
           // ⌘F was pressed inside the page, so the keyboard is with the page;
           // the bar's input is useless until the UI gets it back.
           void import("@tauri-apps/api/core").then(({ invoke }) =>
-            invoke("ui_focus").catch(() => {})
+            invoke("ui_focus").catch(() => {}),
           );
           return;
         case "reload":
@@ -557,7 +619,7 @@ export function BrowserView({ tab, active }: Props) {
           void import("@tauri-apps/api/core").then(({ invoke }) =>
             invoke("browser_open_external", {
               url: currentUrlRef.current,
-            }).catch(() => {})
+            }).catch(() => {}),
           );
           return;
         case "copy-url":
@@ -569,7 +631,8 @@ export function BrowserView({ tab, active }: Props) {
           const pinned = useStore
             .getState()
             .tabs.find((t) => t.id === tab.id)?.pinnedUrl;
-          if (pinned && pinned !== currentUrlRef.current) void nav("go", pinned);
+          if (pinned && pinned !== currentUrlRef.current)
+            void nav("go", pinned);
           return;
         }
         case "zoom-in":
@@ -598,7 +661,7 @@ export function BrowserView({ tab, active }: Props) {
   useEffect(() => {
     if (!isTauri || !active || tab.url) return;
     void import("@tauri-apps/api/core").then(({ invoke }) =>
-      invoke("ui_focus").catch(() => {})
+      invoke("ui_focus").catch(() => {}),
     );
   }, [active, tab.url]);
 
@@ -655,15 +718,14 @@ export function BrowserView({ tab, active }: Props) {
     if (!err) return;
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("trust_certificate_host", { host: err.host }).catch((e) =>
-      coreLog("error", `trust_certificate_host failed: ${e}`)
+      coreLog("error", `trust_certificate_host failed: ${e}`),
     );
     setNavError(null);
     await nav("go", err.url || current);
   };
 
   const invokeZoom = async (scale: number) => {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("browser_zoom", { tabId: tab.id, scale }).catch(() => {});
+    await session?.command(tab.id, { type: "set-zoom", level: scale });
   };
 
   const rememberHostZoom = (scale: number) => {
@@ -686,12 +748,11 @@ export function BrowserView({ tab, active }: Props) {
   // value it saw at the keystroke, which state may no longer match.
   const doFind = async (backwards: boolean, query = findQ) => {
     if (!query) return;
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("browser_find", {
-      tabId: tab.id,
+    await session?.command(tab.id, {
+      type: "find",
       query,
-      backwards,
-    }).catch(() => {});
+      direction: backwards ? "previous" : "next",
+    });
   };
 
   const clearFindOnPage = async () => {
@@ -707,13 +768,26 @@ export function BrowserView({ tab, active }: Props) {
   };
 
   const nav = async (action: string, url?: string) => {
-    const { invoke } = await import("@tauri-apps/api/core");
     setError(null);
-    await invoke("browser_navigate", { tabId: tab.id, action, url }).catch((e) =>
-      setError(describeError(e, STR.errors.actions.openPage))
-    );
+    const command =
+      action === "go"
+        ? {
+            type: "navigate" as const,
+            url: url ?? "",
+            navigationId: crypto.randomUUID(),
+          }
+        : action === "reload"
+          ? { type: "reload" as const }
+          : action === "back"
+            ? { type: "back" as const }
+            : { type: "forward" as const };
+    const result = await session?.command(tab.id, command);
+    if (result?.ok === false) {
+      setError(describeError(result.code, STR.errors.actions.openPage));
+    }
     if (action === "go") {
-      if (navTimerRef.current !== null) window.clearTimeout(navTimerRef.current);
+      if (navTimerRef.current !== null)
+        window.clearTimeout(navTimerRef.current);
       navTimerRef.current = window.setTimeout(() => {
         navTimerRef.current = null;
         setError({
@@ -724,7 +798,9 @@ export function BrowserView({ tab, active }: Props) {
       }, 10000);
     }
     window.setTimeout(() => {
-      void invoke("browser_probe", { tabId: tab.id }).catch(() => {});
+      void import("@tauri-apps/api/core").then(({ invoke }) =>
+        invoke("browser_probe", { tabId: tab.id }).catch(() => {}),
+      );
     }, 900);
   };
 
@@ -794,9 +870,7 @@ export function BrowserView({ tab, active }: Props) {
       onDismissFillableLogins={() => setFillable(null)}
       error={error}
       navigationError={navError}
-      onRetryNavigation={() =>
-        void nav("go", navError?.url || current)
-      }
+      onRetryNavigation={() => void nav("go", navError?.url || current)}
       onProceedPastCertificate={() => void proceedPastCertificate()}
       hostRef={hostRef}
       frozenFrame={frozen}
