@@ -2,6 +2,7 @@
 mod basic_auth;
 #[cfg(target_os = "windows")]
 mod basic_auth_win;
+pub mod browser;
 mod cookies;
 mod default_apps;
 #[cfg(target_os = "macos")]
