@@ -80,4 +80,16 @@ describe("Remote Browser static document sanitizer", () => {
     expect(html).toContain(encodeURIComponent("https://intranet.test/next"));
     expect(html).not.toContain("bg.png");
   });
+
+  it("rejects malformed style markup without regex pre-sanitization", () => {
+    const html = mirroredDocument(
+      '<style<style/onload="globalThis.pwned=1">unsafe</style><p>kept</p>',
+      "https://intranet.test/wiki/Home",
+      proxy,
+    );
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    expect(doc.querySelector("style")).toBeNull();
+    expect(doc.documentElement.outerHTML).not.toContain("onload");
+    expect(doc.body.textContent).toContain("kept");
+  });
 });

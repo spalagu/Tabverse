@@ -1,4 +1,5 @@
 import DOMPurify from "dompurify";
+import { parseFragment, serialize, type DefaultTreeAdapterMap } from "parse5";
 
 const FORBIDDEN_TAGS = [
   "script",
@@ -18,10 +19,24 @@ const FORBIDDEN_TAGS = [
   "base",
   "style",
 ];
-const FORBIDDEN_TAG_PATTERN = new RegExp(
-  `<\\/?(?:${FORBIDDEN_TAGS.join("|")}|link)\\b[^>]*>`,
-  "gi",
-);
+const RESOURCE_PREFILTER_TAGS = new Set([...FORBIDDEN_TAGS, "link"]);
+
+function prefilterResourceElements(html: string): string {
+  const fragment = parseFragment(html);
+  const visit = (node: DefaultTreeAdapterMap["node"]) => {
+    if (!("childNodes" in node)) return;
+    for (let index = node.childNodes.length - 1; index >= 0; index -= 1) {
+      const child = node.childNodes[index];
+      if (RESOURCE_PREFILTER_TAGS.has(child.nodeName)) {
+        node.childNodes.splice(index, 1);
+      } else {
+        visit(child);
+      }
+    }
+  };
+  visit(fragment);
+  return serialize(fragment);
+}
 
 const ADDRESS_ATTRIBUTES = ["href", "src", "poster"] as const;
 
@@ -90,15 +105,10 @@ export function mirroredDocument(
   documentUrl: string,
   resolveProxyUrl: (target: string) => string,
 ): string {
-  // Do not parse the untrusted document before sanitizing it: even an inert
-  // parser implementation may start fetching iframe/object resources. Strip
-  // only the structural wrappers as text, then hand the fragment to DOMPurify.
-  const fragment = html
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, "")
-    .replace(/<!doctype[^>]*>/gi, "")
-    .replace(/<\/?(?:html|head|body)\b[^>]*>/gi, "")
-    .replace(FORBIDDEN_TAG_PATTERN, "");
-  const clean = DOMPurify.sanitize(fragment, {
+  // parse5 has no browser or network side effects. It removes resource-bearing
+  // elements before DOMPurify interprets the remaining markup; DOMPurify then
+  // owns the complete security sanitization pass.
+  const clean = DOMPurify.sanitize(prefilterResourceElements(html), {
     FORBID_TAGS: FORBIDDEN_TAGS,
     FORBID_ATTR: [
       "action",
