@@ -68,6 +68,7 @@ mod fs_watch;
 mod http;
 mod keys;
 mod migrate;
+mod network_broker;
 pub mod page_proxy;
 mod passwords;
 mod profiles;

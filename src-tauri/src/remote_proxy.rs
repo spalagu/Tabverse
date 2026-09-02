@@ -1,11 +1,12 @@
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::network_broker::{self, TargetPolicy};
 use crate::page_proxy;
 use base64::Engine as _;
 use tabverse_proto::Access;
@@ -42,13 +43,6 @@ const MAX_BYTES_PER_VIEWER_WINDOW: u64 = 256 * 1024 * 1024;
 
 type ResolveHost = Arc<dyn Fn(&str, u16) -> Result<Vec<SocketAddr>, String> + Send + Sync>;
 
-fn system_resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
-    (host, port)
-        .to_socket_addrs()
-        .map(|addresses| addresses.collect())
-        .map_err(|error| format!("dns-failed: host resolution failed: {error}"))
-}
-
 fn origin_of(url: &reqwest::Url) -> Result<String, String> {
     let host = url.host_str().ok_or("invalid-target: URL has no host")?;
     let port = url
@@ -65,26 +59,6 @@ fn target_hash(url: &reqwest::Url) -> String {
     let mut hasher = DefaultHasher::new();
     origin_of(url).unwrap_or_default().hash(&mut hasher);
     format!("{:016x}", hasher.finish())
-}
-
-fn prohibited_address(ip: IpAddr) -> bool {
-    if ip.is_unspecified() || ip.is_multicast() {
-        return true;
-    }
-    match ip {
-        IpAddr::V4(ip) => {
-            ip.is_link_local()
-                || ip.is_broadcast()
-                || ip == std::net::Ipv4Addr::new(169, 254, 169, 254)
-                || ip == std::net::Ipv4Addr::new(100, 100, 100, 200)
-        }
-        IpAddr::V6(ip) => {
-            ip.is_unicast_link_local()
-                || ip
-                    .to_ipv4_mapped()
-                    .is_some_and(|mapped| prohibited_address(IpAddr::V4(mapped)))
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,7 +279,7 @@ impl Default for BrowserRequestRouter {
             budgets: Mutex::new(HashMap::new()),
             attachments: Mutex::new(HashMap::new()),
             audit: Mutex::new(Vec::new()),
-            resolver: Arc::new(system_resolve),
+            resolver: Arc::new(network_broker::system_resolve),
         }
     }
 }
@@ -456,19 +430,11 @@ impl BrowserRequestRouter {
         let port = url
             .port_or_known_default()
             .ok_or("invalid-target: URL has no effective port")?;
-        let mut addrs = (self.resolver)(host, port)?;
-        for address in &mut addrs {
-            address.set_port(port);
-        }
-        addrs.sort_unstable();
-        addrs.dedup();
-        if addrs.is_empty() {
-            return Err("dns-failed: host resolved to no address".into());
-        }
-        if addrs.iter().any(|address| prohibited_address(address.ip())) {
-            return Err("ssrf-denied: target resolved to a prohibited address class".into());
-        }
-        Ok(addrs)
+        network_broker::approve_addresses(
+            (self.resolver)(host, port)?,
+            port,
+            TargetPolicy::RemoteGrant,
+        )
     }
 
     fn validate_grant(&self, grant: &NetworkGrant, url: &reqwest::Url) -> Result<(), String> {
@@ -1457,8 +1423,11 @@ fn exchange(
     if target.tls {
         return exchange_tls(head, body, budget, &target);
     }
-    let addresses = page_proxy::resolve_system(&target.host, target.port)
-        .ok_or_else(|| "the host resolved to no address".to_string())?;
+    let addresses = network_broker::approve_addresses(
+        network_broker::system_resolve(&target.host, target.port)?,
+        target.port,
+        TargetPolicy::LocalNavigation,
+    )?;
     let deadline = Deadline(Instant::now() + budget);
     let mut stream = connect_within(&addresses, &deadline)
         .ok_or_else(|| "no address accepted the connection".to_string())?;
@@ -1562,15 +1531,11 @@ fn forward_head(head: &str, authority: &str, body: Option<&str>) -> String {
     out
 }
 
-/// Connect to the first address that accepts, in the resolver's order —
-/// connect_first's rule with the clock applied: page_proxy's tunnels
-/// have no budget, a frame has thirty seconds, and a firewalled host
-/// that drops SYNs must not spend them.
+/// Race address families within the request's remaining budget. A
+/// firewalled first address can no longer consume the whole thirty seconds
+/// before a reachable address from the other family is attempted.
 fn connect_within(addresses: &[SocketAddr], deadline: &Deadline) -> Option<TcpStream> {
-    addresses.iter().find_map(|addr| {
-        let left = deadline.remaining().ok()?;
-        TcpStream::connect_timeout(addr, left).ok()
-    })
+    network_broker::connect_happy_eyeballs(addresses, deadline.remaining().ok()?)
 }
 
 /// The one deadline every socket call is checked against, so "one
@@ -1796,7 +1761,7 @@ fn exchange_tls(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    use std::net::{IpAddr, TcpListener};
     use std::sync::{Arc, Mutex as StdMutex};
 
     /// A name reserved by RFC 6761 §6.2 so that it resolves nowhere on

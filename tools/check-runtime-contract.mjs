@@ -28,6 +28,18 @@ const browserView = await readFile(
   new URL("../src/components/BrowserView.tsx", import.meta.url),
   "utf8",
 );
+const networkBroker = await readFile(
+  new URL("../src-tauri/src/network_broker/mod.rs", import.meta.url),
+  "utf8",
+);
+const pageProxy = await readFile(
+  new URL("../src-tauri/src/page_proxy.rs", import.meta.url),
+  "utf8",
+);
+const remoteProxy = await readFile(
+  new URL("../src-tauri/src/remote_proxy.rs", import.meta.url),
+  "utf8",
+);
 const forkRevisions = [
   ...rootCargo.matchAll(
     /(?:tauri|tauri-build) = \{ git = "https:\/\/github\.com\/spalagu\/tauri\.git", rev = "([0-9a-f]{40})" \}/g,
@@ -103,6 +115,26 @@ const checks = [
       lib.includes("confirm_browser_closed") &&
       lib.includes("browser close confirmation timed out"),
     "CEF BrowserClosed acknowledgement is not the close completion boundary",
+  ],
+  [
+    networkBroker.includes("pub struct DnsCache") &&
+      networkBroker.includes("pub fn approve_addresses") &&
+      networkBroker.includes("pub fn connect_happy_eyeballs"),
+    "NetworkBroker does not own DNS cache, address policy and connection racing",
+  ],
+  [
+    pageProxy.includes("DnsCache") &&
+      pageProxy.includes("TargetPolicy::LocalNavigation") &&
+      pageProxy.includes("network_broker::connect_happy_eyeballs") &&
+      !pageProxy.includes("fn connect_first"),
+    "CEF/Wry page proxy bypasses the shared NetworkBroker",
+  ],
+  [
+    remoteProxy.includes("TargetPolicy::RemoteGrant") &&
+      remoteProxy.includes("network_broker::approve_addresses") &&
+      remoteProxy.includes("network_broker::connect_happy_eyeballs") &&
+      !remoteProxy.includes("fn prohibited_address"),
+    "Remote Browser router bypasses the shared NetworkBroker policy",
   ],
 ];
 
