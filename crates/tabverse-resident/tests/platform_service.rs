@@ -539,7 +539,10 @@ async fn exercise_platform_service() {
     }
 
     let package_v1 = PackageResources::from_env("TABVERSE_RESIDENT_PACKAGE_V1");
-    assert_eq!(package_v1.package_version, "0.0.1");
+    assert_eq!(
+        package_v1.package_version,
+        env::var("TABVERSE_RESIDENT_PACKAGE_V1_VERSION").unwrap()
+    );
     let first = plan.stage(&package_v1.install_artifacts()).unwrap();
     let original_token = fs::read(&first.auth_token).unwrap();
     let mut cleanup = ServiceCleanup {
@@ -671,7 +674,10 @@ async fn exercise_platform_service() {
     let package_v2_install_started_processes = observe_processes(&root);
     let package_v2_install_status = install_package_v2_during_live_runtimes();
     let package_v2 = PackageResources::from_path(package_resources_root().join("v2"));
-    assert_eq!(package_v2.package_version, "0.0.2");
+    assert_eq!(
+        package_v2.package_version,
+        env::var("TABVERSE_RESIDENT_PACKAGE_V2_VERSION").unwrap()
+    );
     assert_ne!(package_v1.package_sha256, package_v2.package_sha256);
     let package_v2_install_finished_processes = observe_processes(&root);
 
@@ -1016,11 +1022,13 @@ fn install_package_v2_during_live_runtimes() -> ExitStatus {
     );
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let script = repository.join("tools/prepare-resident-package-acceptance.mjs");
+    let package_v2_version = env::var("TABVERSE_RESIDENT_PACKAGE_V2_VERSION").unwrap();
     let status = command_status_with_timeout(
         Command::new("node")
             .current_dir(&repository)
             .arg(&script)
-            .args(["--phase", "v2", "--version", "0.0.2"]),
+            .args(["--phase", "v2", "--version"])
+            .arg(package_v2_version),
         "install-package-v2-with-live-runtimes",
         PACKAGE_COMMAND_TIMEOUT,
     )

@@ -30,6 +30,11 @@ if (args.has("--set-version")) {
   process.exit(0);
 }
 
+if (process.argv.includes("--export-version-pair")) {
+  exportAcceptanceVersionPair();
+  process.exit(0);
+}
+
 if (process.argv.includes("--cleanup")) {
   cleanup();
   process.exit(0);
@@ -129,6 +134,16 @@ function setAcceptanceVersion(version) {
   );
   if (updated === cargo) throw new Error("src-tauri/Cargo.toml package version was not updated");
   writeFileSync(cargoPath, updated);
+}
+
+function exportAcceptanceVersionPair() {
+  const current = JSON.parse(readFileSync(join(repository, "package.json"), "utf8")).version;
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(current ?? "");
+  if (!match) throw new Error("package.json version must be X.Y.Z");
+  const next = `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
+  appendFileSync(githubEnvironment, `TABVERSE_RESIDENT_PACKAGE_V1_VERSION=${current}\n`);
+  appendFileSync(githubEnvironment, `TABVERSE_RESIDENT_PACKAGE_V2_VERSION=${next}\n`);
+  console.log(JSON.stringify({ current, next }));
 }
 
 function findBundle(kind, extension, version) {
