@@ -9,10 +9,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use crate::AppHandle;
 use tabverse_remote::source::terminal::TerminalSource;
 use tabverse_remote::source::ShareSource;
 use tabverse_remote::{RemoteHub, ShareOpts, SourceRegistry, ViewerInfo};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use crate::AppState;
 

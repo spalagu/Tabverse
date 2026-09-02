@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::AppHandle;
 use notify::{Config, Event, Watcher};
-use tauri::{AppHandle, Emitter};
+use tauri::Emitter;
 
 use tabverse_fs::{Exclusions, WalkRules};
 

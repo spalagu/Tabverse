@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Emitter};
+use crate::AppHandle;
+use tauri::Emitter;
 use webview2_com::BasicAuthenticationRequestedEventHandler;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2BasicAuthenticationRequestedEventArgs, ICoreWebView2Controller,

@@ -79,7 +79,7 @@ pub struct AppShareSource {
     /// Hands the webview-ask path an AppHandle without the source holding
     /// one from construction (the app handle does not exist yet when
     /// AppState is built). Set by `app_share_start`.
-    app: Mutex<Option<tauri::AppHandle>>,
+    app: Mutex<Option<crate::AppHandle>>,
     /// Monotonic id for the events this source fans out, so viewers can
     /// order what they receive even across a reconnect's snapshot reset.
     seq: AtomicU64,
@@ -93,9 +93,9 @@ pub struct AppShareSource {
 
 /// One Single Tab share. It reuses the same v4 contribution event seam as
 /// Whole App Share and may wrap a legacy source (Terminal) for v1-v3 clients.
-pub struct ContributionShareSource<R: tauri::Runtime = tauri::Wry> {
+pub struct ContributionShareSource<R: tauri::Runtime = crate::AppRuntime> {
     tab_id: String,
-    app: tauri::AppHandle<R>,
+    app: crate::AppHandle<R>,
     base: Option<Arc<dyn ShareSource>>,
     binding: Mutex<Option<ShareBinding>>,
 }
@@ -103,7 +103,7 @@ pub struct ContributionShareSource<R: tauri::Runtime = tauri::Wry> {
 impl<R: tauri::Runtime> ContributionShareSource<R> {
     pub fn new(
         tab_id: String,
-        app: tauri::AppHandle<R>,
+        app: crate::AppHandle<R>,
         base: Option<Arc<dyn ShareSource>>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -375,7 +375,7 @@ impl AppShareSource {
     /// fresh one to everyone, which is also exactly the reconnect
     /// reconciliation: a rejoining viewer gets it via the join flow, and
     /// any drift the disconnect window created is overwritten for all.
-    pub fn request_snapshot_from_webview(&self, app: &tauri::AppHandle) {
+    pub fn request_snapshot_from_webview(&self, app: &crate::AppHandle) {
         use tauri::Emitter;
         let _ = app.emit("app-share-snapshot-request", ());
     }
@@ -383,7 +383,7 @@ impl AppShareSource {
     /// The handle the webview-ask path emits through. Handed over by
     /// `app_share_start`, the one place that has one and knows the share
     /// is live.
-    pub fn set_app_handle(&self, app: tauri::AppHandle) {
+    pub fn set_app_handle(&self, app: crate::AppHandle) {
         *self.app.lock().unwrap_or_else(|e| e.into_inner()) = Some(app);
     }
 
@@ -395,7 +395,7 @@ impl AppShareSource {
     /// `ActionApplied` that is the confirmation. Until this is called the
     /// construction-time no-op stands and viewer actions are dropped
     /// (there is no share to act on before `app_share_start`).
-    pub fn set_dispatch_channel<R: tauri::Runtime>(&self, app: tauri::AppHandle<R>) {
+    pub fn set_dispatch_channel<R: tauri::Runtime>(&self, app: crate::AppHandle<R>) {
         let emitter = app.clone();
         self.set_dispatch(Arc::new(move |name, args| {
             use tauri::Emitter;
@@ -414,7 +414,7 @@ impl AppShareSource {
     /// registry. Until this is called the construction no-op stands and
     /// viewer keystrokes are dropped (there is no share before
     /// `app_share_start`).
-    pub fn set_term_input_channel<R: tauri::Runtime>(&self, app: tauri::AppHandle<R>) {
+    pub fn set_term_input_channel<R: tauri::Runtime>(&self, app: crate::AppHandle<R>) {
         let emitter = app.clone();
         *self.term_input.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(move |bytes| {
             use base64::Engine as _;

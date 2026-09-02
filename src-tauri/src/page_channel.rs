@@ -3,10 +3,10 @@
 use std::ffi::{c_char, CString};
 use std::sync::OnceLock;
 
+use crate::AppHandle;
 use objc2::msg_send;
 use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2_foundation::NSString;
-use tauri::AppHandle;
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 

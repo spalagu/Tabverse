@@ -6,11 +6,12 @@ use std::ffi::{c_char, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
+use crate::AppHandle;
 use block2::{Block, RcBlock};
 use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{class, msg_send};
 use objc2_foundation::NSString;
-use tauri::{AppHandle, Emitter};
+use tauri::Emitter;
 
 /// completionHandler shape: (NSURLSessionAuthChallengeDisposition, NSURLCredential *)
 type AuthBlock = Block<dyn Fn(isize, *mut AnyObject)>;

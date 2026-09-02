@@ -1,13 +1,16 @@
+#[cfg_attr(feature = "runtime-cef", allow(dead_code))]
 mod basic_auth;
 #[cfg(target_os = "windows")]
 mod basic_auth_win;
 mod cookies;
 mod default_apps;
 #[cfg(target_os = "macos")]
+#[cfg_attr(feature = "runtime-cef", allow(dead_code))]
 mod dialogs;
 #[cfg(target_os = "windows")]
 mod dialogs_win;
 #[cfg(target_os = "macos")]
+#[cfg_attr(feature = "runtime-cef", allow(dead_code))]
 mod nav_failures;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod nav_report;
@@ -15,6 +18,7 @@ mod nav_watchdog;
 #[cfg(target_os = "windows")]
 mod nav_windows;
 #[cfg(target_os = "macos")]
+#[cfg_attr(feature = "runtime-cef", allow(dead_code))]
 mod page_channel;
 #[cfg(target_os = "windows")]
 mod page_channel_win;
@@ -91,7 +95,23 @@ use tabverse_term::{
 };
 #[cfg(target_os = "macos")]
 use tauri::menu::SubmenuBuilder;
-use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State, Window};
+use tauri::{ipc::Channel, Emitter, Manager, State};
+
+#[cfg(all(feature = "runtime-wry", feature = "runtime-cef"))]
+compile_error!("runtime-wry and runtime-cef cannot be enabled in the same Tabverse binary");
+
+#[cfg(not(any(feature = "runtime-wry", feature = "runtime-cef")))]
+compile_error!("Tabverse requires exactly one of runtime-wry or runtime-cef");
+
+#[cfg(feature = "runtime-wry")]
+pub type AppRuntime = tauri::Wry;
+
+#[cfg(feature = "runtime-cef")]
+pub type AppRuntime = tauri::Cef;
+
+pub type AppHandle<R = AppRuntime> = tauri::AppHandle<R>;
+pub type Window<R = AppRuntime> = tauri::Window<R>;
+pub type Webview<R = AppRuntime> = tauri::Webview<R>;
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
@@ -644,12 +664,12 @@ fn is_theme_preference(p: &str) -> bool {
 /// ui_plane::set_window_backdrop, so the color can only come from the
 /// generated table (theme token tests pin the call shape).
 #[cfg(target_os = "macos")]
-fn apply_backdrop(window: &tauri::Window, backdrop: &theme_gen::Backdrop) -> Result<(), String> {
+fn apply_backdrop(window: &crate::Window, backdrop: &theme_gen::Backdrop) -> Result<(), String> {
     ui_plane::set_window_backdrop(window, backdrop.r, backdrop.g, backdrop.b)
 }
 
 #[tauri::command]
-fn set_theme(window: tauri::Window, theme: String) -> Result<(), String> {
+fn set_theme(window: crate::Window, theme: String) -> Result<(), String> {
     let Some(entry) = theme_gen::theme(&theme) else {
         return Err(format!("unknown theme {theme:?}"));
     };
@@ -2087,7 +2107,7 @@ fn slot_page_proxy_url(
 /// preserving the cookie jar. Existing pages use the new route for their
 /// next request; the Settings copy names that reality rather than promising
 /// a per-tab configuration WebKit cannot provide.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "runtime-wry"))]
 fn clear_shared_page_proxy(window: &Window) {
     let Some(main) = window.get_webview("main") else {
         return;
@@ -2106,7 +2126,10 @@ fn clear_shared_page_proxy(window: &Window) {
     });
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(
+    not(target_os = "macos"),
+    all(target_os = "macos", feature = "runtime-cef")
+))]
 fn clear_shared_page_proxy(_window: &Window) {}
 
 /// Embed a real web page as a child webview positioned over the tab area.
@@ -2357,7 +2380,7 @@ async fn browser_create(
         .map_err(|e| format!("add_child failed: {e}"))?;
 
     eprintln!("[core] browser_create added child webview {label}");
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "runtime-wry"))]
     if let Some(wv) = window.get_webview(&label) {
         let auth_app = app.clone();
         let nav_tab_id = tab_id.clone();
@@ -3039,7 +3062,7 @@ fn browser_print(app: AppHandle, state: State<'_, AppState>, tab_id: String) -> 
         .get_webview(&label)
         .ok_or_else(|| "webview is gone".to_string())?;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "runtime-wry"))]
     {
         wv.with_webview(|pw| unsafe {
             use objc2::msg_send;
@@ -3089,6 +3112,10 @@ fn browser_print(app: AppHandle, state: State<'_, AppState>, tab_id: String) -> 
         })
         .map_err(|e| e.to_string())?;
         return Ok(());
+    }
+    #[cfg(all(target_os = "macos", feature = "runtime-cef"))]
+    {
+        return wv.print().map_err(|e| e.to_string());
     }
     #[cfg(target_os = "windows")]
     {
@@ -3578,7 +3605,7 @@ fn cmd_item(
     bindings: &keys::Bindings,
     id: &str,
     label: &str,
-) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
+) -> tauri::Result<tauri::menu::MenuItem<AppRuntime>> {
     let accel = bindings.accelerator(id);
     if accel.is_empty() {
         return tauri::menu::MenuItemBuilder::with_id(id, label).build(handle);
@@ -3923,7 +3950,7 @@ pub fn run() {
         std::process::exit(code);
     }
     http::ensure_crypto_provider();
-    tauri::Builder::default()
+    tauri::Builder::<AppRuntime>::new()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())

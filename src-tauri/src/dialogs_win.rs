@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use tauri::AppHandle;
+use crate::AppHandle;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Controller, ICoreWebView2Deferral, ICoreWebView2PermissionRequestedEventArgs,
     ICoreWebView2ScriptDialogOpeningEventArgs, COREWEBVIEW2_PERMISSION_KIND,

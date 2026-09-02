@@ -26,8 +26,9 @@ use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::AppHandle;
 use tauri::webview::cookie::{Cookie, Expiration, SameSite};
-use tauri::{AppHandle, Manager};
+use tauri::Manager;
 
 // A new namespace is intentional: the key bundle is not derived from or
 // compatible with the three legacy Keychain items, so old ciphertext must

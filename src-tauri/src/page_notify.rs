@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use tauri::{AppHandle, Emitter, Manager};
+use crate::AppHandle;
+use tauri::{Emitter, Manager};
 
 const KIND: &str = "notifications";
 
@@ -41,7 +42,7 @@ fn granted_tabs() -> &'static Mutex<HashSet<String>> {
     G.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-fn tab_webview(app: &AppHandle, tab_id: &str) -> Option<tauri::Webview> {
+fn tab_webview(app: &AppHandle, tab_id: &str) -> Option<crate::Webview> {
     let label = app
         .state::<crate::AppState>()
         .browsers

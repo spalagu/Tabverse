@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use crate::AppHandle;
 use base64::Engine as _;
-use tauri::{AppHandle, Emitter};
+use tauri::Emitter;
 
 /// Disk cache bound: enough for every host anyone actually revisits,
 /// small enough that the state dir never grows without limit.

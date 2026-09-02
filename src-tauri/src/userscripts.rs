@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use crate::AppHandle;
 use base64::Engine as _;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{Emitter, Manager};
 
 const MAX_SCRIPT_BYTES: usize = 32 * 1024 * 1024;
 /// GM_xmlhttpRequest response cap. Binary is unsupported anyway (declared);
@@ -603,7 +604,7 @@ pub fn bootstrap_script() -> String {
 
 /// The late path (see module docs): a webview created before any script
 /// existed gets the same bootstrap evaled at page-load-finished.
-pub fn on_page_finished(app: &AppHandle, tab_id: &str, webview: &tauri::Webview) {
+pub fn on_page_finished(app: &AppHandle, tab_id: &str, webview: &crate::Webview) {
     if bootstrapped()
         .lock()
         .unwrap()
@@ -617,7 +618,7 @@ pub fn on_page_finished(app: &AppHandle, tab_id: &str, webview: &tauri::Webview)
     let _ = webview.eval(bootstrap_script());
 }
 
-fn tab_webview(app: &AppHandle, tab_id: &str) -> Option<tauri::Webview> {
+fn tab_webview(app: &AppHandle, tab_id: &str) -> Option<crate::Webview> {
     let label = app
         .state::<crate::AppState>()
         .browsers
