@@ -32,9 +32,60 @@ jobs:
           key: release-verify
       - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run check:security-mutations
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories licenses sources
       - run: npm run check:quality
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:browser
+
+  sbom:
+    needs: verify
+    name: Dual-runtime SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.23.2
+          cache: npm
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: . -> target
+          key: release-sbom-cargo-cyclonedx-0.5.9
+      - run: npm ci
+      - name: Generate source and runtime-specific CycloneDX SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          test "v${version}" = "$GITHUB_REF_NAME"
+          npm sbom --sbom-format cyclonedx --omit=dev > "Tabverse_${version}_source-npm.cdx.json"
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx \
+            --manifest-path src-tauri/Cargo.toml \
+            --format json \
+            --all \
+            --no-default-features \
+            --features runtime-wry \
+            --target aarch64-apple-darwin \
+            --override-filename "Tabverse_${version}_aarch64-wry.cdx"
+          cargo cyclonedx \
+            --manifest-path src-tauri/Cargo.toml \
+            --format json \
+            --all \
+            --no-default-features \
+            --features runtime-cef \
+            --target aarch64-apple-darwin \
+            --override-filename "Tabverse_${version}_aarch64-cef.cdx"
+          mv "src-tauri/Tabverse_${version}_aarch64-wry.cdx.json" .
+          mv "src-tauri/Tabverse_${version}_aarch64-cef.cdx.json" .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-sbom
+          path: Tabverse_*.cdx.json
+          if-no-files-found: error
 
   build:
     needs: [verify, resident-service]
@@ -50,12 +101,14 @@ jobs:
             bundle: dmg
             extension: dmg
             asset_suffix: x64.dmg
+            architecture: x86_64
           - label: macOS ARM64 installer
             os: macos-26
             target: aarch64-apple-darwin
             bundle: dmg
             extension: dmg
             asset_suffix: aarch64.dmg
+            architecture: arm64
           - label: Windows x64 installer
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -96,6 +149,17 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
       - run: npm ci
+      - name: Require release signing environment
+        run: node tools/check-release-environment.mjs
+        env:
+          TABVERSE_RELEASE_PLATFORM: ${{ runner.os }}
+          TABVERSE_RESIDENT_SIGNING_KEY_HEX: ${{ secrets.TABVERSE_RESIDENT_SIGNING_KEY_HEX }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       - name: Build signed Resident artifacts
         run: npm run build:resident-artifacts
         env:
@@ -110,6 +174,12 @@ jobs:
           --bundles ${{ matrix.bundle }}
         env:
           TABVERSE_RESIDENT_SIGNING_KEY_HEX: ""
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Preserve the byte-exact signed Resident workers in Linux AppImages.
           NO_STRIP: "1"
       - name: Name release asset
@@ -124,6 +194,9 @@ jobs:
           asset="Tabverse_${version}_${{ matrix.asset_suffix }}"
           cp "$source" "$asset"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      - name: Verify Developer ID signature, notarization, architecture, and Wry payload
+        if: runner.os == 'macOS'
+        run: node tools/verify-macos-release.mjs "${{ steps.asset.outputs.asset }}" wry "${{ matrix.architecture }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.target }}
@@ -148,22 +221,60 @@ jobs:
           workspaces: . -> target
           key: release-macos-26-aarch64-apple-darwin-cef
       - run: npm ci
+      - name: Verify CEF release feature
+        run: |
+          cargo clippy --workspace --all-targets --no-default-features --features runtime-cef -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features runtime-cef remote_proxy::tests
+      - name: Install the pinned CEF-aware Tauri CLI
+        run: >-
+          cargo install tauri-cli
+          --git https://github.com/spalagu/tauri.git
+          --rev 0f3325d8a5065b7be484d09a3800cb598c2dfb07
+          --locked
+      - name: Prepare the pinned CEF distribution and license resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          cef_path="$(find target -path '*/build/cef-dll-sys-*/out/cef_macos_aarch64' -type d -print -quit)"
+          test -n "$cef_path"
+          node tools/prepare-cef-release.mjs \
+            --distribution "$cef_path" \
+            --output target/cef-release-config.json
+          echo "CEF_PATH=$PWD/target/cef-release-cache" >> "$GITHUB_ENV"
+      - name: Require release signing environment
+        run: node tools/check-release-environment.mjs
+        env:
+          TABVERSE_RELEASE_PLATFORM: ${{ runner.os }}
+          TABVERSE_RESIDENT_SIGNING_KEY_HEX: ${{ secrets.TABVERSE_RESIDENT_SIGNING_KEY_HEX }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       - name: Build signed Resident artifacts
         run: npm run build:resident-artifacts
         env:
           TABVERSE_BUILD_TARGET: aarch64-apple-darwin
           TABVERSE_RESIDENT_SIGNING_KEY_HEX: ${{ secrets.TABVERSE_RESIDENT_SIGNING_KEY_HEX }}
       - name: Build CEF installer without signing key in the process environment
-        run: >-
+        run: |
+          set -euo pipefail
           node -e "if (process.env.TABVERSE_RESIDENT_SIGNING_KEY_HEX) throw new Error('Resident signing key leaked past the signing step')"
-          && npm run tauri build --
-          --config '{"build":{"beforeBuildCommand":"npm run build"}}'
-          --features runtime-cef
-          --target aarch64-apple-darwin
-          --bundles dmg
-          -- --no-default-features
+          cargo tauri build \
+            --config target/cef-release-config.json \
+            --features runtime-cef \
+            --target aarch64-apple-darwin \
+            --bundles dmg \
+            -- --no-default-features
         env:
           TABVERSE_RESIDENT_SIGNING_KEY_HEX: ""
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       - name: Name CEF release asset
         id: asset
         shell: bash
@@ -176,17 +287,78 @@ jobs:
           asset="Tabverse_${version}_aarch64-cef.dmg"
           cp "$source" "$asset"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      - name: Verify Developer ID signature, notarization, architecture, and CEF payload
+        run: node tools/verify-macos-release.mjs "${{ steps.asset.outputs.asset }}" cef arm64
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-aarch64-apple-darwin-cef
           path: ${{ steps.asset.outputs.asset }}
           if-no-files-found: error
 
-  publish:
+  macos-arm64-gate:
     needs: [build, build-cef]
+    name: macOS ARM64 offline install and rollback gate
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.23.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-aarch64-apple-darwin
+          path: candidate-wry
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-aarch64-apple-darwin-cef
+          path: candidate-cef
+      - name: Download the previous default Wry release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          baseline_tag="$(gh release list \
+            --repo "$GITHUB_REPOSITORY" \
+            --exclude-drafts \
+            --exclude-pre-releases \
+            --limit 100 \
+            --json tagName \
+            --jq '.[].tagName' \
+            | awk -v current="$GITHUB_REF_NAME" '$0 != current { print; exit }')"
+          test -n "$baseline_tag"
+          gh release download "$baseline_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Tabverse_*_aarch64.dmg' \
+            --dir baseline
+          echo "baseline_tag=$baseline_tag" >> "$GITHUB_ENV"
+      - name: Verify offline Wry to CEF to Wry replacement
+        run: |
+          set -euo pipefail
+          baseline="$(find baseline -name 'Tabverse_*_aarch64.dmg' -type f -print -quit)"
+          wry="$(find candidate-wry -name 'Tabverse_*_aarch64.dmg' -type f -print -quit)"
+          cef="$(find candidate-cef -name 'Tabverse_*_aarch64-cef.dmg' -type f -print -quit)"
+          test -n "$baseline" && test -n "$wry" && test -n "$cef"
+          node tools/verify-runtime-rollback.mjs \
+            --baseline-wry "$baseline" \
+            --candidate-wry "$wry" \
+            --candidate-cef "$cef" \
+            --state-fixture tools/fixtures/runtime-rollback/session.json \
+            --baseline-tag "$baseline_tag" \
+            --max-cef-delta-mib 325 \
+            --output runtime-rollback.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: acceptance-macos-arm64-runtime-rollback
+          path: runtime-rollback.json
+          if-no-files-found: error
+
+  publish:
+    needs: [build, build-cef, sbom, macos-arm64-gate]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -194,9 +366,21 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: release-assets
-      - name: Write release checksums
+      - name: Write release manifest and checksums
         working-directory: release-assets
-        run: sha256sum * > SHA256SUMS
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('../package.json').version")"
+          node ../tools/release-manifest.mjs \
+            --directory . \
+            --version "$version" \
+            --tag "$GITHUB_REF_NAME" \
+            --commit "$GITHUB_SHA" \
+            --output RELEASE-MANIFEST.json
+          sha256sum * > SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-assets/*
       - name: Write release notes
         shell: bash
         run: |

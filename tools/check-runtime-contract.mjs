@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { expectedReleaseAssets } from "./release-manifest.mjs";
 
 const cargo = await readFile(
   new URL("../src-tauri/Cargo.toml", import.meta.url),
@@ -6,6 +7,10 @@ const cargo = await readFile(
 );
 const rootCargo = await readFile(
   new URL("../Cargo.toml", import.meta.url),
+  "utf8",
+);
+const cargoLock = await readFile(
+  new URL("../Cargo.lock", import.meta.url),
   "utf8",
 );
 const main = await readFile(
@@ -56,6 +61,23 @@ const joinApp = await readFile(
   new URL("../apps/join/src/App.tsx", import.meta.url),
   "utf8",
 );
+const releaseEnvironment = await readFile(
+  new URL("./check-release-environment.mjs", import.meta.url),
+  "utf8",
+);
+const macosReleaseVerifier = await readFile(
+  new URL("./verify-macos-release.mjs", import.meta.url),
+  "utf8",
+);
+const cefReleasePreparation = await readFile(
+  new URL("./prepare-cef-release.mjs", import.meta.url),
+  "utf8",
+);
+const runtimeRollbackVerifier = await readFile(
+  new URL("./verify-runtime-rollback.mjs", import.meta.url),
+  "utf8",
+);
+const releaseAssets = expectedReleaseAssets("0.0.0");
 const forkRevisions = [
   ...rootCargo.matchAll(
     /(?:tauri|tauri-build) = \{ git = "https:\/\/github\.com\/spalagu\/tauri\.git", rev = "([0-9a-f]{40})" \}/g,
@@ -85,6 +107,14 @@ const checks = [
     "tauri, tauri-build and tauri-runtime-cef must share one immutable public fork revision",
   ],
   [
+    cargoLock.includes('name = "cef"\nversion = "151.1.0+151.3.12"') &&
+      cargoLock.includes(
+        'name = "cef-dll-sys"\nversion = "151.1.0+151.3.12"',
+      ) &&
+      cargoLock.includes('name = "download-cef"\nversion = "2.3.2"'),
+    "CEF Rust bindings, binary distribution, or downloader lock drifted",
+  ],
+  [
     main.includes(
       '#[cfg_attr(feature = "runtime-cef", tauri::cef_entry_point)]',
     ),
@@ -109,9 +139,60 @@ const checks = [
     "macOS ARM64 CEF asset or exclusive build arguments are missing",
   ],
   [
-    release.includes("needs: [build, build-cef]") &&
+    release.includes("cargo install tauri-cli") &&
+      release.includes("--git https://github.com/spalagu/tauri.git") &&
+      release.includes("--rev 0f3325d8a5065b7be484d09a3800cb598c2dfb07") &&
+      release.includes("cargo tauri build") &&
+      release.includes("--config target/cef-release-config.json") &&
+      release.includes("tools/prepare-cef-release.mjs") &&
+      cefReleasePreparation.includes("CEF-CREDITS.html.gz"),
+    "CEF release must build and bundle with the pinned CEF-aware Tauri CLI",
+  ],
+  [
+    release.includes("needs: [build, build-cef, sbom, macos-arm64-gate]") &&
       release.includes("pattern: release-*"),
-    "GitHub Release does not wait for both Wry and CEF artifacts",
+    "GitHub Release does not wait for Wry, CEF, SBOM, and rollback gates",
+  ],
+  [
+    releaseAssets.filter(
+      (asset) => asset.kind === "installer" && asset.runtime === "wry",
+    ).length === 6 &&
+      releaseAssets.filter(
+        (asset) => asset.kind === "installer" && asset.runtime === "cef",
+      ).length === 1 &&
+      releaseAssets
+        .filter((asset) => asset.runtime === "cef")
+        .every((asset) => asset.name.includes("-cef")),
+    "release manifest does not preserve the six default Wry assets and one macOS ARM64 CEF asset",
+  ],
+  [
+    releaseEnvironment.includes('"APPLE_CERTIFICATE"') &&
+      releaseEnvironment.includes('"APPLE_SIGNING_IDENTITY"') &&
+      releaseEnvironment.includes('"APPLE_TEAM_ID"') &&
+      release.includes("verify-macos-release.mjs") &&
+      macosReleaseVerifier.includes('"stapler", "validate"') &&
+      macosReleaseVerifier.includes("Chromium Embedded Framework.framework") &&
+      macosReleaseVerifier.includes("CEF-CREDITS.html.gz"),
+    "release signing and notarization must be secret-gated and artifact-verified",
+  ],
+  [
+    release.includes("macos-arm64-gate:") &&
+      release.includes("tools/verify-runtime-rollback.mjs") &&
+      release.includes("--max-cef-delta-mib 325") &&
+      runtimeRollbackVerifier.includes("sequence: observed") &&
+      runtimeRollbackVerifier.includes("cefProfilePreserved: true"),
+    "macOS ARM64 release must preserve state and CEF profile across Wry/CEF replacement",
+  ],
+  [
+    release.includes("cargo-cyclonedx --version 0.5.9 --locked") &&
+      release.includes("--features runtime-wry") &&
+      release.includes("--features runtime-cef") &&
+      release.includes("npm sbom --sbom-format cyclonedx") &&
+      release.includes(
+        "actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8",
+      ) &&
+      release.includes("tools/release-manifest.mjs"),
+    "release SBOM or same-commit provenance gate is missing",
   ],
   [
     browserPort.includes('"browser_session_ensure"') &&
