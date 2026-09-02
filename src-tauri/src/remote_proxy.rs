@@ -1423,11 +1423,11 @@ fn exchange(
     if target.tls {
         return exchange_tls(head, body, budget, &target);
     }
-    let addresses = network_broker::approve_addresses(
-        network_broker::system_resolve(&target.host, target.port)?,
-        target.port,
-        TargetPolicy::LocalNavigation,
-    )?;
+    let resolved = network_broker::system_resolve(&target.host, target.port)
+        .map_err(|_| "the host resolved to no address".to_string())?;
+    let addresses =
+        network_broker::approve_addresses(resolved, target.port, TargetPolicy::LocalNavigation)
+            .map_err(|_| "the host resolved to no address".to_string())?;
     let deadline = Deadline(Instant::now() + budget);
     let mut stream = connect_within(&addresses, &deadline)
         .ok_or_else(|| "no address accepted the connection".to_string())?;

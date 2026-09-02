@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { STR } from "./strings";
+import { mirroredDocument } from "./remoteDocument";
 
 /** The pane's one route to the host's network — App hands it the proxy
  * client's requestViaProxy. */
@@ -21,69 +22,6 @@ function refusalOf(res: Response): string {
   }
   // ok, but not a document the pane can render.
   return STR.remote.web.browserPane.unmirroredType;
-}
-
-/** The URL a document's relative subresources resolve against: its own
- * directory, query dropped — the standard base of an HTML page. */
-function documentBase(url: string): string {
-  const u = new URL(url);
-  const dir = u.pathname.slice(0, u.pathname.lastIndexOf("/") + 1);
-  return `${u.protocol}//${u.host}${dir}`;
-}
-
-function rewriteDocumentUrls(
-  html: string,
-  documentUrl: string,
-  resolveProxyUrl: (target: string) => string,
-): string {
-  const rewrite = (raw: string): string => {
-    const value = raw.trim();
-    if (
-      value === "" ||
-      value.startsWith("#") ||
-      /^(?:data|blob|javascript|mailto|tel):/i.test(value)
-    ) return raw;
-    try {
-      const target = new URL(value, documentUrl);
-      return /^https?:$/.test(target.protocol) ? resolveProxyUrl(target.href) : raw;
-    } catch {
-      return raw;
-    }
-  };
-  const attributes = html.replace(
-    /\b(src|href|action|poster)\s*=\s*(["'])(.*?)\2/gi,
-    (_all, name: string, quote: string, value: string) =>
-      `${name}=${quote}${rewrite(value)}${quote}`,
-  );
-  return attributes.replace(
-    /url\(\s*(["']?)(.*?)\1\s*\)/gi,
-    (_all, quote: string, value: string) => {
-      const rewritten = rewrite(value);
-      return `url(${quote}${rewritten}${quote})`;
-    },
-  );
-}
-
-/**
- * The document as the pane renders it: our <base> first in <head> —
- * document order decides which base wins, and ours names the proxy
- * endpoint the pane's whole mirror is addressed by — with a synthetic
- * head for documents that ship without one.
- */
-function mirroredDocument(
-  html: string,
-  url: string,
-  resolveProxyUrl: (target: string) => string,
-): string {
-  html = rewriteDocumentUrls(html, url, resolveProxyUrl);
-  const tag = `<base href="${resolveProxyUrl(documentBase(url))}">`;
-  if (/<head[^>]*>/i.test(html)) {
-    return html.replace(/<head([^>]*)>/i, `<head$1>${tag}`);
-  }
-  if (/<html[^>]*>/i.test(html)) {
-    return html.replace(/<html([^>]*)>/i, `<html$1><head>${tag}</head>`);
-  }
-  return `<html><head>${tag}</head><body>${html}</body></html>`;
 }
 
 export function BrowserPane({
@@ -171,14 +109,13 @@ export function BrowserPane({
   }
   return (
     <div className="browser-pane browser-pane-mirrored">
-      {/* allow-same-origin, no allow-scripts: the document's relative
-          URLs load against this origin (no CORS wall on top of the
-          endpoint 404s), while nothing it carries can execute — the
-          sandbox omits script permission entirely. */}
+      {/* Empty sandbox: no scripts, forms, popups, downloads, navigation or
+          same-origin authority. Static subresources use rewritten host proxy
+          URLs and the document CSP. */}
       <iframe
         className="browser-pane-frame"
         title={STR.remote.web.browserPane.frameTitle({ url })}
-        sandbox="allow-same-origin"
+        sandbox=""
         srcDoc={state.doc}
       />
       <span className="browser-pane-chip">

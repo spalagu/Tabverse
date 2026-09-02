@@ -9,6 +9,7 @@ const mutations = [
   {
     kind: "rust",
     id: "allow-prohibited-addresses",
+    path: "src-tauri/src/network_broker/mod.rs",
     before: `        IpAddr::V4(ip) => {
             ip.is_link_local()
                 || ip.is_broadcast()
@@ -60,11 +61,27 @@ for (const mutation of mutations) {
       }
       writeFileSync(file, source.replace(mutation.before, mutation.after));
     } else {
-      writeFileSync(file, `// agentRuntime manifest createAgentRuntime\n${source}`);
+      writeFileSync(
+        file,
+        `// agentRuntime manifest createAgentRuntime\n${source}`,
+      );
     }
-    const argv = mutation.kind === "rust"
-      ? ["cargo", ["test", "--offline", "--locked", "-p", "tabverse", mutation.test, "--", "--exact"]]
-      : [process.execPath, ["tools/check-agent-retirement.mjs"]];
+    const argv =
+      mutation.kind === "rust"
+        ? [
+            "cargo",
+            [
+              "test",
+              "--offline",
+              "--locked",
+              "-p",
+              "tabverse",
+              mutation.test,
+              "--",
+              "--exact",
+            ],
+          ]
+        : [process.execPath, ["tools/check-agent-retirement.mjs"]];
     const run = spawnSync(argv[0], argv[1], {
       cwd: worktree,
       encoding: "utf8",
@@ -72,9 +89,14 @@ for (const mutation of mutations) {
       maxBuffer: 16 * 1024 * 1024,
     });
     const output = `${run.stdout ?? ""}\n${run.stderr ?? ""}`;
-    const killed = mutation.kind === "rust"
-      ? run.status !== 0 && output.includes(mutation.test) && output.includes("FAILED")
-      : run.status !== 0 && output.includes(mutation.path) && output.includes("unclassified");
+    const killed =
+      mutation.kind === "rust"
+        ? run.status !== 0 &&
+          output.includes(mutation.test) &&
+          output.includes("FAILED")
+        : run.status !== 0 &&
+          output.includes(mutation.path) &&
+          output.includes("unclassified");
     results.push({
       id: mutation.id,
       test: mutation.test ?? "tools/check-agent-retirement.mjs",
@@ -98,6 +120,9 @@ const result = {
   mutations: results,
 };
 process.stdout.write(`${JSON.stringify(result)}\n`);
-if (results.length !== mutations.length || results.some((entry) => !entry.mutationKilled)) {
+if (
+  results.length !== mutations.length ||
+  results.some((entry) => !entry.mutationKilled)
+) {
   process.exitCode = 1;
 }

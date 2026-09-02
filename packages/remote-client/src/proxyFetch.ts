@@ -1,4 +1,3 @@
-
 /** Milliseconds one proxied request may take page-side — the same
  * whole-exchange budget the host's proxy enforces (remote_proxy.rs's
  * REQ_DEADLINE). Whichever expires first surfaces as a rejection; the
@@ -66,7 +65,7 @@ export function targetFromProxyUrl(url: URL): string | null {
 export type ProxyReqSend = (
   id: number,
   head: string,
-  body: string | undefined
+  body: string | undefined,
 ) => void;
 
 /** One request head as the host's proxy parses it (remote_proxy.rs
@@ -98,7 +97,7 @@ function buildRequestHead(req: Request, body: string | undefined): string {
 function responseFrom(head: string, bodyB64: string | undefined): Response {
   const lines = head.split(/\r?\n/);
   const statusMatch = /^HTTP\/\d(?:\.\d)? (\d+)(?: (.*))?$/.exec(
-    lines[0] ?? ""
+    lines[0] ?? "",
   );
   if (statusMatch === null) {
     throw new Error("the host's proxy answer was not an HTTP head");
@@ -142,7 +141,7 @@ export interface ProxyClient {
    * status is a resolved Response, the same split window.fetch has. */
   requestViaProxy(
     input: string | URL | Request,
-    init?: RequestInit
+    init?: RequestInit,
   ): Promise<Response>;
   /** A proxyRes landed: resolve the waiter it correlates. Unknown ids —
    * already answered, timed out, or never ours — are dropped silently. */
@@ -190,7 +189,12 @@ export type BrowserStreamHostFrame =
     }
   | { type: "browserResponseChunk"; streamId: number; seq: number; b64: string }
   | { type: "browserResponseEnd"; streamId: number }
-  | { type: "browserResponseError"; streamId: number; code: string; message: string };
+  | {
+      type: "browserResponseError";
+      streamId: number;
+      code: string;
+      message: string;
+    };
 
 interface BrowserWaiting {
   readonly method: string;
@@ -217,6 +221,7 @@ export interface BrowserStreamClient {
 const STREAM_ID_START = 2 ** 31;
 const REQUEST_CHUNK_BYTES = 64 * 1024;
 const INITIAL_RESPONSE_CREDIT = 512 * 1024;
+export const MAX_BROWSER_REQUEST_BYTES = 16 * 1024 * 1024;
 
 function bytesToB64(bytes: Uint8Array): string {
   let binary = "";
@@ -233,6 +238,40 @@ function b64ToBytes(value: string): Uint8Array {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes;
+}
+
+async function boundedRequestBody(request: Request): Promise<Uint8Array> {
+  if (
+    request.method === "GET" ||
+    request.method === "HEAD" ||
+    request.body === null
+  ) {
+    return new Uint8Array();
+  }
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_BROWSER_REQUEST_BYTES) {
+    throw new Error("request-too-large: request body exceeds stream budget");
+  }
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_BROWSER_REQUEST_BYTES) {
+      await reader.cancel("request body exceeds stream budget");
+      throw new Error("request-too-large: request body exceeds stream budget");
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
 }
 
 /** Browser A's http-stream-v2 client: binary request chunks up, a
@@ -252,15 +291,17 @@ export function createBrowserStreamClient(
     init?: RequestInit,
   ): Promise<Response> {
     const owner = attachment();
-    if (owner === null) throw new Error("browser stream has no live attachment");
+    if (owner === null)
+      throw new Error("browser stream has no live attachment");
     const request = new Request(input, init);
     if (!/^https?:$/.test(new URL(request.url).protocol)) {
       throw new Error("Browser A carries HTTP(S) only");
     }
-    if (request.signal.aborted) throw new DOMException("request aborted", "AbortError");
-    const body = request.method === "GET" || request.method === "HEAD"
-      ? new Uint8Array()
-      : new Uint8Array(await request.arrayBuffer());
+    if (request.signal.aborted)
+      throw new DOMException("request aborted", "AbortError");
+    const body = await boundedRequestBody(request);
+    if (request.signal.aborted)
+      throw new DOMException("request aborted", "AbortError");
     const streamId = ++nextStreamId;
     const headers: Array<[string, string]> = [];
     request.headers.forEach((value, name) => headers.push([name, value]));
@@ -283,7 +324,11 @@ export function createBrowserStreamClient(
         waiting.delete(streamId);
         send.cancel(streamId, "response-head-timeout");
         current.abort?.();
-        current.reject(new Error(`browser response head timed out after ${PROXY_TIMEOUT_MS}ms`));
+        current.reject(
+          new Error(
+            `browser response head timed out after ${PROXY_TIMEOUT_MS}ms`,
+          ),
+        );
       }, PROXY_TIMEOUT_MS);
       waiting.set(streamId, {
         method: request.method,
@@ -306,7 +351,11 @@ export function createBrowserStreamClient(
         headers,
         bodyLen: body.length === 0 ? undefined : body.length,
       });
-      for (let offset = 0, seq = 0; offset < body.length; offset += REQUEST_CHUNK_BYTES, seq += 1) {
+      for (
+        let offset = 0, seq = 0;
+        offset < body.length;
+        offset += REQUEST_CHUNK_BYTES, seq += 1
+      ) {
         send.requestChunk(
           streamId,
           seq,
@@ -320,13 +369,15 @@ export function createBrowserStreamClient(
 
   function consume(frame: unknown): boolean {
     if (typeof frame !== "object" || frame === null) return false;
-    const value = frame as Partial<BrowserStreamHostFrame> & Record<string, unknown>;
+    const value = frame as Partial<BrowserStreamHostFrame> &
+      Record<string, unknown>;
     if (
       value.type !== "browserResponseHead" &&
       value.type !== "browserResponseChunk" &&
       value.type !== "browserResponseEnd" &&
       value.type !== "browserResponseError"
-    ) return false;
+    )
+      return false;
     const streamId = Number(value.streamId);
     const current = waiting.get(streamId);
     if (current === undefined) return true;
@@ -335,25 +386,39 @@ export function createBrowserStreamClient(
       if (current.settled) return true;
       clearTimeout(current.headTimer);
       const status = Number(value.status);
-      const nullBody = current.method === "HEAD" || status === 204 || status === 205 || status === 304;
+      const nullBody =
+        current.method === "HEAD" ||
+        status === 204 ||
+        status === 205 ||
+        status === 304;
       let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-      const body = nullBody ? null : new ReadableStream<Uint8Array>({
-        start(next) {
-          controller = next;
-          current.controller = next;
-        },
-        pull() {
-          if (current.uncreditedBytes > 0) {
-            send.credit(streamId, current.uncreditedBytes);
-            current.uncreditedBytes = 0;
-          }
-        },
-        cancel(reason) {
-          send.cancel(streamId, String(reason ?? "response-body-cancelled"));
-          waiting.delete(streamId);
-          current.abort?.();
-        },
-      }, new ByteLengthQueuingStrategy({ highWaterMark: INITIAL_RESPONSE_CREDIT }));
+      const body = nullBody
+        ? null
+        : new ReadableStream<Uint8Array>(
+            {
+              start(next) {
+                controller = next;
+                current.controller = next;
+              },
+              pull() {
+                if (current.uncreditedBytes > 0) {
+                  send.credit(streamId, current.uncreditedBytes);
+                  current.uncreditedBytes = 0;
+                }
+              },
+              cancel(reason) {
+                send.cancel(
+                  streamId,
+                  String(reason ?? "response-body-cancelled"),
+                );
+                waiting.delete(streamId);
+                current.abort?.();
+              },
+            },
+            new ByteLengthQueuingStrategy({
+              highWaterMark: INITIAL_RESPONSE_CREDIT,
+            }),
+          );
       const headers = new Headers(value.headers as Array<[string, string]>);
       if (typeof value.finalUrl === "string") {
         headers.set("x-tabverse-final-url", value.finalUrl);
@@ -364,10 +429,14 @@ export function createBrowserStreamClient(
       return true;
     }
     if (value.type === "browserResponseChunk") {
-      if (Number(value.seq) !== current.expectedSeq || current.controller === undefined) {
+      if (
+        Number(value.seq) !== current.expectedSeq ||
+        current.controller === undefined
+      ) {
         send.cancel(streamId, "response-chunk-gap");
         current.controller?.error(new Error("browser response chunk gap"));
-        if (!current.settled) current.reject(new Error("browser response chunk gap"));
+        if (!current.settled)
+          current.reject(new Error("browser response chunk gap"));
         current.abort?.();
         clearTimeout(current.headTimer);
         waiting.delete(streamId);
@@ -391,9 +460,12 @@ export function createBrowserStreamClient(
     current.abort?.();
     if (value.type === "browserResponseEnd") {
       current.controller?.close();
-      if (!current.settled) current.reject(new Error("browser response ended before its head"));
+      if (!current.settled)
+        current.reject(new Error("browser response ended before its head"));
     } else {
-      const error = new Error(`${String(value.code)}: ${String(value.message)}`);
+      const error = new Error(
+        `${String(value.code)}: ${String(value.message)}`,
+      );
       current.controller?.error(error);
       if (!current.settled) current.reject(error);
     }
@@ -429,7 +501,7 @@ export function createProxyClient(send: ProxyReqSend): ProxyClient {
 
   function requestViaProxy(
     input: string | URL | Request,
-    init?: RequestInit
+    init?: RequestInit,
   ): Promise<Response> {
     // Request does the merging and the URL validation the platform
     // already promises; the head is built from the normalized result.
@@ -448,8 +520,8 @@ export function createProxyClient(send: ProxyReqSend): ProxyClient {
           waiting.delete(id);
           reject(
             new Error(
-              `proxied fetch of ${new URL(req.url).host} timed out after ${PROXY_TIMEOUT_MS}ms`
-            )
+              `proxied fetch of ${new URL(req.url).host} timed out after ${PROXY_TIMEOUT_MS}ms`,
+            ),
           );
         }, PROXY_TIMEOUT_MS);
         waiting.set(id, { timer, resolve, reject });
@@ -483,8 +555,8 @@ export function createProxyClient(send: ProxyReqSend): ProxyClient {
     clearTimeout(w.timer);
     w.reject(
       new Error(
-        typeof f.err === "string" ? f.err : "the host's proxy request failed"
-      )
+        typeof f.err === "string" ? f.err : "the host's proxy request failed",
+      ),
     );
     return true;
   }
@@ -502,13 +574,13 @@ export function createProxyClient(send: ProxyReqSend): ProxyClient {
 
 export function installProxyFetchPatch(
   client: Pick<ProxyClient, "requestViaProxy">,
-  href: () => string = () => location.href
+  href: () => string = () => location.href,
 ): () => void {
   const original = globalThis.fetch;
   const pageOrigin = new URL(href()).origin;
   const patched = (
     input: RequestInfo | URL,
-    init?: RequestInit
+    init?: RequestInit,
   ): Promise<Response> => {
     let url: URL;
     try {

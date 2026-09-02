@@ -40,6 +40,22 @@ const remoteProxy = await readFile(
   new URL("../src-tauri/src/remote_proxy.rs", import.meta.url),
   "utf8",
 );
+const remoteDocument = await readFile(
+  new URL("../packages/workbench/src/remoteDocument.ts", import.meta.url),
+  "utf8",
+);
+const remoteBrowserPane = await readFile(
+  new URL("../packages/workbench/src/BrowserPane.tsx", import.meta.url),
+  "utf8",
+);
+const remoteClient = await readFile(
+  new URL("../packages/remote-client/src/proxyFetch.ts", import.meta.url),
+  "utf8",
+);
+const joinApp = await readFile(
+  new URL("../apps/join/src/App.tsx", import.meta.url),
+  "utf8",
+);
 const forkRevisions = [
   ...rootCargo.matchAll(
     /(?:tauri|tauri-build) = \{ git = "https:\/\/github\.com\/spalagu\/tauri\.git", rev = "([0-9a-f]{40})" \}/g,
@@ -135,6 +151,24 @@ const checks = [
       remoteProxy.includes("network_broker::connect_happy_eyeballs") &&
       !remoteProxy.includes("fn prohibited_address"),
     "Remote Browser router bypasses the shared NetworkBroker policy",
+  ],
+  [
+    remoteDocument.includes("DOMPurify.sanitize") &&
+      remoteDocument.includes("Content-Security-Policy") &&
+      remoteDocument.includes('"form"') &&
+      remoteDocument.includes('"script"') &&
+      remoteBrowserPane.includes('sandbox=""') &&
+      !remoteBrowserPane.includes("dangerouslySetInnerHTML"),
+    "Remote Browser renderer is not locked to a sanitized static sandbox",
+  ],
+  [
+    remoteClient.includes("MAX_BROWSER_REQUEST_BYTES") &&
+      remoteClient.includes("boundedRequestBody") &&
+      joinApp.includes(
+        'remoteTabSupportsPrivateStream(activeMirrorTab.type, "browser.http")',
+      ) &&
+      joinApp.includes("browserStream.requestViaHost(activeMirrorTab.id, url)"),
+    "Remote Browser mode, private routing or request-body budget is not locked",
   ],
 ];
 
