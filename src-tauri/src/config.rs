@@ -206,6 +206,8 @@ pub struct Config {
     #[serde(default)]
     pub terminal: Terminal,
     #[serde(default)]
+    pub resident: Resident,
+    #[serde(default)]
     pub files: Files,
     #[serde(default)]
     pub keys: Keys,
@@ -262,6 +264,11 @@ impl Default for Config {
                 // Same kind of fact, same recognition (see
                 // [`crate::templates`]).
                 templates: Vec::new(),
+            },
+            resident: Resident {
+                // Preserve current lifecycle until the user opts in. A
+                // Tab-level `on` may still override this app-wide default.
+                default: false,
             },
             // Files::default() and not a struct literal, for the same
             // reason as `keys` one line down with the polarity reversed:
@@ -366,6 +373,14 @@ pub struct Terminal {
     pub templates: Vec<crate::templates::Template>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resident {
+    /// Per-Tab inherit/on/off lives with session state; this is only the
+    /// device-wide value inherited by those tabs.
+    #[serde(default)]
+    pub default: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Files {
@@ -414,6 +429,12 @@ impl Default for Network {
 impl Default for Terminal {
     fn default() -> Self {
         Config::default().terminal
+    }
+}
+
+impl Default for Resident {
+    fn default() -> Self {
+        Config::default().resident
     }
 }
 
@@ -976,6 +997,12 @@ pub static SETTINGS: &[Setting] = &[
         section: "terminal-completions",
         str_key: "settings.completions.url",
     },
+    Setting {
+        key: "resident.default",
+        kind: Kind::Toggle,
+        section: "background-tasks",
+        str_key: "settings.backgroundTasks.residentDefault",
+    },
 ];
 
 /// The file sections that exist, including the three reserved ones. A table
@@ -986,6 +1013,7 @@ pub static SECTIONS: &[&str] = &[
     "browser",
     "network",
     "terminal",
+    "resident",
     "files",
     "keys",
 ];
@@ -2523,6 +2551,17 @@ mod tests {
     }
 
     #[test]
+    fn resident_default_is_opt_in_and_round_trips_in_its_own_section() {
+        assert!(!Config::default().resident.default);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write(dir.path(), "config.toml", "[resident]\ndefault = true\n");
+        let loaded = load_from_paths(&[path]).expect("the resident setting loads");
+        assert!(loaded.config.resident.default);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert!(SETTINGS.iter().any(|row| row.key == "resident.default"));
+    }
+
+    #[test]
     fn the_ligature_switch_is_off_until_asked_for_and_a_profile_may_differ() {
         assert!(
             !Config::default().terminal.ligatures,
@@ -2734,7 +2773,7 @@ mod tests {
         }
         assert_eq!(
             SETTINGS.len(),
-            17,
+            18,
             "the registry must contain every user-settable preference exactly \
              once; update this count only when adding or removing a registry row"
         );

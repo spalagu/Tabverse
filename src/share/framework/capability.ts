@@ -1,4 +1,4 @@
-import type { AgentAccess } from "../../backend/types";
+import type { ShareAccess as BackendShareAccess } from "../../backend/types";
 import type { TabType } from "../../state/store";
 import type { ViewerRegistration } from "./viewer";
 
@@ -9,8 +9,8 @@ import type { ViewerRegistration } from "./viewer";
  * somebody remembered to write.
  */
 
-/** The three levels a viewer can hold (the literal union AgentAccess names). */
-export type ShareAccess = AgentAccess;
+/** The three levels a viewer can hold. */
+export type ShareAccess = BackendShareAccess;
 
 /** How viewers render this share: the built-in xterm grid, or a registered
  * DOM pane fed by a fold. */

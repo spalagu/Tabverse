@@ -1,0 +1,36 @@
+[package]
+name = "tabverse-resident"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ed25519-dalek = "2"
+fs2 = "0.4"
+getrandom = "0.4"
+hex = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = "1"
+tabverse-term = { path = "../tabverse-term" }
+tabverse-remote = { path = "../tabverse-remote" }
+data-encoding = "2.11.0"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+wait-timeout = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Authentication_Identity", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tabverse-proto = { path = "../tabverse-proto" }

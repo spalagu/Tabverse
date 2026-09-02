@@ -976,6 +976,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_write_failure_is_reported_per_file_and_the_rest_still_land() {
         let dir = stamp_dir("failed");

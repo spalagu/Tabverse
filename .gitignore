@@ -10,6 +10,8 @@ src-tauri/gen/
 dist-web/
 apps/join/.offline-build/
 crates/tabverse-web/pkg/
+src-tauri/resources/resident/**
+!src-tauri/resources/resident/.gitkeep
 
 # Runtime state, logs, build output, and browser-test artifacts.
 sb[0-9]*/

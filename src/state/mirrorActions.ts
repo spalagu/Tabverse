@@ -6,17 +6,8 @@ import {
 import type { Tab, TabType } from "./store";
 import { useStore, type AppStore } from "./store";
 
-const TAB_TYPES: readonly TabType[] = [
-  "terminal",
-  "files",
-  "browser",
-  "settings",
-  "remote",
-  "agent",
-];
-
 export function isTabType(v: unknown): v is TabType {
-  return typeof v === "string" && TAB_TYPES.some((t) => t === v);
+  return typeof v === "string" && v.length > 0 && v !== "agent";
 }
 
 const isString = (v: unknown): v is string => typeof v === "string";

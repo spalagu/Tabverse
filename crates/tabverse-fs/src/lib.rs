@@ -13,6 +13,7 @@ pub use compress::{ExtractOutcome, MAX_EXTRACT_BYTES, MAX_EXTRACT_ENTRIES};
 pub use inspect::{
     ArchiveEntry, CertInfo, ExecArch, Inspection, SqliteRows, SqliteTable, MAX_ARCHIVE_ENTRIES,
 };
+pub mod session_migration;
 pub mod state;
 
 /// Change kind for one path, mapped from git's status flags.

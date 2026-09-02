@@ -2249,6 +2249,19 @@ tr.settings-hit td {
   padding: var(--sp-2) var(--sp-4);
 }
 
+.plugin-catalog-table td:first-child {
+  min-width: 16rem;
+}
+
+.plugin-catalog-table td:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.settings-plugin-note {
+  color: var(--danger, #b42318);
+}
+
 table.kv {
   border-collapse: collapse;
   width: 100%;

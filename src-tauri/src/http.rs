@@ -16,8 +16,8 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long to wait for the connection itself.
 ///
-/// Separate from any limit on the body, which is the distinction the agent's
-/// streamed answer depends on: a model that thinks for two minutes is
+/// Separate from any limit on the body, which is the distinction a streamed
+/// answer depends on: a server that thinks for two minutes is
 /// working, whereas a server that has not accepted a connection in thirty
 /// seconds is not going to.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -25,13 +25,13 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// What one call site needs that is different from every other.
 ///
 /// Deliberately three fields and not a list of purposes. A purpose enum would
-/// put the agent's "no total deadline" in this file, away from the comment
+/// put the "no total deadline" policy in this file, away from the comment
 /// that explains why, and the next call site would have to come here to be
 /// named at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Spec {
     /// The whole exchange's deadline. `None` means none — see
-    /// `agent_http::ReqwestTransport` for the one case where that is the
+    /// a streaming transport for the one case where that is the
     /// point rather than an oversight.
     pub timeout: Option<Duration>,
     /// The connection's own deadline.
@@ -209,7 +209,13 @@ pub fn build(spec: Spec) -> reqwest::Result<reqwest::Client> {
 /// implementation [`build`] is one line of: the policy is an argument here so
 /// that "which resolver did this client get" is answerable without a file.
 pub fn build_with(spec: Spec, policy: DnsPolicy) -> reqwest::Result<reqwest::Client> {
-    let builder = base(spec);
+    build_from(base(spec), policy)
+}
+
+fn build_from(
+    builder: reqwest::ClientBuilder,
+    policy: DnsPolicy,
+) -> reqwest::Result<reqwest::Client> {
     match policy {
         DnsPolicy::System => builder.build(),
         DnsPolicy::Doh(url) => {
@@ -217,6 +223,43 @@ pub fn build_with(spec: Spec, policy: DnsPolicy) -> reqwest::Result<reqwest::Cli
             builder.dns_resolver(Arc::new(resolver)).build()
         }
     }
+}
+
+/// Build Browser Remote's per-hop client after the grant evaluator has
+/// resolved and approved every address. Keeping the URL's hostname while
+/// pinning its socket addresses preserves TLS SNI/certificate checks and
+/// removes the DNS time-of-check/time-of-use gap.
+pub fn build_browser_stream_pinned(
+    host: &str,
+    addrs: &[SocketAddr],
+) -> reqwest::Result<reqwest::Client> {
+    base(Spec {
+        timeout: None,
+        connect_timeout: Some(Duration::from_secs(30)),
+        user_agent: None,
+    })
+    .read_timeout(Duration::from_secs(30))
+    .redirect(reqwest::redirect::Policy::none())
+    .resolve_to_addrs(host, addrs)
+    .build()
+}
+
+#[cfg(test)]
+pub(crate) fn build_browser_stream_pinned_with_root(
+    host: &str,
+    addrs: &[SocketAddr],
+    root: reqwest::Certificate,
+) -> reqwest::Result<reqwest::Client> {
+    base(Spec {
+        timeout: None,
+        connect_timeout: Some(Duration::from_secs(30)),
+        user_agent: None,
+    })
+    .read_timeout(Duration::from_secs(30))
+    .redirect(reqwest::redirect::Policy::none())
+    .resolve_to_addrs(host, addrs)
+    .add_root_certificate(root)
+    .build()
 }
 
 // ------------------------------------------------------------ DoH resolving
@@ -480,14 +523,15 @@ mod tests {
     }
 
     #[test]
-    fn every_reqwest_client_is_built_by_this_module() {
+    fn every_reqwest_client_is_built_by_an_audited_shared_factory() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("workspace root");
-        let factory = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/http.rs")
-            .canonicalize()
-            .expect("canonical factory path");
+        let factories = [
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http.rs"),
+            workspace.join("crates/tabverse-resident/src/http.rs"),
+        ]
+        .map(|path| path.canonicalize().expect("canonical factory path"));
         let mut sources = Vec::new();
         rust_sources(&workspace.join("src-tauri/src"), &mut sources);
         rust_sources(&workspace.join("crates"), &mut sources);
@@ -506,7 +550,7 @@ mod tests {
         ];
         let mut violations = Vec::new();
         for path in sources {
-            if path.canonicalize().expect("canonical source path") == factory {
+            if factories.contains(&path.canonicalize().expect("canonical source path")) {
                 continue;
             }
             let source = fs::read_to_string(&path).expect("read Rust source");
@@ -790,8 +834,8 @@ mod tests {
     // -------------------------------------------- the call sites keep theirs
 
     /// The whole-exchange deadline is a knob the factory really turns, and
-    /// `None` really means none — which is the property `agent_http`'s
-    /// streamed answer depends on.
+    /// `None` really means none — which is the property a streamed answer
+    /// depends on.
     #[test]
     fn a_total_deadline_cuts_a_slow_answer_off_and_no_deadline_does_not() {
         let page = page_server("slow but complete", Duration::from_millis(700));

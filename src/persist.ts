@@ -58,6 +58,31 @@ export type StateLoadResult<T> =
   | { kind: "read-failed" }
   | { kind: "invalid-json" };
 
+export interface SessionMigrationReport {
+  status: "missing" | "already-current" | "migrated" | "not-applicable";
+  backupSha256: string | null;
+  removedAgentTabs: number;
+  survivingTabs: number;
+}
+
+/**
+ * Run the desktop's crash-safe v1 -> v2 session transaction before startup
+ * reads the session. Browser-only demos have no filesystem transaction and
+ * instead rely on the restore reader's v1 compatibility.
+ */
+export async function migrateSessionStateV2(): Promise<SessionMigrationReport> {
+  if (!isTauri) {
+    return {
+      status: "not-applicable",
+      backupSha256: null,
+      removedAgentTabs: 0,
+      survivingTabs: 0,
+    };
+  }
+  const { invoke } = await import("@tauri-apps/api/core");
+  return await invoke<SessionMigrationReport>("state_migrate_session_v2");
+}
+
 const tauriOps: StateOps = {
   async save(scope, json) {
     const { invoke } = await import("@tauri-apps/api/core");

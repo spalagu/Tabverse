@@ -42,6 +42,9 @@ pub struct SessionMeta {
     pub id: SessionId,
     pub generation: u64,
     pub cwd: Option<String>,
+    /// Stable Tab/pane identity supplied by the GUI. It lets a replacement
+    /// GUI reconnect detached sessions without guessing from list order.
+    pub owner_key: Option<String>,
     pub exited: Option<Option<u32>>,
     pub attached: bool,
 }
@@ -55,6 +58,7 @@ struct RuntimeState {
 struct RuntimeSession {
     internal_id: String,
     cwd: Option<String>,
+    owner_key: Option<String>,
     generation: AtomicU64,
     state: Arc<Mutex<RuntimeState>>,
 }
@@ -92,6 +96,15 @@ impl HelperRuntime {
     pub fn spawn_with_sink(
         &self,
         opts: SpawnOpts,
+        sink_for: impl FnOnce(SessionId) -> SessionSink,
+    ) -> Result<SessionId> {
+        self.spawn_with_sink_owned(opts, None, sink_for)
+    }
+
+    pub fn spawn_with_sink_owned(
+        &self,
+        opts: SpawnOpts,
+        owner_key: Option<String>,
         sink_for: impl FnOnce(SessionId) -> SessionSink,
     ) -> Result<SessionId> {
         let _lifecycle = self.lifecycle.lock().unwrap();
@@ -136,6 +149,7 @@ impl HelperRuntime {
             Arc::new(RuntimeSession {
                 internal_id,
                 cwd,
+                owner_key,
                 generation: AtomicU64::new(1),
                 state: Arc::clone(&state),
             }),
@@ -234,6 +248,7 @@ impl HelperRuntime {
                     id: *id,
                     generation: session.generation.load(Ordering::Acquire),
                     cwd: session.cwd.clone(),
+                    owner_key: session.owner_key.clone(),
                     exited: state.exited,
                     attached: state.sink.is_some(),
                 }
@@ -275,7 +290,7 @@ impl Drop for HelperRuntime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{sync::mpsc, thread, time::Duration};

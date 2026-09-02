@@ -10,7 +10,7 @@
     "url": "git+https://github.com/spalagu/Tabverse.git"
   },
   "engines": {
-    "node": ">=20"
+    "node": "22.23.2"
   },
   "packageManager": "npm@10.7.0",
   "type": "module",
@@ -21,12 +21,19 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:resident-artifacts": "node tools/prepare-resident-artifacts.mjs --release",
+    "build:resident-artifacts:debug": "node tools/prepare-resident-artifacts.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
     "test:browser": "playwright test",
     "check:workbench": "npm run -w @tabverse/workbench check && node tools/check-workbench-boundary.mjs",
-    "check:quality": "npm run check:workbench && npm run build && npm test && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
+    "check:architecture": "node tools/architecture/check-plugin-boundaries.mjs",
+    "check:agent-retirement": "node tools/check-agent-retirement.mjs",
+    "check:secrets": "node tools/check-secrets.mjs",
+    "check:security-mutations": "node tools/security-mutation-check.mjs",
+    "evidence:security": "node tools/run-local-security-evidence.mjs",
+    "check:quality": "npm run check:workbench && npm run check:architecture && npm run build && npm test && npm run check:agent-retirement && npm run check:secrets -- --require-artifact dist && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

@@ -2,6 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { coreLog } from "../errlog";
 import { MIRROR_ACTIONS, type MirrorStoreApi } from "./mirrorActions";
 import type { AppStore } from "./store";
+import {
+  isRemoteAppGroup,
+  isRemoteAppTab,
+  isRemoteAppTabKind,
+  remoteAppSnapshot,
+} from "../share/framework/remoteBoundary";
 
 /** The Rust half of the pipe: forwards to the bound app share's
  * broadcast_action, a no-op when no share is live. */
@@ -22,10 +28,14 @@ const hostGen: ProvenanceGen = {
 };
 
 /** How one broadcast leaves: the name and its wire args. */
-export type ActionSender = (name: string, args: unknown) => void;
+export type ActionSender = (name: string, args: unknown, state?: AppStore) => void;
 
-const tauriSend: ActionSender = (name, args) => {
-  void invoke(BROADCAST_COMMAND, { name, args }).catch((e) =>
+const tauriSend: ActionSender = (name, args, state) => {
+  void invoke(BROADCAST_COMMAND, {
+    name,
+    args,
+    snapshot: state === undefined ? null : remoteAppSnapshot(state),
+  }).catch((e) =>
     coreLog("error", `app share action broadcast failed: ${String(e)}`)
   );
 };
@@ -37,6 +47,7 @@ const tauriSend: ActionSender = (name, args) => {
 export interface WireContext {
   args: readonly unknown[];
   gen: ProvenanceGen;
+  before?: AppStore;
   after?: AppStore;
   ret?: unknown;
 }
@@ -58,7 +69,7 @@ export function wireArgsFor(name: string, ctx: WireContext): unknown {
     case "addTab": {
       if (typeof ctx.ret === "string" && ctx.after !== undefined) {
         const row = ctx.after.tabs.find((t) => t.id === ctx.ret);
-        if (row === undefined) return undefined;
+        if (!isRemoteAppTab(row)) return undefined;
         const out: Record<string, unknown> = {
           type: row.type,
           id: row.id,
@@ -75,6 +86,7 @@ export function wireArgsFor(name: string, ctx: WireContext): unknown {
       const partial = ctx.args[0];
       if (partial === null || typeof partial !== "object") return undefined;
       const src = partial as Record<string, unknown>;
+      if (!isRemoteAppTabKind(src.type)) return undefined;
       const out: Record<string, unknown> = { type: src.type };
       for (const field of TAB_WIRE_FIELDS) {
         const v = src[field];
@@ -92,6 +104,7 @@ export function wireArgsFor(name: string, ctx: WireContext): unknown {
         ctx.after !== undefined
           ? ctx.after.tabs.find((t) => t.id === id)
           : undefined;
+      if (ctx.after !== undefined && !isRemoteAppTab(row)) return undefined;
       const passed = ctx.args[1];
       return {
         id,
@@ -100,9 +113,23 @@ export function wireArgsFor(name: string, ctx: WireContext): unknown {
           (typeof passed === "number" ? passed : ctx.gen.now()),
       };
     }
-    case "closeTab":
-    case "splitWith":
-      return typeof ctx.args[0] === "string" ? ctx.args[0] : undefined;
+    case "closeTab": {
+      const id = ctx.args[0];
+      if (typeof id !== "string") return undefined;
+      return ctx.before === undefined || isRemoteAppTab(
+        ctx.before.tabs.find((tab) => tab.id === id),
+      ) ? id : undefined;
+    }
+    case "splitWith": {
+      const id = ctx.args[0];
+      if (typeof id !== "string") return undefined;
+      if (ctx.before === undefined) return id;
+      const target = ctx.before.tabs.find((tab) => tab.id === id);
+      const active = ctx.before.tabs.find(
+        (tab) => tab.id === ctx.before?.activeTabId,
+      );
+      return isRemoteAppTab(target) && isRemoteAppTab(active) ? id : undefined;
+    }
     case "setSidebarPeeking":
       return typeof ctx.args[0] === "boolean" ? ctx.args[0] : undefined;
     case "toggleSidebar":
@@ -120,24 +147,46 @@ export function wireArgsFor(name: string, ctx: WireContext): unknown {
       ) {
         return undefined;
       }
+      const state = ctx.after ?? ctx.before;
+      if (
+        state !== undefined &&
+        !isRemoteAppTab(state.tabs.find((tab) => tab.id === tabId))
+      ) return undefined;
       return { tabId, x, y };
     }
     case "renameTab": {
       const [id, title] = ctx.args;
       if (typeof id !== "string" || typeof title !== "string") return undefined;
+      const state = ctx.after ?? ctx.before;
+      if (
+        state !== undefined &&
+        !isRemoteAppTab(state.tabs.find((tab) => tab.id === id))
+      ) return undefined;
       return { id, title };
     }
-    case "toggleGroupCollapsed":
-      return typeof ctx.args[0] === "string" ? ctx.args[0] : undefined;
+    case "toggleGroupCollapsed": {
+      const id = ctx.args[0];
+      if (typeof id !== "string") return undefined;
+      const state = ctx.after ?? ctx.before;
+      return state === undefined || isRemoteAppGroup(state, id) ? id : undefined;
+    }
     case "setFilesOpenPath": {
       const [tabId, path] = ctx.args;
       if (typeof tabId !== "string") return undefined;
+      const state = ctx.after ?? ctx.before;
+      if (state !== undefined && state.tabs.find((tab) => tab.id === tabId)?.type !== "files") {
+        return undefined;
+      }
       if (path === null) return { tabId, path: null };
       return typeof path === "string" ? { tabId, path } : undefined;
     }
     case "setFilesOpenDir": {
       const [tabId, dir] = ctx.args;
       if (typeof tabId !== "string") return undefined;
+      const state = ctx.after ?? ctx.before;
+      if (state !== undefined && state.tabs.find((tab) => tab.id === tabId)?.type !== "files") {
+        return undefined;
+      }
       if (dir === null) return { tabId, dir: null };
       return typeof dir === "string" ? { tabId, dir } : undefined;
     }
@@ -186,14 +235,16 @@ export function installMirrorBroadcast(
     if (typeof orig !== "function") continue;
     originals[name] = orig;
     patch[name] = (...callArgs: unknown[]) => {
-      const ret = orig.apply(api.getState(), callArgs);
+      const before = api.getState();
+      const ret = orig.apply(before, callArgs);
       const wire = wireArgsFor(name, {
         args: callArgs,
         gen,
+        before,
         after: api.getState(),
         ret,
       });
-      if (wire !== undefined) send(name, wire);
+      if (wire !== undefined) send(name, wire, api.getState());
       return ret;
     };
   }

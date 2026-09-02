@@ -26,12 +26,10 @@ base64 = "0.22"
 rand = "0.10.2"
 # For the PKCE challenge only. Already in the lock file by way of the existing
 # tree, so declaring it adds no download and no compilation unit.
-sha2 = "0.10"
 tabverse-proto = { path = "../crates/tabverse-proto" }
 tabverse-term = { path = "../crates/tabverse-term" }
-tabverse-agent = { path = "../crates/tabverse-agent" }
-tabverse-agent-tools = { path = "../crates/tabverse-agent-tools" }
 tabverse-remote = { path = "../crates/tabverse-remote" }
+tabverse-resident = { path = "../crates/tabverse-resident" }
 tabverse-fs = { version = "0.1.0", path = "../crates/tabverse-fs" }
 toml = "1"
 toml_edit = { version = "0.25", features = ["serde"] }
@@ -41,16 +39,10 @@ tauri-plugin-dialog = "2"
 aes-gcm = "0.10"
 argon2 = "0.5"
 zeroize = "1"
+hex = "0.4"
+sha2 = "0.10"
 percent-encoding = "2"
 reqwest = { version = "0.13", default-features = false }
-# Reading the agent's SSE body as it arrives (agent_http.rs). Already compiled
-# into the tree through reqwest itself; naming it adds zero new units.
-futures-util = { version = "0.3", default-features = false }
-# The Codex socket transport (agent_http.rs). Already compiled into the tree by
-# iroh-relay with the same client + rustls-ring features; naming it adds no new
-# units and no new TLS stack.
-tokio-websockets = { version = "0.13", default-features = false, features = ["client", "rustls-webpki-roots", "ring"] }
-http = "1"
 # The header timeout around that request. Tauri's async runtime is tokio, so
 # this names what the tree already builds.
 tokio = { version = "1", default-features = false, features = ["time"] }
@@ -102,9 +94,8 @@ windows-future = "0.2"
 windows-core = "0.61"
 
 [dev-dependencies]
-# The agent session tests need a real directory to run tools in and a real
-# place to write a session log, both thrown away afterwards.
 tempfile = "3.23.0"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 # The app-share action seam test needs an AppHandle without a GUI: the
 # mock runtime runs the real event system in-process. Same crate, one
 # more feature, tests only — the shipped binary never sees it.

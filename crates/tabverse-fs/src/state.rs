@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -120,7 +121,12 @@ pub fn save(base: &Path, scope: &str, json: &str) -> Result<()> {
         .with_context(|| format!("cannot create state dir {}", base.display()))?;
     let tmp = tmp_file(base, scope);
     let dest = scope_file(base, scope);
-    if let Err(e) = std::fs::write(&tmp, json.as_bytes()) {
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()
+    })();
+    if let Err(e) = write_result {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("cannot write {}", tmp.display()));
     }
@@ -128,7 +134,23 @@ pub fn save(base: &Path, scope: &str, json: &str) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("cannot replace {}", dest.display()));
     }
+    sync_dir(base)?;
     sweep_abandoned_scratch(base);
+    Ok(())
+}
+
+/// Make a published rename durable on filesystems that support directory
+/// fsync. Windows' rename durability is provided by the synced file plus its
+/// own replace primitive; opening a directory as a file is not portable there.
+#[cfg(unix)]
+pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
+    std::fs::File::open(dir)
+        .and_then(|file| file.sync_all())
+        .with_context(|| format!("cannot sync state dir {}", dir.display()))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn sync_dir(_dir: &Path) -> Result<()> {
     Ok(())
 }
 

@@ -67,30 +67,6 @@ impl WebJoin {
             .try_send(RemoteClientMsg::Resize { cols, rows });
     }
 
-    /// Say something to a shared agent. The host enforces Steer; this client
-    /// only relays, same as `send_input` for a terminal.
-    #[wasm_bindgen(js_name = sendPrompt)]
-    pub fn send_prompt(&self, text: String) {
-        let _ = self
-            .input_tx
-            .try_send(RemoteClientMsg::AgentPrompt { text });
-    }
-
-    /// Answer an agent permission request. The host enforces Approve.
-    #[wasm_bindgen(js_name = sendAnswer)]
-    pub fn send_answer(&self, call_id: String, allow: bool, reason: Option<String>) {
-        let _ = self.input_tx.try_send(RemoteClientMsg::AgentAnswer {
-            call_id,
-            allow,
-            reason,
-        });
-    }
-
-    /// Stop the agent turn in progress. The host enforces Steer.
-    #[wasm_bindgen(js_name = sendCancel)]
-    pub fn send_cancel(&self) {
-        let _ = self.input_tx.try_send(RemoteClientMsg::AgentCancel);
-    }
     /// Invoke a host command over an app share. The host enforces Steer and
     /// answers with an rpcResult carrying the same id.
     #[wasm_bindgen(js_name = sendRpc)]
@@ -128,6 +104,108 @@ impl WebJoin {
         let _ = self
             .input_tx
             .try_send(RemoteClientMsg::ProxyReq { id, head, body });
+    }
+
+    #[wasm_bindgen(js_name = sendBrowserOpen)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_browser_open(
+        &self,
+        stream_id: u64,
+        tab_id: String,
+        grant_id: String,
+        attachment_id: String,
+        attachment_generation: u64,
+        method: String,
+        url: String,
+        headers: JsValue,
+        body_len: Option<u64>,
+    ) {
+        let Ok(headers) = serde_wasm_bindgen::from_value(headers) else {
+            return;
+        };
+        let _ = self.input_tx.try_send(RemoteClientMsg::BrowserOpen {
+            stream_id,
+            tab_id,
+            grant_id,
+            attachment_id,
+            attachment_generation,
+            method,
+            url,
+            headers,
+            body_len,
+        });
+    }
+
+    #[wasm_bindgen(js_name = sendBrowserRequestChunk)]
+    pub fn send_browser_request_chunk(&self, stream_id: u64, seq: u64, b64: String) {
+        let _ = self
+            .input_tx
+            .try_send(RemoteClientMsg::BrowserRequestChunk {
+                stream_id,
+                seq,
+                b64,
+            });
+    }
+
+    #[wasm_bindgen(js_name = sendBrowserRequestEnd)]
+    pub fn send_browser_request_end(&self, stream_id: u64) {
+        let _ = self
+            .input_tx
+            .try_send(RemoteClientMsg::BrowserRequestEnd { stream_id });
+    }
+
+    #[wasm_bindgen(js_name = sendBrowserCredit)]
+    pub fn send_browser_credit(&self, stream_id: u64, bytes: u64) {
+        let _ = self
+            .input_tx
+            .try_send(RemoteClientMsg::BrowserCredit { stream_id, bytes });
+    }
+
+    #[wasm_bindgen(js_name = sendBrowserCancel)]
+    pub fn send_browser_cancel(&self, stream_id: u64, reason: Option<String>) {
+        let _ = self
+            .input_tx
+            .try_send(RemoteClientMsg::BrowserCancel { stream_id, reason });
+    }
+
+    #[wasm_bindgen(js_name = sendRemoteAck)]
+    pub fn send_remote_ack(&self, tab_id: String, epoch: String, frame_seq: u64) {
+        let _ = self.input_tx.try_send(RemoteClientMsg::RemoteAck {
+            tab_id,
+            epoch,
+            frame_seq,
+        });
+    }
+
+    #[wasm_bindgen(js_name = requestRemoteSnapshot)]
+    pub fn request_remote_snapshot(&self, tab_id: String, epoch: Option<String>) {
+        let _ = self
+            .input_tx
+            .try_send(RemoteClientMsg::RemoteResnapshot { tab_id, epoch });
+    }
+
+    #[wasm_bindgen(js_name = sendRemoteIntent)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_remote_intent(
+        &self,
+        tab_id: String,
+        attachment_id: String,
+        attachment_generation: u64,
+        intent_id: String,
+        name: String,
+        args: JsValue,
+    ) {
+        let Ok(args) = serde_wasm_bindgen::from_value(args) else {
+            return;
+        };
+        let _ = self.input_tx.try_send(RemoteClientMsg::RemoteIntent {
+            tab_id,
+            attachment_id,
+            attachment_generation,
+            intent_id,
+            name,
+            args,
+        });
     }
 
     /// Close the connection. The close handshake is best-effort: the page may
@@ -182,7 +260,10 @@ pub async fn join_share(
     .await
     .map_err(|e| JsValue::from_str(&e))?;
 
-    let (input_tx, input_rx) = async_channel::bounded::<RemoteClientMsg>(256);
+    // One maximum-size Browser A upload is 256 chunks plus Open/Credit/End.
+    // TCX802 caps one attachment at four concurrent requests; 2048 keeps all
+    // four ordered frames lossless while the writer drains between turns.
+    let (input_tx, input_rx) = async_channel::bounded::<RemoteClientMsg>(2048);
 
     // Writer: our input towards the host.
     wasm_bindgen_futures::spawn_local(async move {

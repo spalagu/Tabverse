@@ -31,6 +31,39 @@ function documentBase(url: string): string {
   return `${u.protocol}//${u.host}${dir}`;
 }
 
+function rewriteDocumentUrls(
+  html: string,
+  documentUrl: string,
+  resolveProxyUrl: (target: string) => string,
+): string {
+  const rewrite = (raw: string): string => {
+    const value = raw.trim();
+    if (
+      value === "" ||
+      value.startsWith("#") ||
+      /^(?:data|blob|javascript|mailto|tel):/i.test(value)
+    ) return raw;
+    try {
+      const target = new URL(value, documentUrl);
+      return /^https?:$/.test(target.protocol) ? resolveProxyUrl(target.href) : raw;
+    } catch {
+      return raw;
+    }
+  };
+  const attributes = html.replace(
+    /\b(src|href|action|poster)\s*=\s*(["'])(.*?)\2/gi,
+    (_all, name: string, quote: string, value: string) =>
+      `${name}=${quote}${rewrite(value)}${quote}`,
+  );
+  return attributes.replace(
+    /url\(\s*(["']?)(.*?)\1\s*\)/gi,
+    (_all, quote: string, value: string) => {
+      const rewritten = rewrite(value);
+      return `url(${quote}${rewritten}${quote})`;
+    },
+  );
+}
+
 /**
  * The document as the pane renders it: our <base> first in <head> —
  * document order decides which base wins, and ours names the proxy
@@ -42,6 +75,7 @@ function mirroredDocument(
   url: string,
   resolveProxyUrl: (target: string) => string,
 ): string {
+  html = rewriteDocumentUrls(html, url, resolveProxyUrl);
   const tag = `<base href="${resolveProxyUrl(documentBase(url))}">`;
   if (/<head[^>]*>/i.test(html)) {
     return html.replace(/<head([^>]*)>/i, `<head$1>${tag}`);
@@ -83,9 +117,10 @@ export function BrowserPane({
           .toLowerCase()
           .includes("text/html");
         if (res.ok && html) {
+          const finalUrl = res.headers.get("x-tabverse-final-url") ?? url;
           setState({
             kind: "mirrored",
-            doc: mirroredDocument(body, url, resolveProxyUrl),
+            doc: mirroredDocument(body, finalUrl, resolveProxyUrl),
           });
         } else {
           setState({ kind: "unmirrored", line: refusalOf(res), detail: null });

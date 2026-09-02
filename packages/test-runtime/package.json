@@ -5,9 +5,10 @@
   "license": "Apache-2.0",
   "type": "module",
   "dependencies": {
-    "@tabverse/runtime-contracts": "file:../runtime-contracts"
+    "@tabverse/tab-contracts": "file:../tab-contracts"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./reference-tab": "./src/referenceTab.ts"
   }
 }

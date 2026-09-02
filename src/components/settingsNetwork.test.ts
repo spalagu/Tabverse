@@ -210,7 +210,6 @@ describe("the name-lookup section", () => {
     const exits = [
       STR.settings.network.uncoveredWebview,
       STR.settings.network.uncoveredRemote,
-      STR.settings.network.uncoveredSocket,
       STR.settings.network.uncoveredTerminal,
       STR.settings.network.uncoveredProvider,
     ];

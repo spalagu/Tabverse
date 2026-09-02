@@ -56,11 +56,11 @@ beforeEach(() => {
 });
 
 describe("startShare's gate", () => {
-  it("refuses a browser tab with its declared reason, before any command", async () => {
+  it("refuses a Settings tab with its declared reason, before any command", async () => {
     const { useStore, actions } = await fresh();
-    const id = useStore.getState().addTab({ type: "browser" });
+    const id = useStore.getState().addTab({ type: "settings" });
     await expect(actions.startShare(id)).rejects.toThrow(
-      "browser tabs cannot be shared"
+      "settings tabs cannot be shared"
     );
     expect(shareStartCalls()).toHaveLength(0);
   });
@@ -77,6 +77,19 @@ describe("startShare's gate", () => {
 });
 
 describe("startShare on a shareable tab", () => {
+  it("uses the contribution adapter default steer permission for Browser", async () => {
+    const { useStore, actions } = await fresh();
+    const id = useStore.getState().addTab({ type: "browser" });
+    const browserUrl = useStore.getState().tabs.find((tab) => tab.id === id)?.url;
+    await actions.startShare(id);
+    expect(shareStartCalls()[0][1]).toMatchObject({
+      tabId: id,
+      kind: "browser",
+      browserUrl,
+      access: "steer",
+    });
+  });
+
   it("invokes share_start with the tab id and the declared default level", async () => {
     const { useStore, actions } = await fresh();
     const id = useStore.getState().addTab({ type: "terminal" });
@@ -85,6 +98,7 @@ describe("startShare on a shareable tab", () => {
     const [, args] = shareStartCalls()[0];
     expect(args).toMatchObject({
       tabId: id,
+      kind: "terminal",
       ttlSecs: actions.SHARE_TTL_SECS,
       access: "steer", // the terminal declaration's default
     });

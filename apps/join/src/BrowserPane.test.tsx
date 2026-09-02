@@ -90,6 +90,36 @@ describe("BrowserPane", () => {
     expect(bare!.getAttribute("srcdoc")).toContain("<head><base href=");
   });
 
+  it("rewrites root-relative, directory-relative, and cross-origin resources to the host request endpoint", async () => {
+    mount(
+      createElement(BrowserPane, {
+        url: "http://intranet.local/wiki/Home",
+        resolveProxyUrl: proxyUrlFor,
+        fetchViaHost: async () => new Response(
+          '<html><head><link href="/root.css"><style>.x{background:url(../img/a.png)}</style></head>' +
+            '<body><img src="icons/x.png"><a href="https://cdn.local/a">x</a></body></html>',
+          {
+            status: 200,
+            headers: {
+              "content-type": "text/html",
+              "x-tabverse-final-url": "http://intranet.local/redirected/Page",
+            },
+          },
+        ),
+      }),
+    );
+    await flush();
+    const doc = host.querySelector<HTMLIFrameElement>(".browser-pane-frame")!
+      .getAttribute("srcdoc")!;
+    expect(doc).toContain('/__tabverse_proxy/http/intranet.local/root.css');
+    expect(doc).toContain('/__tabverse_proxy/http/intranet.local/redirected/icons/x.png');
+    expect(doc).toContain('/__tabverse_proxy/http/intranet.local/img/a.png');
+    expect(doc).toContain('/__tabverse_proxy/https/cdn.local/a');
+    expect(doc).toContain(
+      '<base href="/__tabverse_proxy/http/intranet.local/redirected/">',
+    );
+  });
+
   it("unmirrored by refusal: the annotation, the transport's words, and the original URL as a plain link — never a frame", async () => {
     const asked: string[] = [];
     mount(

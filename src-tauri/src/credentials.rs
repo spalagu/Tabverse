@@ -122,9 +122,7 @@ pub fn set_vault_dir(dir: std::path::PathBuf) {
 /// `VAULT_DIR` is a `OnceLock`, so only the first `set_vault_dir` of a test
 /// binary takes effect and every later test silently shares that first
 /// directory. Sharing it is survivable; sharing it *concurrently* is not —
-/// one test storing an agent token is enough to send another test's session
-/// thread down the signed-in path and out to the real network, where it waits
-/// out a connect timeout and then a minute of socket idle.
+/// one test storing a credential is enough to alter another test's path.
 ///
 /// Hold the returned guard for the whole test.
 #[cfg(test)]
@@ -299,33 +297,6 @@ fn delete(service: &str, host: &str, username: &str) -> Result<(), String> {
         entries.remove(&acct);
     }
     vault::write(&store)
-}
-
-/// Where the agent keeps its sign-in.
-///
-/// A service of its own rather than a row among the web logins: it is not a
-/// site password, it is not shown in the passwords UI, and "forget every saved
-/// web login" must not sign the agent out as a side effect.
-const AGENT_SERVICE: &str = "tabverse.agent";
-
-/// Store one secret for the agent under a name of its own.
-///
-/// Goes through the same sealed vault as everything else — one system
-/// credential, one permission prompt, the rest encrypted beside it.
-pub fn save_agent_secret(name: &str, value: &str) -> Result<(), String> {
-    save(AGENT_SERVICE, name, "", value)
-}
-
-pub fn read_agent_secret(name: &str) -> Result<Option<String>, String> {
-    let acct = account(name, "")?;
-    Ok(vault::read()?
-        .get(AGENT_SERVICE)
-        .and_then(|entries| entries.get(&acct))
-        .cloned())
-}
-
-pub fn delete_agent_secret(name: &str) -> Result<(), String> {
-    delete(AGENT_SERVICE, name, "")
 }
 
 pub fn save_web(host: &str, username: &str, password: &str) -> Result<(), String> {

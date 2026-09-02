@@ -3,6 +3,7 @@ import { SEARCH_ENGINES, validSearchTemplate } from "../search";
 import { confirmAsk } from "./Confirm";
 import { passphraseAsk } from "./Passphrase";
 import { BackgroundTasksSection } from "./BackgroundTasksSection";
+import { PluginCatalogSection } from "./PluginCatalogSection";
 import { UserScriptsSection } from "./UserScriptsSection";
 import { ProfilesSection } from "./ProfilesSection";
 import { TrashIcon } from "./icons";
@@ -143,7 +144,6 @@ const DNS_PLAIN_MODE = "system";
 
 const UNCOVERED_EXITS: readonly string[] = [
   STR.settings.network.uncoveredRemote,
-  STR.settings.network.uncoveredSocket,
   STR.settings.network.uncoveredTerminal,
   STR.settings.network.uncoveredProvider,
 ];
@@ -1435,6 +1435,8 @@ export function SettingsView({
               </table>
             </div>
           </section>
+
+          <PluginCatalogSection hidden={hidden("plugins")} />
 
           <section id="appearance" hidden={hidden("appearance")}>
             <h3>{STR.settings.appearance.heading}</h3>

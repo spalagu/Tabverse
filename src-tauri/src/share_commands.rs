@@ -10,11 +10,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use tabverse_remote::source::terminal::TerminalSource;
+use tabverse_remote::source::ShareSource;
 use tabverse_remote::{RemoteHub, ShareOpts, SourceRegistry, ViewerInfo};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::agent_bridge;
-use crate::app_share::AgentCmd;
 use crate::AppState;
 
 /// The glue layer's share bookkeeping. Entries live exactly as long as what
@@ -31,6 +30,10 @@ pub struct ShareGlue {
     /// the trait; this map exists because a host-side resize is a terminal
     /// fact with no place in `ShareSource`.
     pub terminal_sources: Mutex<HashMap<String, Arc<TerminalSource>>>,
+    /// Single Tab v4 adapters, keyed by the product Tab id.
+    contribution_sources: Mutex<HashMap<String, Arc<crate::app_share::ContributionShareSource>>>,
+    /// Tab id -> live share id for Terminal, Files, Browser and future contributions.
+    tab_shares: Mutex<HashMap<String, String>>,
     /// Tabs with a share_start future in flight. Held across the hub await so
     /// two clients cannot both pass the empty-share check.
     starting_tabs: Mutex<HashSet<String>>,
@@ -73,16 +76,6 @@ pub(crate) fn session_for_tab(glue: &ShareGlue, tab_id: &str) -> Option<String> 
         .find_map(|(session, tab)| (tab == tab_id).then(|| session.clone()))
 }
 
-/// The live share fronting `session_id`, if any — the reverse read of the
-/// same map `stop_shares_of_session` sweeps.
-fn share_for_session(glue: &ShareGlue, session_id: &str) -> Option<String> {
-    glue.share_sessions
-        .lock()
-        .unwrap()
-        .iter()
-        .find_map(|(share, session)| (session == session_id).then(|| share.clone()))
-}
-
 /// Stop — and forget — every share fronting `session_id`. There is at most
 /// one, because `share_start` refuses a second, but a map is swept rather
 /// than trusted.
@@ -97,8 +90,33 @@ fn stop_shares_of_session(hub: &RemoteHub, glue: &ShareGlue, session_id: &str) {
         .collect();
     for share_id in stale {
         glue.share_sessions.lock().unwrap().remove(&share_id);
+        let tabs: Vec<String> = glue
+            .tab_shares
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, current)| *current == &share_id)
+            .map(|(tab, _)| tab.clone())
+            .collect();
+        for tab_id in tabs {
+            glue.tab_shares.lock().unwrap().remove(&tab_id);
+            if let Some(source) = glue.contribution_sources.lock().unwrap().remove(&tab_id) {
+                source.unbind();
+            }
+        }
         hub.share_stop(&share_id);
     }
+}
+
+fn stop_tab_share(hub: &RemoteHub, glue: &ShareGlue, tab_id: &str) {
+    let Some(share_id) = glue.tab_shares.lock().unwrap().remove(tab_id) else {
+        return;
+    };
+    if let Some(source) = glue.contribution_sources.lock().unwrap().remove(tab_id) {
+        source.unbind();
+    }
+    glue.share_sessions.lock().unwrap().remove(&share_id);
+    hub.share_stop(&share_id);
 }
 
 /// A tab's runtime is gone — `term_kill`, or the shell exiting on its own.
@@ -112,6 +130,7 @@ pub fn tab_runtime_died(hub: &RemoteHub, sources: &SourceRegistry, glue: &ShareG
     if let Some(source) = sources.unregister(tab_id) {
         source.unbind();
     }
+    stop_tab_share(hub, glue, tab_id);
     let session = {
         let mut tabs = glue.session_tabs.lock().unwrap();
         let session = tabs
@@ -167,6 +186,69 @@ fn parse_access(name: &str) -> Result<tabverse_proto::Access, String> {
     }
 }
 
+/// Transitional host-side allow-list until TCX1101 moves share capability
+/// registration into the native PluginKernel catalog. The webview already
+/// gates from each contribution's declaration; this second gate ensures a
+/// direct command cannot turn Settings or Remote into an accidental file/
+/// proxy share by merely supplying their tab id.
+fn validate_share_kind(kind: &str) -> Result<(), String> {
+    match kind {
+        "terminal" | "files" | "browser" => Ok(()),
+        other => Err(format!("tab kind {other:?} cannot be shared")),
+    }
+}
+
+fn semantic_legacy_source(state: &State<'_, AppState>) -> Arc<crate::app_share::AppShareSource> {
+    let source = crate::app_share::AppShareSource::new(
+        Arc::new(|_, _| {}),
+        Arc::new(|| serde_json::json!({"tabs": []})),
+        Arc::new(crate::clipboard_watch::put_string),
+        Arc::new(crate::remote_proxy::run),
+    );
+    let fs = state.fs.clone();
+    source.register_rpc(
+        "fs_list",
+        Arc::new(move |args| {
+            let dir = args
+                .get("dir")
+                .and_then(|value| value.as_str())
+                .ok_or("fs_list needs a string 'dir'")?;
+            serde_json::to_value(fs.list_dir(dir).map_err(|error| format!("{error:#}"))?)
+                .map_err(|error| error.to_string())
+        }),
+    );
+    let fs = state.fs.clone();
+    source.register_rpc(
+        "fs_read",
+        Arc::new(move |args| {
+            let path = args
+                .get("path")
+                .and_then(|value| value.as_str())
+                .ok_or("fs_read needs a string 'path'")?;
+            serde_json::to_value(fs.read_file(path).map_err(|error| format!("{error:#}"))?)
+                .map_err(|error| error.to_string())
+        }),
+    );
+    let fs = state.fs.clone();
+    source.register_steer_rpc(
+        "fs_write",
+        Arc::new(move |args| {
+            let path = args
+                .get("path")
+                .and_then(|value| value.as_str())
+                .ok_or("fs_write needs a string 'path'")?;
+            let content = args
+                .get("content")
+                .and_then(|value| value.as_str())
+                .ok_or("fs_write needs a string 'content'")?;
+            fs.write_text(path, content)
+                .map_err(|error| format!("{error:#}"))?;
+            Ok(serde_json::Value::Null)
+        }),
+    );
+    source
+}
+
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ViewportEvent {
@@ -177,43 +259,61 @@ pub struct ViewportEvent {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn share_start(
     app: AppHandle,
     state: State<'_, AppState>,
     tab_id: String,
+    kind: String,
     title: String,
+    browser_url: Option<String>,
     ttl_secs: Option<u64>,
     // "view" | "steer" | "approve" — the default level for new viewers,
     // chosen in the dialog from the capability's declared levels.
     access: String,
 ) -> Result<ShareStarted, String> {
+    validate_share_kind(&kind)?;
     let access = parse_access(&access)?;
     let _reservation = reserve_start(&state.share_glue, &tab_id)?;
-    // The registry is the gate: a tab with no entry has no shareable runtime
-    // — it does not exist, it is not a kind that shares, or its runtime died.
-    let source = state
-        .sources
-        .get(&tab_id)
-        .ok_or_else(|| format!("tab {tab_id} has no shareable runtime"))?;
-    let session_id = session_for_tab(&state.share_glue, &tab_id)
-        .ok_or_else(|| format!("tab {tab_id} has no shareable runtime"))?;
     if state
         .share_glue
-        .share_sessions
+        .tab_shares
         .lock()
         .unwrap()
-        .values()
-        .any(|session| *session == session_id)
+        .contains_key(&tab_id)
     {
         return Err("tab is already shared".into());
     }
+    let registered_base = state.sources.get(&tab_id);
+    let base: Arc<dyn ShareSource> = if let Some(base) = registered_base.clone() {
+        base
+    } else {
+        let source = semantic_legacy_source(&state);
+        if kind == "browser" {
+            let url = browser_url.ok_or("a Browser share needs its host URL grant root")?;
+            source.authorize_browser_tab(tab_id.clone(), url)?;
+            let resident_app = app.clone();
+            source.set_resident_browser_exchange(Arc::new(move |tab_id, request| {
+                resident_app.state::<AppState>().resident.browser_exchange(
+                    &resident_app,
+                    tab_id,
+                    request,
+                )
+            }));
+        }
+        source
+    };
+    let session_id = session_for_tab(&state.share_glue, &tab_id);
+    let contribution_source =
+        crate::app_share::ContributionShareSource::new(tab_id.clone(), app.clone(), Some(base));
+    let source: Arc<dyn ShareSource> = contribution_source.clone();
 
     let presence_tab = tab_id.clone();
     let (share, ticket) = state
         .hub
         .share_start(ShareOpts {
             title,
-            source: source.clone(),
+            source,
             on_presence: Arc::new(move |roster: &[ViewerInfo]| {
                 let viewers: Vec<PresenceViewer> = roster
                     .iter()
@@ -244,22 +344,42 @@ pub async fn share_start(
         .await
         .map_err(|e| format!("{e:#}"))?;
 
-    let still_current = state
-        .sources
-        .get(&tab_id)
-        .is_some_and(|current| Arc::ptr_eq(&current, &source))
-        && session_for_tab(&state.share_glue, &tab_id).as_deref() == Some(&session_id);
+    let still_current = match (&registered_base, &session_id) {
+        (Some(expected), Some(session_id)) => {
+            state
+                .sources
+                .get(&tab_id)
+                .is_some_and(|current| Arc::ptr_eq(&current, expected))
+                && session_for_tab(&state.share_glue, &tab_id).as_deref() == Some(session_id)
+        }
+        (None, None) => true,
+        _ => false,
+    };
     if !still_current {
-        source.unbind();
+        contribution_source.unbind();
         state.hub.share_stop(&share.id);
         return Err("tab runtime changed while sharing was starting".into());
     }
     state
         .share_glue
-        .share_sessions
+        .contribution_sources
         .lock()
         .unwrap()
-        .insert(share.id.clone(), session_id);
+        .insert(tab_id.clone(), contribution_source);
+    state
+        .share_glue
+        .tab_shares
+        .lock()
+        .unwrap()
+        .insert(tab_id.clone(), share.id.clone());
+    if let Some(session_id) = session_id {
+        state
+            .share_glue
+            .share_sessions
+            .lock()
+            .unwrap()
+            .insert(share.id.clone(), session_id);
+    }
     eprintln!("[core] share_start tab={tab_id} share={}", share.id);
     Ok(ShareStarted {
         share_id: share.id.clone(),
@@ -272,12 +392,7 @@ pub fn share_stop(state: State<'_, AppState>, tab_id: String) -> Result<(), Stri
     // Unbind through the trait: the command must not care what kind of
     // runtime it is stopping. A tab that is not sharing (or is already gone)
     // makes both halves no-ops, matching the old command's silence.
-    if let Some(source) = state.sources.get(&tab_id) {
-        source.unbind();
-    }
-    if let Some(session_id) = session_for_tab(&state.share_glue, &tab_id) {
-        stop_shares_of_session(&state.hub, &state.share_glue, &session_id);
-    }
+    stop_tab_share(&state.hub, &state.share_glue, &tab_id);
     Ok(())
 }
 
@@ -293,7 +408,6 @@ const APP_SHARE_TAB_ID: &str = "app";
 pub async fn app_share_start(
     app: AppHandle,
     state: State<'_, AppState>,
-    registry: State<'_, Arc<agent_bridge::AgentRegistry>>,
     ttl_secs: Option<u64>,
     access: String,
 ) -> Result<ShareStarted, String> {
@@ -313,31 +427,15 @@ pub async fn app_share_start(
     // viewer's keystrokes must reach the active terminal, and the webview
     // bridge (which owns the term registry) is where they land.
     source.set_term_input_channel(app.clone());
+    let resident_app = app.clone();
+    source.set_resident_browser_exchange(Arc::new(move |tab_id, request| {
+        resident_app
+            .state::<AppState>()
+            .resident
+            .browser_exchange(&resident_app, tab_id, request)
+    }));
     register_app_rpc_read_commands(&state);
     register_app_rpc_steer_commands(&state);
-    {
-        let registry = registry.inner().clone();
-        let bind_registry = registry.clone();
-        state.app_source.set_agent_seams(
-            Arc::new(move |tab, target| {
-                let handle = bind_registry.handle_for_session(tab)?;
-                let hooks = bind_registry.agent_hooks(&handle)?;
-                (hooks.set_broadcast)(target.clone());
-                target.map(|_| (hooks.history)())
-            }),
-            Arc::new(move |tab, cmd| {
-                let handle = registry
-                    .handle_for_session(tab)
-                    .ok_or_else(|| format!("no agent session for tab {tab}"))?;
-                match cmd {
-                    AgentCmd::Prompt(text) => registry.prompt(&handle, text),
-                    AgentCmd::Cancel => registry.cancel(&handle),
-                }
-                .map_err(|e| format!("{e:#}"))
-            }),
-        );
-    }
-
     let presence_app = app.clone();
     let (share, ticket) = state
         .hub
@@ -409,24 +507,6 @@ fn register_app_rpc_read_commands(state: &State<'_, AppState>) {
             serde_json::to_value(meta).map_err(|e| e.to_string())
         }),
     );
-    state.app_source.register_rpc(
-        "config_get",
-        Arc::new(|_args| {
-            let loaded = crate::config::load().map_err(|e| e.to_string())?;
-            let snapshot = crate::config::ConfigSnapshot {
-                values: loaded.config,
-                warnings: loaded.warnings,
-                sources: loaded.sources,
-            };
-            serde_json::to_value(snapshot).map_err(|e| e.to_string())
-        }),
-    );
-    state.app_source.register_rpc(
-        "config_schema",
-        Arc::new(|_args| {
-            serde_json::to_value(crate::config::config_schema()).map_err(|e| e.to_string())
-        }),
-    );
 }
 
 fn register_app_rpc_steer_commands(state: &State<'_, AppState>) {
@@ -446,22 +526,165 @@ fn register_app_rpc_steer_commands(state: &State<'_, AppState>) {
             Ok(serde_json::Value::Null)
         }),
     );
-    state.app_source.register_steer_rpc(
-        "config_set",
-        Arc::new(|args| {
-            let key = args
-                .get("key")
-                .and_then(|v| v.as_str())
-                .ok_or("config_set needs a string 'key'")?;
-            let value = args.get("value").ok_or("config_set needs a 'value'")?;
-            let path = crate::config::write_target(
-                crate::config::current_platform(),
-                &crate::config::EnvVars::from_process(),
-            )?;
-            crate::config::set_in_file(&path, key, value)?;
-            Ok(serde_json::Value::Null)
-        }),
-    );
+}
+
+fn app_snapshot_for_wire(snapshot: serde_json::Value) -> serde_json::Value {
+    use serde_json::{Map, Value};
+
+    const TAB_FIELDS: &[&str] = &[
+        "id",
+        "kind",
+        "title",
+        "groupId",
+        "cwd",
+        "url",
+        "renamed",
+        "pinnedUrl",
+        "lastActiveAt",
+        "dormant",
+    ];
+    const GROUP_FIELDS: &[&str] = &["id", "name", "colorIndex", "color", "collapsed", "parentId"];
+    let root = snapshot.as_object();
+    let mut tab_ids = HashSet::new();
+    let mut group_ids = HashSet::new();
+    let mut tabs = Vec::new();
+    for raw in root
+        .and_then(|object| object.get("tabs"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(tab) = raw.as_object() else { continue };
+        let kind = tab
+            .get("kind")
+            .or_else(|| tab.get("type"))
+            .and_then(Value::as_str);
+        if !matches!(kind, Some("terminal" | "files" | "browser")) {
+            continue;
+        }
+        let Some(id) = tab.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        tab_ids.insert(id.to_string());
+        if let Some(group_id) = tab.get("groupId").and_then(Value::as_str) {
+            group_ids.insert(group_id.to_string());
+        }
+        let mut clean = Map::new();
+        for field in TAB_FIELDS {
+            if let Some(value) = tab.get(*field) {
+                clean.insert((*field).into(), value.clone());
+            }
+        }
+        clean.insert("kind".into(), Value::String(kind.unwrap().into()));
+        tabs.push(Value::Object(clean));
+    }
+
+    let raw_groups: Vec<&Map<String, Value>> = root
+        .and_then(|object| object.get("groups"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .collect();
+    loop {
+        let before = group_ids.len();
+        for group in &raw_groups {
+            let Some(id) = group.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if group_ids.contains(id) {
+                if let Some(parent) = group.get("parentId").and_then(Value::as_str) {
+                    group_ids.insert(parent.to_string());
+                }
+            }
+        }
+        if group_ids.len() == before {
+            break;
+        }
+    }
+    let groups = raw_groups
+        .into_iter()
+        .filter(|group| {
+            group
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| group_ids.contains(id))
+        })
+        .map(|group| {
+            Value::Object(
+                GROUP_FIELDS
+                    .iter()
+                    .filter_map(|field| {
+                        group
+                            .get(*field)
+                            .cloned()
+                            .map(|value| ((*field).to_string(), value))
+                    })
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let active_tab_id = root
+        .and_then(|object| object.get("activeTabId"))
+        .and_then(Value::as_str)
+        .filter(|id| tab_ids.contains(*id))
+        .map(str::to_string)
+        .or_else(|| tabs.first()?.get("id")?.as_str().map(str::to_string));
+    let split = root
+        .and_then(|object| object.get("split"))
+        .and_then(Value::as_object)
+        .and_then(|split| {
+            let ids = split.get("ids")?.as_array()?;
+            let ratios = split.get("ratios").and_then(Value::as_array);
+            let kept = ids
+                .iter()
+                .enumerate()
+                .filter_map(|(index, id)| {
+                    let id = id.as_str()?;
+                    tab_ids.contains(id).then(|| {
+                        let ratio = ratios
+                            .and_then(|values| values.get(index))
+                            .and_then(Value::as_f64)
+                            .filter(|ratio| ratio.is_finite() && *ratio > 0.0)
+                            .unwrap_or(1.0);
+                        (id.to_string(), ratio)
+                    })
+                })
+                .collect::<Vec<_>>();
+            if kept.len() < 2 {
+                return None;
+            }
+            let total = kept.iter().map(|(_, ratio)| ratio).sum::<f64>();
+            Some(serde_json::json!({
+                "ids": kept.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                "ratios": kept.iter().map(|(_, ratio)| ratio / total).collect::<Vec<_>>(),
+                "vertical": split.get("vertical").and_then(Value::as_bool).unwrap_or(false),
+            }))
+        });
+    let string_map = |name: &str| -> Value {
+        let mut clean = Map::new();
+        if let Some(values) = root
+            .and_then(|object| object.get(name))
+            .and_then(Value::as_object)
+        {
+            for (tab_id, value) in values {
+                if tab_ids.contains(tab_id) && value.is_string() {
+                    clean.insert(tab_id.clone(), value.clone());
+                }
+            }
+        }
+        Value::Object(clean)
+    };
+    serde_json::json!({
+        "version": 2,
+        "zones": 3,
+        "tabs": tabs,
+        "groups": groups,
+        "activeTabId": active_tab_id,
+        "split": split,
+        "filesOpenPath": string_map("filesOpenPath"),
+        "filesOpenDir": string_map("filesOpenDir"),
+    })
 }
 
 /// The webview's answer to `app-share-snapshot-request`: the full store
@@ -473,8 +696,241 @@ pub fn app_share_snapshot_deliver(
     state: State<'_, AppState>,
     snapshot: serde_json::Value,
 ) -> Result<(), String> {
+    let snapshot = app_snapshot_for_wire(snapshot);
+    state.app_source.sync_browser_grants(&snapshot);
     if let Some(share) = state.app_source.bound_share() {
         share.broadcast_app_snapshot(snapshot);
+    }
+    Ok(())
+}
+
+fn remote_counter(value: &str, field: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("{field} must be an unsigned decimal counter"))
+}
+
+fn sync_browser_contribution_grant(
+    state: &State<'_, AppState>,
+    tab_id: &str,
+    kind: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    if kind != "browser" {
+        return Ok(());
+    }
+    let url = value
+        .get("url")
+        .or_else(|| value.get("state").and_then(|state| state.get("url")))
+        .and_then(serde_json::Value::as_str);
+    let Some(url) = url else { return Ok(()) };
+    if state.app_source.bound_share().is_some() {
+        state
+            .app_source
+            .update_browser_grant(tab_id, url)
+            .map_err(|error| error.to_string())?;
+    }
+    let source = state
+        .share_glue
+        .contribution_sources
+        .lock()
+        .unwrap()
+        .get(tab_id)
+        .cloned();
+    if let Some(source) = source {
+        source
+            .update_browser_grant(tab_id, url)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn app_share_contribution_snapshot(
+    state: State<'_, AppState>,
+    viewer: Option<u64>,
+    tab_id: String,
+    kind: String,
+    epoch: String,
+    snapshot_revision: String,
+    last_frame_seq: String,
+    snapshot: serde_json::Value,
+) -> Result<(), String> {
+    let revision = remote_counter(&snapshot_revision, "snapshotRevision")?;
+    let frame_seq = remote_counter(&last_frame_seq, "lastFrameSeq")?;
+    sync_browser_contribution_grant(&state, &tab_id, &kind, &snapshot)?;
+    if let Some(share) = state.app_source.bound_share() {
+        if let Some(viewer) = viewer {
+            share.send_contribution_snapshot(
+                viewer,
+                tab_id.clone(),
+                kind.clone(),
+                epoch.clone(),
+                revision,
+                frame_seq,
+                snapshot.clone(),
+            );
+        } else {
+            share.broadcast_contribution_snapshot(
+                tab_id.clone(),
+                kind.clone(),
+                epoch.clone(),
+                revision,
+                frame_seq,
+                snapshot.clone(),
+            );
+        }
+    }
+    let source = state
+        .share_glue
+        .contribution_sources
+        .lock()
+        .unwrap()
+        .get(&tab_id)
+        .cloned();
+    if let Some(share) = source.and_then(|source| source.bound_share()) {
+        if let Some(viewer) = viewer {
+            share.send_contribution_snapshot(
+                viewer, tab_id, kind, epoch, revision, frame_seq, snapshot,
+            );
+        } else {
+            share.broadcast_contribution_snapshot(
+                tab_id, kind, epoch, revision, frame_seq, snapshot,
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn app_share_contribution_frame(
+    state: State<'_, AppState>,
+    viewer: Option<u64>,
+    tab_id: String,
+    kind: String,
+    epoch: String,
+    frame_seq: String,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let frame_seq = remote_counter(&frame_seq, "frameSeq")?;
+    sync_browser_contribution_grant(&state, &tab_id, &kind, &payload)?;
+    if let Some(share) = state.app_source.bound_share() {
+        if let Some(viewer) = viewer {
+            share.send_contribution_frame(
+                viewer,
+                tab_id.clone(),
+                kind.clone(),
+                epoch.clone(),
+                frame_seq,
+                payload.clone(),
+            );
+        } else {
+            share.broadcast_contribution_frame(
+                tab_id.clone(),
+                kind.clone(),
+                epoch.clone(),
+                frame_seq,
+                payload.clone(),
+            );
+        }
+    }
+    let source = state
+        .share_glue
+        .contribution_sources
+        .lock()
+        .unwrap()
+        .get(&tab_id)
+        .cloned();
+    if let Some(share) = source.and_then(|source| source.bound_share()) {
+        if let Some(viewer) = viewer {
+            share.send_contribution_frame(viewer, tab_id, kind, epoch, frame_seq, payload);
+        } else {
+            share.broadcast_contribution_frame(tab_id, kind, epoch, frame_seq, payload);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn app_share_intent_result(
+    state: State<'_, AppState>,
+    viewer: u64,
+    tab_id: String,
+    attachment_id: String,
+    attachment_generation: String,
+    intent_id: String,
+    ok: Option<serde_json::Value>,
+    err: Option<String>,
+) -> Result<(), String> {
+    let generation = remote_counter(&attachment_generation, "attachmentGeneration")?;
+    if let Some(share) = state.app_source.bound_share() {
+        share.send_intent_result(
+            viewer,
+            attachment_id.clone(),
+            generation,
+            intent_id.clone(),
+            ok.clone(),
+            err.clone(),
+        );
+    }
+    let source = state
+        .share_glue
+        .contribution_sources
+        .lock()
+        .unwrap()
+        .get(&tab_id)
+        .cloned();
+    if let Some(share) = source.and_then(|source| source.bound_share()) {
+        share.send_intent_result(viewer, attachment_id, generation, intent_id, ok, err);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn app_share_private_stream(
+    state: State<'_, AppState>,
+    viewer: u64,
+    tab_id: String,
+    attachment_id: String,
+    attachment_generation: String,
+    stream_id: String,
+    seq: String,
+    fin: bool,
+    payload_b64: String,
+) -> Result<(), String> {
+    let generation = remote_counter(&attachment_generation, "attachmentGeneration")?;
+    let sequence = remote_counter(&seq, "seq")?;
+    if let Some(share) = state.app_source.bound_share() {
+        share.send_private_stream(
+            viewer,
+            attachment_id.clone(),
+            generation,
+            stream_id.clone(),
+            sequence,
+            fin,
+            payload_b64.clone(),
+        );
+    }
+    let source = state
+        .share_glue
+        .contribution_sources
+        .lock()
+        .unwrap()
+        .get(&tab_id)
+        .cloned();
+    if let Some(share) = source.and_then(|source| source.bound_share()) {
+        share.send_private_stream(
+            viewer,
+            attachment_id,
+            generation,
+            stream_id,
+            sequence,
+            fin,
+            payload_b64,
+        );
     }
     Ok(())
 }
@@ -519,8 +975,23 @@ pub fn app_share_stop(state: State<'_, AppState>) -> Result<(), String> {
     // it); said out loud here because this command is where the share's
     // lifecycle reads.
     state.app_source.stop_clipboard_watch();
-    if let Some(session_id) = session_for_tab(&state.share_glue, APP_SHARE_TAB_ID) {
-        stop_shares_of_session(&state.hub, &state.share_glue, &session_id);
+    let shares: Vec<String> = state
+        .share_glue
+        .share_sessions
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, owner)| owner.as_str() == APP_SHARE_TAB_ID)
+        .map(|(share, _)| share.clone())
+        .collect();
+    for share_id in shares {
+        state
+            .share_glue
+            .share_sessions
+            .lock()
+            .unwrap()
+            .remove(&share_id);
+        state.hub.share_stop(&share_id);
     }
     Ok(())
 }
@@ -529,8 +1000,14 @@ pub fn app_share_broadcast_action(
     state: State<'_, AppState>,
     name: String,
     args: serde_json::Value,
+    snapshot: Option<serde_json::Value>,
 ) {
     eprintln!("[core] app_share_broadcast_action {name}");
+    if let Some(snapshot) = snapshot {
+        state
+            .app_source
+            .sync_browser_grants(&app_snapshot_for_wire(snapshot));
+    }
     state.app_source.broadcast_action(&name, &args);
 }
 #[tauri::command]
@@ -575,8 +1052,13 @@ pub fn share_set_viewer_access(
     access: String,
 ) -> Result<(), String> {
     let access = parse_access(&access)?;
-    let share_id = session_for_tab(&state.share_glue, &tab_id)
-        .and_then(|session| share_for_session(&state.share_glue, &session))
+    let share_id = state
+        .share_glue
+        .tab_shares
+        .lock()
+        .unwrap()
+        .get(&tab_id)
+        .cloned()
         .ok_or_else(|| format!("tab {tab_id} is not shared"))?;
     state
         .hub
@@ -633,6 +1115,71 @@ mod tests {
             Arc::new(|_| {}),
             Viewport { cols: 80, rows: 24 },
         ))
+    }
+
+    #[test]
+    fn native_share_gate_keeps_settings_and_remote_off_wire() {
+        assert!(validate_share_kind("terminal").is_ok());
+        assert!(validate_share_kind("files").is_ok());
+        assert!(validate_share_kind("browser").is_ok());
+        assert_eq!(
+            validate_share_kind("settings").unwrap_err(),
+            "tab kind \"settings\" cannot be shared"
+        );
+        assert!(validate_share_kind("remote").is_err());
+        assert!(validate_share_kind("future-unregistered-tab").is_err());
+    }
+
+    #[test]
+    fn whole_app_rpc_registry_contains_no_settings_commands() {
+        let source = include_str!("share_commands.rs");
+        let read_start = source.find("fn register_app_rpc_read_commands").unwrap();
+        let stop = source[read_start..]
+            .find("/// The webview's answer")
+            .map(|offset| read_start + offset)
+            .unwrap();
+        let registry = &source[read_start..stop];
+        for command in ["config_get", "config_schema", "config_set", "config_reset"] {
+            assert!(
+                !registry.contains(command),
+                "{command} must not be remote RPC"
+            );
+        }
+    }
+
+    #[test]
+    fn native_serializer_removes_private_tabs_and_unknown_fields() {
+        let wire = app_snapshot_for_wire(serde_json::json!({
+            "version": 2,
+            "tabs": [
+                {"id":"terminal-1","kind":"terminal","title":"Shell","groupId":"work","settingsSecret":"PRIVATE_NESTED"},
+                {"id":"files-1","kind":"files","title":"Files","groupId":null},
+                {"id":"settings-1","kind":"settings","title":"PRIVATE_SETTINGS","groupId":"settings-group"},
+                {"id":"agent-1","kind":"agent","title":"PRIVATE_AGENT","groupId":"agent-group"}
+            ],
+            "groups": [
+                {"id":"work","name":"Work","collapsed":false},
+                {"id":"settings-group","name":"PRIVATE_SETTINGS_GROUP","collapsed":false},
+                {"id":"agent-group","name":"PRIVATE_AGENT_GROUP","collapsed":false}
+            ],
+            "activeTabId":"settings-1",
+            "split":{"ids":["terminal-1","settings-1","files-1"],"ratios":[0.2,0.3,0.5],"vertical":false},
+            "filesOpenPath":{"settings-1":"PRIVATE_SETTINGS_PATH"},
+            "unexpectedSettings":"PRIVATE_TOP_LEVEL"
+        }));
+        assert_eq!(wire["tabs"].as_array().unwrap().len(), 2);
+        assert_eq!(wire["activeTabId"], "terminal-1");
+        assert_eq!(
+            wire["split"]["ids"],
+            serde_json::json!(["terminal-1", "files-1"])
+        );
+        let text = wire.to_string();
+        for marker in ["settings", "agent", "PRIVATE_"] {
+            assert!(
+                !text.to_lowercase().contains(&marker.to_lowercase()),
+                "{text}"
+            );
+        }
     }
 
     #[test]

@@ -27,3 +27,4 @@ npx vite build --config vite.pages.config.ts
 node tools/build-join-pages.mjs
 npx vite build --config vite.web.config.ts
 node tools/build-join-page.mjs
+npm run check:secrets -- --require-artifact dist-pages --require-artifact dist-web

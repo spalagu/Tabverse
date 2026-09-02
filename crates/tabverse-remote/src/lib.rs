@@ -33,9 +33,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tabverse_proto::{
-    announce_proto, negotiate, Access, RemoteClientMsg, RemoteHostMsg, SharedTabType, REMOTE_ALPN,
-    REMOTE_PROTO_V1, REMOTE_PROTO_VERSION,
+    announce_proto, negotiate, Access, SharedTabType, REMOTE_ALPN, REMOTE_PROTO_V1,
+    REMOTE_PROTO_VERSION,
 };
+pub use tabverse_proto::{RemoteClientMsg, RemoteHostMsg};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -153,6 +154,8 @@ struct Viewer {
     access: Access,
     /// What this viewer says it can display, when it says anything.
     viewport: Option<(u16, u16)>,
+    attachment_id: Option<String>,
+    attachment_generation: Option<u64>,
 }
 
 pub struct Share {
@@ -256,10 +259,7 @@ impl Share {
         {
             let mut viewers = self.viewers.lock().unwrap();
             for (id, v) in viewers.iter_mut() {
-                if Self::is_v2_only(&msg) && v.proto < 2 {
-                    continue;
-                }
-                if Self::is_v3_only(&msg) && v.proto < 3 {
+                if v.proto < Self::frame_min_proto(&msg) {
                     continue;
                 }
                 match &mut v.state {
@@ -289,34 +289,50 @@ impl Share {
         }
     }
 
-    /// Is this frame one that only a v2 client can parse?
-    ///
-    /// The compatibility rule in one place rather than at every call site: a
-    /// v1 decoder fails the whole connection on a variant it does not know,
-    /// so these must be withheld from anyone who joined speaking v1.
-    fn is_v2_only(msg: &RemoteHostMsg) -> bool {
-        matches!(
-            msg,
-            RemoteHostMsg::AgentEvent { .. }
-                | RemoteHostMsg::AgentSnapshot { .. }
-                | RemoteHostMsg::AgentDecisionTaken { .. }
-        )
-    }
-
     /// Is this frame one that only a v3 client can parse? App shares are
     /// refused below v3 at the door, so on a live app share every viewer
     /// speaks v3 — but the same Share can outlive protocol bumps, and the
     /// rule lives here rather than at call sites for the same reason the v2
     /// one does.
-    fn is_v3_only(msg: &RemoteHostMsg) -> bool {
-        matches!(
-            msg,
+    fn frame_min_proto(msg: &RemoteHostMsg) -> u32 {
+        match msg {
+            RemoteHostMsg::ContributionSnapshot { .. }
+            | RemoteHostMsg::ContributionFrame { .. }
+            | RemoteHostMsg::IntentResult { .. }
+            | RemoteHostMsg::PrivateStream { .. }
+            | RemoteHostMsg::BrowserResponseHead { .. }
+            | RemoteHostMsg::BrowserResponseChunk { .. }
+            | RemoteHostMsg::BrowserResponseEnd { .. }
+            | RemoteHostMsg::BrowserResponseError { .. } => 4,
             RemoteHostMsg::RpcResult { .. }
-                | RemoteHostMsg::ActionApplied { .. }
-                | RemoteHostMsg::AppSnapshot { .. }
-                | RemoteHostMsg::ClipSync { .. }
-                | RemoteHostMsg::ProxyRes { .. }
-        )
+            | RemoteHostMsg::ActionApplied { .. }
+            | RemoteHostMsg::AppSnapshot { .. }
+            | RemoteHostMsg::ClipSync { .. }
+            | RemoteHostMsg::ProxyRes { .. } => 3,
+            _ => 1,
+        }
+    }
+
+    /// Send one response to its requester. Request ids are viewer-local and
+    /// therefore must never enter the broadcast path.
+    fn send_to(&self, viewer: ViewerId, msg: RemoteHostMsg) {
+        let mut viewers = self.viewers.lock().unwrap();
+        let Some(target) = viewers.get_mut(&viewer) else {
+            return;
+        };
+        if target.proto < Self::frame_min_proto(&msg) {
+            return;
+        }
+        match &mut target.state {
+            ViewerState::Buffering(buffer) => {
+                if buffer.len() < MAX_PENDING_FRAMES {
+                    buffer.push(msg);
+                }
+            }
+            ViewerState::Live => {
+                let _ = target.tx.send(msg);
+            }
+        }
     }
 
     /// Route PTY output to every viewer (buffered or live).
@@ -368,36 +384,203 @@ impl Share {
     }
 
     /// Answer to a client Rpc (v3).
-    pub fn broadcast_rpc_result(
+    pub fn send_rpc_result(
         &self,
+        viewer: ViewerId,
         id: u64,
         ok: Option<serde_json::Value>,
         err: Option<String>,
     ) {
-        self.broadcast(RemoteHostMsg::RpcResult { id, ok, err });
+        self.send_to(viewer, RemoteHostMsg::RpcResult { id, ok, err });
     }
 
-    /// Remote-proxy response head and body (v3).
-    pub fn broadcast_proxy_res(&self, id: u64, head: String, body: Option<String>) {
-        self.broadcast(RemoteHostMsg::ProxyRes { id, head, body });
+    /// Legacy remote-proxy response head and body (v3), requester-private.
+    /// Request ids are viewer-local and therefore cannot be broadcast.
+    pub fn send_proxy_res(&self, viewer: ViewerId, id: u64, head: String, body: Option<String>) {
+        self.send_to(viewer, RemoteHostMsg::ProxyRes { id, head, body });
     }
 
-    /// Route one agent session event to every viewer.
-    ///
-    /// Unlike terminal output there is no buffering dance: an agent viewer's
-    /// catch-up is a list of past events the host already holds, delivered in
-    /// one frame the moment it joins, so there is no window in which live
-    /// events would have to be queued behind a snapshot that has not arrived.
-    pub fn broadcast_agent_event(&self, event: serde_json::Value) {
-        self.broadcast(RemoteHostMsg::AgentEvent { event });
+    pub fn send_browser_response_head(
+        &self,
+        viewer: ViewerId,
+        stream_id: u64,
+        status: u16,
+        headers: Vec<(String, String)>,
+        final_url: String,
+    ) {
+        self.send_to(
+            viewer,
+            RemoteHostMsg::BrowserResponseHead {
+                stream_id,
+                status,
+                headers,
+                final_url,
+            },
+        );
     }
 
-    /// Tell whoever lost an approval race that it was decided without them.
-    pub fn broadcast_decision_taken(&self, call_id: &str, by: &str) {
-        self.broadcast(RemoteHostMsg::AgentDecisionTaken {
-            call_id: call_id.to_string(),
-            by: by.to_string(),
+    pub fn send_browser_response_chunk(
+        &self,
+        viewer: ViewerId,
+        stream_id: u64,
+        seq: u64,
+        b64: String,
+    ) {
+        self.send_to(
+            viewer,
+            RemoteHostMsg::BrowserResponseChunk {
+                stream_id,
+                seq,
+                b64,
+            },
+        );
+    }
+
+    pub fn send_browser_response_end(&self, viewer: ViewerId, stream_id: u64) {
+        self.send_to(viewer, RemoteHostMsg::BrowserResponseEnd { stream_id });
+    }
+
+    pub fn send_browser_response_error(
+        &self,
+        viewer: ViewerId,
+        stream_id: u64,
+        code: String,
+        message: String,
+    ) {
+        self.send_to(
+            viewer,
+            RemoteHostMsg::BrowserResponseError {
+                stream_id,
+                code,
+                message,
+            },
+        );
+    }
+
+    pub fn broadcast_contribution_snapshot(
+        &self,
+        tab_id: String,
+        kind: String,
+        epoch: String,
+        snapshot_revision: u64,
+        last_frame_seq: u64,
+        state: serde_json::Value,
+    ) {
+        self.broadcast(RemoteHostMsg::ContributionSnapshot {
+            tab_id,
+            kind,
+            epoch,
+            snapshot_revision,
+            last_frame_seq,
+            state,
         });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_contribution_snapshot(
+        &self,
+        viewer: ViewerId,
+        tab_id: String,
+        kind: String,
+        epoch: String,
+        snapshot_revision: u64,
+        last_frame_seq: u64,
+        state: serde_json::Value,
+    ) {
+        self.send_to(
+            viewer,
+            RemoteHostMsg::ContributionSnapshot {
+                tab_id,
+                kind,
+                epoch,
+                snapshot_revision,
+                last_frame_seq,
+                state,
+            },
+        );
+    }
+
+    pub fn broadcast_contribution_frame(
+        &self,
+        tab_id: String,
+        kind: String,
+        epoch: String,
+        frame_seq: u64,
+        payload: serde_json::Value,
+    ) {
+        self.broadcast(RemoteHostMsg::ContributionFrame {
+            tab_id,
+            kind,
+            epoch,
+            frame_seq,
+            payload,
+        });
+    }
+
+    pub fn send_contribution_frame(
+        &self,
+        viewer: ViewerId,
+        tab_id: String,
+        kind: String,
+        epoch: String,
+        frame_seq: u64,
+        payload: serde_json::Value,
+    ) {
+        self.send_to(
+            viewer,
+            RemoteHostMsg::ContributionFrame {
+                tab_id,
+                kind,
+                epoch,
+                frame_seq,
+                payload,
+            },
+        );
+    }
+
+    pub fn send_intent_result(
+        &self,
+        viewer: ViewerId,
+        attachment_id: String,
+        attachment_generation: u64,
+        intent_id: String,
+        ok: Option<serde_json::Value>,
+        err: Option<String>,
+    ) {
+        self.send_to(
+            viewer,
+            RemoteHostMsg::IntentResult {
+                attachment_id,
+                attachment_generation,
+                intent_id,
+                ok,
+                err,
+            },
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_private_stream(
+        &self,
+        viewer: ViewerId,
+        attachment_id: String,
+        attachment_generation: u64,
+        stream_id: String,
+        seq: u64,
+        fin: bool,
+        payload_b64: String,
+    ) {
+        self.send_to(
+            viewer,
+            RemoteHostMsg::PrivateStream {
+                attachment_id,
+                attachment_generation,
+                stream_id,
+                seq,
+                fin,
+                payload_b64,
+            },
+        );
     }
 
     /// Start queuing output for a joining viewer.
@@ -446,6 +629,12 @@ impl Share {
         self.viewers.lock().unwrap().get(&viewer).map(|v| v.access)
     }
 
+    fn viewer_attachment(&self, viewer: u64) -> Option<(String, u64)> {
+        let viewers = self.viewers.lock().unwrap();
+        let viewer = viewers.get(&viewer)?;
+        Some((viewer.attachment_id.clone()?, viewer.attachment_generation?))
+    }
+
     /// Change one connected viewer's access, live. Updates the state the
     /// frame-read loop consults and tells that viewer with a fresh Mode
     /// carrying both fields coherently: `read_only` is what a v1 client's
@@ -488,17 +677,12 @@ impl Share {
 
     /// The lowest protocol version a viewer must speak for this share's kind.
     ///
-    /// Terminal payloads have existed since v1. Agent payloads exist only
-    /// from v2, and a v1 decoder fails the whole connection on a variant it
-    /// does not know — so a too-old viewer is refused up front with a reason
-    /// it CAN parse, instead of being admitted to a session that could only
-    /// stay blank. Every future share kind gets this guard for free by
-    /// naming its floor here.
+    /// A too-old viewer is refused up front with a reason it can parse.
     fn tab_type_min_proto(&self) -> u32 {
         match self.tab_type {
             SharedTabType::Terminal => REMOTE_PROTO_V1,
-            SharedTabType::Agent => 2,
             SharedTabType::App => 3,
+            SharedTabType::Contribution => 4,
         }
     }
 
@@ -557,6 +741,7 @@ pub struct RemoteHub {
     endpoint: tokio::sync::Mutex<Option<Endpoint>>,
     shares: Mutex<HashMap<String, Arc<Share>>>,
     next_viewer: AtomicU64,
+    next_attachment_generation: AtomicU64,
 }
 
 impl RemoteHub {
@@ -643,6 +828,18 @@ impl RemoteHub {
         }
 
         let viewer_id = self.next_viewer.fetch_add(1, Ordering::Relaxed);
+        let (attachment_id, attachment_generation) = if effective_proto >= 4 {
+            (
+                Some(format!("attachment-{viewer_id}")),
+                Some(
+                    self.next_attachment_generation
+                        .fetch_add(1, Ordering::Relaxed)
+                        + 1,
+                ),
+            )
+        } else {
+            (None, None)
+        };
         let (tx, rx) = mpsc::unbounded_channel::<RemoteHostMsg>();
         let accepted = {
             let mut viewers = share.viewers.lock().unwrap();
@@ -664,6 +861,8 @@ impl RemoteHub {
                     // Only from v2: a v1 client has no field for it and only
                     // ever shared terminals anyway.
                     tab_type: (effective_proto >= 2).then_some(share.tab_type),
+                    attachment_id: attachment_id.clone(),
+                    attachment_generation,
                 });
                 // Every viewer is told its capabilities up front — a
                 // read-write share still sends Mode { read_only: false } so
@@ -679,38 +878,22 @@ impl RemoteHub {
                     // above, which is all it has a field for.
                     access: (effective_proto >= 2).then_some(initial_access),
                 });
-                // An agent viewer's catch-up is already in hand here, so it
-                // goes out with the handshake rather than through the
-                // buffering dance a terminal needs — there is no window in
-                // which live events must queue behind a snapshot that has not
-                // been produced yet. After Mode, so a client knows what it may
-                // do before it is shown anything to do it with.
-                if share.tab_type == SharedTabType::Agent && effective_proto >= 2 {
-                    let events = share.source.history();
-                    if !events.is_empty() {
-                        let _ = tx.send(RemoteHostMsg::AgentSnapshot { events });
-                    }
-                }
                 viewers.insert(
                     viewer_id,
                     Viewer {
                         proto: effective_proto,
                         tx,
                         // A terminal viewer waits in Buffering until the
-                        // webview hands back a snapshot; that is what the
-                        // buffer is for. An agent viewer has already been sent
-                        // everything it missed, so there is nothing to wait
-                        // behind — leaving it buffering would strand every
-                        // later event in a queue nothing ever flushes. An
-                        // app viewer is the agent's case wearing the app's
-                        // clothes: its catch-up is one AppSnapshot frame the
+                        // webview hands back a snapshot. An app viewer's
+                        // catch-up is one AppSnapshot frame the
                         // source answers with directly (and reconciliation
                         // later re-sends the same way), so buffering it
                         // strands the snapshot in a queue nothing flushes —
                         // the field bug where a joiner saw no tabs at all.
-                        state: if share.tab_type == SharedTabType::Agent
-                            || share.tab_type == SharedTabType::App
-                        {
+                        state: if matches!(
+                            share.tab_type,
+                            SharedTabType::App | SharedTabType::Contribution
+                        ) {
                             ViewerState::Live
                         } else {
                             ViewerState::Buffering(Vec::new())
@@ -718,6 +901,8 @@ impl RemoteHub {
                         name: name.clone(),
                         access: initial_access,
                         viewport: None,
+                        attachment_id,
+                        attachment_generation,
                     },
                 );
                 true
@@ -753,12 +938,8 @@ impl RemoteHub {
                             // reports below stay honored — the tmux-style fit
                             // negotiation is not input.
                             //
-                            // The kind gate mirrors the agent frames below:
-                            // raw bytes are the terminal's input shape. A
-                            // crafted Input frame into an agent share is
-                            // dropped here, before the source — the source
-                            // must never be the one asked to refuse it. An
-                            // app share is admitted alongside the terminal:
+                            // Raw bytes are the terminal's input shape. An app
+                            // share is admitted alongside the terminal:
                             // its viewers type into the host's ACTIVE
                             // terminal (the app source forwards the bytes to
                             // the webview, which owns "active"), so Input is
@@ -806,100 +987,21 @@ impl RemoteHub {
                             }
                         }
                         RemoteClientMsg::Hello { .. } => bail!("unexpected Hello"),
-                        // Every one of these is checked here, on the host.
-                        // A client-side gate stops an honest client and
-                        // nothing else.
-                        RemoteClientMsg::AgentPrompt { text } => {
-                            if share.tab_type != SharedTabType::Agent
-                                && share.tab_type != SharedTabType::App
-                            {
-                                continue;
+                        RemoteClientMsg::RetiredPrompt { .. }
+                        | RemoteClientMsg::RetiredAnswer { .. }
+                        | RemoteClientMsg::RetiredCancel => {
+                            if let Some(viewer) = share.viewers.lock().unwrap().get(&viewer_id) {
+                                let _ = viewer.tx.send(RemoteHostMsg::End {
+                                    reason: "unsupported capability: retired tab type".into(),
+                                });
                             }
-                            // removed viewer reads as None and is dropped.
-                            let Some(access) = share.viewer_access(viewer_id) else {
-                                continue;
-                            };
-                            if !access.may_steer() {
-                                continue;
-                            }
-                            if let Err(e) = share.source.inject_input(
-                                viewer_id,
-                                access,
-                                InputPayload::AgentPrompt { text },
-                            ) {
-                                eprintln!(
-                                    "[remote] prompt from viewer {viewer_id} not applied: {e:#}"
-                                );
-                            }
-                        }
-                        RemoteClientMsg::AgentAnswer {
-                            call_id,
-                            allow,
-                            reason,
-                        } => {
-                            // Steering and approving are separate powers: a
-                            // viewer allowed to talk to the agent is not
-                            // thereby allowed to authorise what it does.
-                            if share.tab_type != SharedTabType::Agent {
-                                continue;
-                            }
-                            // Current level, fresh per frame (see Input); a
-                            // removed viewer reads as None and is dropped.
-                            let Some(access) = share.viewer_access(viewer_id) else {
-                                continue;
-                            };
-                            if !access.may_approve() {
-                                continue;
-                            }
-                            match share.source.inject_input(
-                                viewer_id,
-                                access,
-                                InputPayload::AgentAnswer {
-                                    call_id: call_id.clone(),
-                                    allow,
-                                    reason,
-                                },
-                            ) {
-                                Ok(InputOutcome::Applied) => {}
-                                Ok(InputOutcome::Raced) => {
-                                    // Losing a race is a normal outcome, and
-                                    // the one who lost has to see why their
-                                    // answer changed nothing.
-                                    share.broadcast_decision_taken(&call_id, "somebody else");
-                                }
-                                Err(e) => eprintln!(
-                                    "[remote] answer from viewer {viewer_id} not applied: {e:#}"
-                                ),
-                            }
-                        }
-                        RemoteClientMsg::AgentCancel => {
-                            // App shares too — same fronting rule as the
-                            // prompt above.
-                            if share.tab_type != SharedTabType::Agent
-                                && share.tab_type != SharedTabType::App
-                            {
-                                continue;
-                            }
-                            // Current level, fresh per frame (see Input); a
-                            // removed viewer reads as None and is dropped.
-                            let Some(access) = share.viewer_access(viewer_id) else {
-                                continue;
-                            };
-                            if !access.may_steer() {
-                                continue;
-                            }
-                            if let Err(e) = share.source.inject_input(
-                                viewer_id,
-                                access,
-                                InputPayload::AgentCancel,
-                            ) {
-                                eprintln!(
-                                    "[remote] cancel from viewer {viewer_id} not applied: {e:#}"
-                                );
-                            }
+                            return Ok(());
                         }
                         RemoteClientMsg::Rpc { id, cmd, args } => {
-                            if share.tab_type != SharedTabType::App {
+                            if !matches!(
+                                share.tab_type,
+                                SharedTabType::App | SharedTabType::Contribution
+                            ) {
                                 continue;
                             }
                             let Some(access) = share.viewer_access(viewer_id) else {
@@ -936,7 +1038,10 @@ impl RemoteHub {
                             }
                         }
                         RemoteClientMsg::ClipPush { text } => {
-                            if share.tab_type != SharedTabType::App {
+                            if !matches!(
+                                share.tab_type,
+                                SharedTabType::App | SharedTabType::Contribution
+                            ) {
                                 continue;
                             }
                             let Some(access) = share.viewer_access(viewer_id) else {
@@ -956,7 +1061,10 @@ impl RemoteHub {
                             }
                         }
                         RemoteClientMsg::ProxyReq { id, head, body } => {
-                            if share.tab_type != SharedTabType::App {
+                            if !matches!(
+                                share.tab_type,
+                                SharedTabType::App | SharedTabType::Contribution
+                            ) {
                                 continue;
                             }
                             let Some(access) = share.viewer_access(viewer_id) else {
@@ -965,13 +1073,243 @@ impl RemoteHub {
                             if !access.may_steer() {
                                 continue;
                             }
+                            // v3's whole-request proxy had no viewer-bound
+                            // NetworkGrant and is therefore decode-only now.
+                            // Keeping it executable would let an old client
+                            // bypass every v4 SSRF, port and budget check.
+                            let _ = (head, body);
+                            share.send_rpc_result(
+                                viewer_id,
+                                id,
+                                None,
+                                Some(
+                                    "unsupported-proxy-v1: reconnect with protocol v4 Browser streaming"
+                                        .into(),
+                                ),
+                            );
+                        }
+                        RemoteClientMsg::BrowserOpen {
+                            stream_id,
+                            tab_id,
+                            grant_id,
+                            attachment_id,
+                            attachment_generation,
+                            method,
+                            url,
+                            headers,
+                            body_len,
+                        } => {
+                            if effective_proto < 4
+                                || !matches!(
+                                    share.tab_type,
+                                    SharedTabType::App | SharedTabType::Contribution
+                                )
+                            {
+                                continue;
+                            }
+                            let Some(access) = share.viewer_access(viewer_id) else {
+                                continue;
+                            };
+                            let expected_attachment = share.viewer_attachment(viewer_id);
+                            if expected_attachment.as_ref()
+                                != Some(&(attachment_id.clone(), attachment_generation))
+                            {
+                                share.send_browser_response_error(
+                                    viewer_id,
+                                    stream_id,
+                                    "stale-attachment".into(),
+                                    "stale attachment".into(),
+                                );
+                                continue;
+                            }
+                            if let Err(error) = share.source.inject_input(
+                                viewer_id,
+                                access,
+                                InputPayload::BrowserOpen {
+                                    stream_id,
+                                    tab_id,
+                                    grant_id,
+                                    attachment_id,
+                                    attachment_generation,
+                                    method,
+                                    url,
+                                    headers,
+                                    body_len,
+                                },
+                            ) {
+                                share.send_browser_response_error(
+                                    viewer_id,
+                                    stream_id,
+                                    "open-failed".into(),
+                                    error.to_string(),
+                                );
+                            }
+                        }
+                        RemoteClientMsg::BrowserRequestChunk {
+                            stream_id,
+                            seq,
+                            b64,
+                        } => {
+                            if effective_proto < 4 {
+                                continue;
+                            }
+                            let Some(access) = share.viewer_access(viewer_id) else {
+                                continue;
+                            };
+                            if let Err(error) = share.source.inject_input(
+                                viewer_id,
+                                access,
+                                InputPayload::BrowserRequestChunk {
+                                    stream_id,
+                                    seq,
+                                    b64,
+                                },
+                            ) {
+                                share.send_browser_response_error(
+                                    viewer_id,
+                                    stream_id,
+                                    "request-chunk-rejected".into(),
+                                    error.to_string(),
+                                );
+                            }
+                        }
+                        RemoteClientMsg::BrowserRequestEnd { stream_id } => {
+                            if effective_proto < 4 {
+                                continue;
+                            }
+                            let Some(access) = share.viewer_access(viewer_id) else {
+                                continue;
+                            };
+                            if let Err(error) = share.source.inject_input(
+                                viewer_id,
+                                access,
+                                InputPayload::BrowserRequestEnd { stream_id },
+                            ) {
+                                share.send_browser_response_error(
+                                    viewer_id,
+                                    stream_id,
+                                    "request-end-rejected".into(),
+                                    error.to_string(),
+                                );
+                            }
+                        }
+                        RemoteClientMsg::BrowserCredit { stream_id, bytes } => {
+                            if effective_proto < 4 {
+                                continue;
+                            }
+                            let Some(access) = share.viewer_access(viewer_id) else {
+                                continue;
+                            };
+                            if let Err(error) = share.source.inject_input(
+                                viewer_id,
+                                access,
+                                InputPayload::BrowserCredit { stream_id, bytes },
+                            ) {
+                                share.send_browser_response_error(
+                                    viewer_id,
+                                    stream_id,
+                                    "response-credit-rejected".into(),
+                                    error.to_string(),
+                                );
+                            }
+                        }
+                        RemoteClientMsg::BrowserCancel { stream_id, reason } => {
+                            if effective_proto < 4 {
+                                continue;
+                            }
+                            let Some(access) = share.viewer_access(viewer_id) else {
+                                continue;
+                            };
+                            let _ = share.source.inject_input(
+                                viewer_id,
+                                access,
+                                InputPayload::BrowserCancel { stream_id, reason },
+                            );
+                        }
+                        RemoteClientMsg::RemoteAck {
+                            tab_id,
+                            epoch,
+                            frame_seq,
+                        } => {
+                            if effective_proto < 4 {
+                                continue;
+                            }
+                            let Some(access) = share.viewer_access(viewer_id) else {
+                                continue;
+                            };
                             if let Err(e) = share.source.inject_input(
                                 viewer_id,
                                 access,
-                                InputPayload::ProxyReq { id, head, body },
+                                InputPayload::RemoteAck {
+                                    tab_id,
+                                    epoch,
+                                    frame_seq,
+                                },
                             ) {
                                 eprintln!(
-                                    "[remote] proxy req from viewer {viewer_id} not applied: {e:#}"
+                                    "[remote] ack from viewer {viewer_id} not applied: {e:#}"
+                                );
+                            }
+                        }
+                        RemoteClientMsg::RemoteResnapshot { tab_id, epoch } => {
+                            if effective_proto < 4 {
+                                continue;
+                            }
+                            let Some(access) = share.viewer_access(viewer_id) else {
+                                continue;
+                            };
+                            if let Err(e) = share.source.inject_input(
+                                viewer_id,
+                                access,
+                                InputPayload::RemoteResnapshot { tab_id, epoch },
+                            ) {
+                                eprintln!(
+                                    "[remote] resnapshot from viewer {viewer_id} not applied: {e:#}"
+                                );
+                            }
+                        }
+                        RemoteClientMsg::RemoteIntent {
+                            tab_id,
+                            attachment_id,
+                            attachment_generation,
+                            intent_id,
+                            name,
+                            args,
+                        } => {
+                            if effective_proto < 4 {
+                                continue;
+                            }
+                            let Some(access) = share.viewer_access(viewer_id) else {
+                                continue;
+                            };
+                            let expected_attachment = share.viewer_attachment(viewer_id);
+                            if expected_attachment.as_ref()
+                                != Some(&(attachment_id.clone(), attachment_generation))
+                            {
+                                share.send_intent_result(
+                                    viewer_id,
+                                    attachment_id,
+                                    attachment_generation,
+                                    intent_id,
+                                    None,
+                                    Some("stale attachment".into()),
+                                );
+                                continue;
+                            }
+                            if let Err(e) = share.source.inject_input(
+                                viewer_id,
+                                access,
+                                InputPayload::RemoteIntent {
+                                    tab_id,
+                                    attachment_id,
+                                    attachment_generation,
+                                    intent_id,
+                                    name,
+                                    args,
+                                },
+                            ) {
+                                eprintln!(
+                                    "[remote] intent from viewer {viewer_id} not applied: {e:#}"
                                 );
                             }
                         }
@@ -989,10 +1327,20 @@ impl RemoteHub {
         // change already announced) by the code that removed it.
         let was_present = share.viewers.lock().unwrap().remove(&viewer_id).is_some();
         if was_present {
+            share.source.viewer_detached(viewer_id);
             share.notify_viewport();
             share.presence();
         }
-        writer.abort();
+        // Removing the viewer drops the last sender. Let the writer drain its
+        // queue before closing the connection so a final structured End frame
+        // is observable by the peer. The inner writer wait is bounded too;
+        // this outer guard covers a stalled frame write before `finish`.
+        if tokio::time::timeout(END_FLUSH_TIMEOUT + Duration::from_secs(1), &mut writer)
+            .await
+            .is_err()
+        {
+            writer.abort();
+        }
         conn.close(0u32.into(), b"bye");
         // Normal disconnects surface as read errors; log only.
         if let Err(e) = read_result {
@@ -1166,9 +1514,7 @@ impl JoinHandle {
         let _ = self.tx.send(RemoteClientMsg::Ping);
     }
 
-    /// Send any client frame. The agent payloads have no dedicated helper
-    /// because a viewer that is only watching should not be able to reach for
-    /// one by accident; the caller says what it means.
+    /// Send any client frame; compatibility tests use this lower-level path.
     pub fn send(&self, msg: RemoteClientMsg) {
         let _ = self.tx.send(msg);
     }
@@ -1278,12 +1624,9 @@ mod tests {
     use tokio::sync::Notify;
 
     type InputFn = Arc<dyn Fn(&[u8]) + Send + Sync>;
+    type PayloadFn = Arc<dyn Fn(&InputPayload) + Send + Sync>;
     type SnapshotRequestFn = Arc<dyn Fn(ViewerId) + Send + Sync>;
     type ViewportFn = Arc<dyn Fn(Option<Viewport>) + Send + Sync>;
-    type PromptFn = Arc<dyn Fn(&str) + Send + Sync>;
-    type AnswerFn = Arc<dyn Fn(&str, bool, Option<String>) -> bool + Send + Sync>;
-    type CancelFn = Arc<dyn Fn() + Send + Sync>;
-    type HistoryFn = Arc<dyn Fn() -> Vec<serde_json::Value> + Send + Sync>;
 
     /// The tests' `ShareSource`: every hook is a closure field, so a test
     /// names only what it observes and leaves the rest inert — the successor
@@ -1292,12 +1635,9 @@ mod tests {
         kind: SharedTabType,
         grid: Option<Viewport>,
         on_input: InputFn,
+        on_payload: PayloadFn,
         on_snapshot_request: SnapshotRequestFn,
         on_viewport: ViewportFn,
-        on_prompt: PromptFn,
-        on_answer: AnswerFn,
-        on_cancel: CancelFn,
-        on_history: HistoryFn,
     }
 
     impl TestSource {
@@ -1306,13 +1646,9 @@ mod tests {
                 kind: SharedTabType::Terminal,
                 grid: Some(Viewport { cols: 80, rows: 24 }),
                 on_input: Arc::new(|_| {}),
+                on_payload: Arc::new(|_| {}),
                 on_snapshot_request: Arc::new(|_| {}),
                 on_viewport: Arc::new(|_| {}),
-                on_prompt: Arc::new(|_| {}),
-                // Nothing here can take an answer, so nothing here took it.
-                on_answer: Arc::new(|_, _, _| false),
-                on_cancel: Arc::new(|| {}),
-                on_history: Arc::new(Vec::new),
             }
         }
     }
@@ -1327,46 +1663,32 @@ mod tests {
         fn request_snapshot(&self, viewer: ViewerId) {
             (self.on_snapshot_request)(viewer)
         }
-        fn history(&self) -> Vec<serde_json::Value> {
-            (self.on_history)()
-        }
         fn inject_input(
             &self,
             _viewer: ViewerId,
             _access: Access,
             payload: InputPayload,
         ) -> Result<InputOutcome> {
+            (self.on_payload)(&payload);
             Ok(match payload {
                 InputPayload::Bytes(bytes) => {
                     (self.on_input)(&bytes);
                     InputOutcome::Applied
                 }
-                InputPayload::AgentPrompt { text } => {
-                    (self.on_prompt)(&text);
-                    InputOutcome::Applied
-                }
-                InputPayload::AgentAnswer {
-                    call_id,
-                    allow,
-                    reason,
-                } => {
-                    if (self.on_answer)(&call_id, allow, reason) {
-                        InputOutcome::Applied
-                    } else {
-                        InputOutcome::Raced
-                    }
-                }
-                InputPayload::AgentCancel => {
-                    (self.on_cancel)();
-                    InputOutcome::Applied
-                }
-                // The app-share family never reaches this stub (its tests
-                // drive terminal/agent shares only); the arm exists so a new
+                // The app-share family never reaches this stub; the arm exists so a new
                 // payload variant cannot compile-break every test below.
                 InputPayload::Rpc { .. }
                 | InputPayload::Action { .. }
                 | InputPayload::ClipPush { .. }
-                | InputPayload::ProxyReq { .. } => InputOutcome::Applied,
+                | InputPayload::ProxyReq { .. }
+                | InputPayload::BrowserOpen { .. }
+                | InputPayload::BrowserRequestChunk { .. }
+                | InputPayload::BrowserRequestEnd { .. }
+                | InputPayload::BrowserCredit { .. }
+                | InputPayload::BrowserCancel { .. }
+                | InputPayload::RemoteAck { .. }
+                | InputPayload::RemoteResnapshot { .. }
+                | InputPayload::RemoteIntent { .. } => InputOutcome::Applied,
             })
         }
         fn apply_viewport(&self, joint: Option<Viewport>) {
@@ -1374,6 +1696,113 @@ mod tests {
         }
         fn bind(&self, _binding: ShareBinding) {}
         fn unbind(&self) {}
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retired_v2_request_receives_a_structured_unsupported_end() -> Result<()> {
+        let hub = RemoteHub::new();
+        let (_share, ticket) = hub
+            .share_start(ShareOpts {
+                title: "terminal".into(),
+                source: Arc::new(TestSource::terminal()),
+                on_presence: Arc::new(|_| {}),
+                ttl: None,
+                access: Access::Steer,
+            })
+            .await?;
+        let frames = Arc::new(StdMutex::new(Vec::new()));
+        let changed = Arc::new(Notify::new());
+        let handle = {
+            let frames = Arc::clone(&frames);
+            let changed = Arc::clone(&changed);
+            join(
+                &ticket,
+                "old-client",
+                Arc::new(move |frame| {
+                    frames.lock().unwrap().push(frame);
+                    changed.notify_waiters();
+                }),
+            )
+            .await?
+        };
+        handle.send(RemoteClientMsg::RetiredPrompt {
+            text: "legacy request".into(),
+        });
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if frames.lock().unwrap().iter().any(|frame| {
+                    matches!(
+                        frame,
+                        RemoteHostMsg::End { reason }
+                            if reason == "unsupported capability: retired tab type"
+                    )
+                }) {
+                    return;
+                }
+                changed.notified().await;
+            }
+        })
+        .await
+        .expect("the old request must receive a structured refusal");
+        handle.leave().await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn proxy_v1_is_decode_only_and_cannot_bypass_network_grants() -> Result<()> {
+        let hub = RemoteHub::new();
+        let delivered = Arc::new(StdMutex::new(0usize));
+        let source = TestSource {
+            kind: SharedTabType::App,
+            grid: None,
+            on_payload: {
+                let delivered = delivered.clone();
+                Arc::new(move |payload| {
+                    if matches!(payload, InputPayload::ProxyReq { .. }) {
+                        *delivered.lock().unwrap() += 1;
+                    }
+                })
+            },
+            ..TestSource::terminal()
+        };
+        let (share, ticket) = hub
+            .share_start(ShareOpts {
+                title: "Tabverse".into(),
+                source: Arc::new(source),
+                on_presence: Arc::new(|_| {}),
+                ttl: None,
+                access: Access::Steer,
+            })
+            .await?;
+        let (events, sink) = recording_viewer();
+        let handle = join(&ticket, "old proxy viewer", sink).await?;
+        wait_until("proxy viewer welcome", || {
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, RemoteHostMsg::Welcome { .. }))
+        })
+        .await;
+        handle.send(RemoteClientMsg::ProxyReq {
+            id: 77,
+            head: "GET http://169.254.169.254/latest HTTP/1.1\r\n\r\n".into(),
+            body: Some("must-not-leave".into()),
+        });
+        wait_until("proxy v1 refusal", || {
+            events.lock().unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    RemoteHostMsg::RpcResult { id: 77, err: Some(error), .. }
+                        if error.starts_with("unsupported-proxy-v1:")
+                )
+            })
+        })
+        .await;
+        assert_eq!(*delivered.lock().unwrap(), 0);
+        handle.leave().await;
+        hub.share_stop(&share.id);
+        Ok(())
     }
 
     /// Full protocol roundtrip over real iroh endpoints (localhost direct):
@@ -1950,337 +2379,12 @@ mod tests {
         assert_eq!(old.token, ticket.token);
     }
 
-    // ── agent shares ─────────────────────────────────────────────────────
-
-    /// Wait until `pred` holds over the collected frames, or give up.
-    async fn until(
-        seen: &Arc<StdMutex<Vec<RemoteHostMsg>>>,
-        secs: u64,
-        pred: impl Fn(&[RemoteHostMsg]) -> bool,
-    ) -> bool {
-        let deadline = std::time::Instant::now() + Duration::from_secs(secs);
-        loop {
-            if pred(&seen.lock().unwrap()) {
-                return true;
-            }
-            if std::time::Instant::now() > deadline {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
-
-    fn event(n: u32) -> serde_json::Value {
-        serde_json::json!({ "type": "assistant_text", "delta": format!("part {n}") })
-    }
-
-    /// Start an agent share whose history is `past`, and record what viewers do.
-    struct AgentShareFixture {
-        hub: Arc<RemoteHub>,
-        share: Arc<Share>,
-        ticket: String,
-        prompts: Arc<StdMutex<Vec<String>>>,
-        answers: Arc<StdMutex<Vec<(String, bool)>>>,
-        cancels: Arc<StdMutex<u32>>,
-        /// The latest host-side roster, as (id, access) pairs — what a host
-        /// UI would render after each presence callback.
-        roster: Arc<StdMutex<Vec<(u64, Access)>>>,
-    }
-
-    async fn agent_share(
-        access: Access,
-        past: Vec<serde_json::Value>,
-    ) -> Result<AgentShareFixture> {
-        let hub = RemoteHub::new();
-        let prompts: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
-        let answers: Arc<StdMutex<Vec<(String, bool)>>> = Arc::new(StdMutex::new(Vec::new()));
-        let cancels = Arc::new(StdMutex::new(0u32));
-        let roster: Arc<StdMutex<Vec<(u64, Access)>>> = Arc::new(StdMutex::new(Vec::new()));
-
-        let p = prompts.clone();
-        let a = answers.clone();
-        let c = cancels.clone();
-        // The real adapter, fed by recording hooks — the same shape the app's
-        // glue builds from its agent registry. `set_broadcast` stays inert:
-        // these tests drive the share's fan-out directly.
-        let source = source::agent::AgentSource::new(source::agent::AgentHooks {
-            prompt: Arc::new(move |text| p.lock().unwrap().push(text.to_string())),
-            answer: Arc::new(move |id, allow, _| {
-                let mut seen = a.lock().unwrap();
-                // First answer wins; a later one lost the race.
-                let first = seen.is_empty();
-                seen.push((id.to_string(), allow));
-                first
-            }),
-            cancel: Arc::new(move || *c.lock().unwrap() += 1),
-            history: Arc::new(move || past.clone()),
-            set_broadcast: Arc::new(|_| {}),
-        });
-        let (share, ticket) = hub
-            .share_start(ShareOpts {
-                title: "Agent".into(),
-                source: Arc::new(source),
-                on_presence: {
-                    let roster = roster.clone();
-                    Arc::new(move |r: &[ViewerInfo]| {
-                        *roster.lock().unwrap() = r.iter().map(|v| (v.id, v.access)).collect();
-                    })
-                },
-                ttl: None,
-                access,
-            })
-            .await?;
-        Ok(AgentShareFixture {
-            hub,
-            share,
-            ticket,
-            prompts,
-            answers,
-            cancels,
-            roster,
-        })
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_viewer_joining_late_can_reconstruct_the_whole_run() -> Result<()> {
-        // The criterion: snapshot plus the increments that follow must equal
-        // what the host has, in order and with nothing doubled.
-        let past = vec![event(1), event(2), event(3)];
-        let f = agent_share(Access::Steer, past.clone()).await?;
-
-        let seen: Arc<StdMutex<Vec<RemoteHostMsg>>> = Arc::new(StdMutex::new(Vec::new()));
-        let handle = {
-            let s = seen.clone();
-            join(
-                &f.ticket,
-                "late",
-                Arc::new(move |m| s.lock().unwrap().push(m)),
-            )
-            .await?
-        };
-        assert!(
-            until(&seen, 20, |ms| ms
-                .iter()
-                .any(|m| matches!(m, RemoteHostMsg::AgentSnapshot { .. })))
-            .await,
-            "a viewer that arrives mid-run must be given what it missed"
-        );
-
-        f.share.broadcast_agent_event(event(4));
-        f.share.broadcast_agent_event(event(5));
-        assert!(
-            until(&seen, 20, |ms| ms
-                .iter()
-                .filter(|m| matches!(m, RemoteHostMsg::AgentEvent { .. }))
-                .count()
-                == 2)
-            .await,
-            "and then the live ones"
-        );
-
-        // Reassembled the way a client would.
-        let mut rebuilt: Vec<serde_json::Value> = Vec::new();
-        for msg in seen.lock().unwrap().iter() {
-            match msg {
-                RemoteHostMsg::AgentSnapshot { events } => rebuilt.extend(events.clone()),
-                RemoteHostMsg::AgentEvent { event } => rebuilt.push(event.clone()),
-                _ => {}
-            }
-        }
-        let expected: Vec<serde_json::Value> = (1..=5).map(event).collect();
-        assert_eq!(
-            rebuilt, expected,
-            "snapshot + increments must equal the host's stream"
-        );
-
-        handle.leave().await;
-        f.hub.share_stop(&f.share.id);
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn an_agent_share_turns_a_v1_client_away_before_welcome() -> Result<()> {
-        let f = agent_share(Access::Steer, vec![event(1)]).await?;
-        let seen: Arc<StdMutex<Vec<RemoteHostMsg>>> = Arc::new(StdMutex::new(Vec::new()));
-        let handle = {
-            let s = seen.clone();
-            join_as(
-                ShareTicket::decode(&f.ticket)?,
-                "old",
-                1,
-                Arc::new(move |m| s.lock().unwrap().push(m)),
-            )
-            .await?
-        };
-        assert!(
-            until(&seen, 20, |ms| ms.iter().any(|m| matches!(
-                m,
-                RemoteHostMsg::End { reason } if reason == "this share needs a newer Tabverse"
-            )))
-            .await,
-            "a v1 hello into an agent share must be met with the exact refusal reason"
-        );
-
-        {
-            let got = seen.lock().unwrap();
-            assert!(
-                !got.iter()
-                    .any(|m| matches!(m, RemoteHostMsg::Welcome { .. })),
-                "the refusal must come before any Welcome, got {got:?}"
-            );
-            assert!(
-                !got.iter().any(|m| matches!(
-                    m,
-                    RemoteHostMsg::AgentSnapshot { .. } | RemoteHostMsg::AgentEvent { .. }
-                )),
-                "no agent frame may be sent to a v1 client, got {got:?}"
-            );
-        }
-        assert_eq!(
-            f.share.viewer_count(),
-            0,
-            "a refused viewer must never enter the roster"
-        );
-
-        handle.leave().await;
-        f.hub.share_stop(&f.share.id);
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn steering_is_allowed_at_steer_and_approving_is_not() -> Result<()> {
-        // The criterion for the middle level, enforced host-side: a crafted
-        // frame gets no further than an honest client's disabled button.
-        let f = agent_share(Access::Steer, Vec::new()).await?;
-        let seen: Arc<StdMutex<Vec<RemoteHostMsg>>> = Arc::new(StdMutex::new(Vec::new()));
-        let handle = {
-            let s = seen.clone();
-            join(
-                &f.ticket,
-                "steerer",
-                Arc::new(move |m| s.lock().unwrap().push(m)),
-            )
-            .await?
-        };
-        assert!(
-            until(&seen, 20, |ms| ms.iter().any(|m| matches!(
-                m,
-                RemoteHostMsg::Mode {
-                    access: Some(Access::Steer),
-                    ..
-                }
-            )))
-            .await,
-            "the viewer must be told which level it has"
-        );
-
-        handle.send(RemoteClientMsg::AgentPrompt {
-            text: "try the other branch".into(),
-        });
-        handle.send(RemoteClientMsg::AgentAnswer {
-            call_id: "c1".into(),
-            allow: true,
-            reason: None,
-        });
-        handle.send(RemoteClientMsg::AgentCancel);
-        tokio::time::sleep(Duration::from_millis(400)).await;
-
-        assert_eq!(
-            f.prompts.lock().unwrap().as_slice(),
-            &["try the other branch".to_string()],
-            "steer may talk to the agent"
-        );
-        assert_eq!(*f.cancels.lock().unwrap(), 1, "steer may stop a turn");
-        assert!(
-            f.answers.lock().unwrap().is_empty(),
-            "steer must not be able to authorise anything"
-        );
-
-        handle.leave().await;
-        f.hub.share_stop(&f.share.id);
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn raw_terminal_bytes_into_an_agent_share_are_dropped_before_the_source() -> Result<()> {
-        // A crafted Input frame from a viewer that IS allowed to steer: the
-        // access check alone would let it through, so what this test pins is
-        // the kind gate — raw bytes are the terminal's input shape, and an
-        // agent source must never be handed them. The hub drops the frame
-        // silently (same treatment as an agent frame into a terminal share)
-        // and the viewer stays connected.
-        let hub = RemoteHub::new();
-        let inputs: Arc<StdMutex<Vec<u8>>> = Arc::new(StdMutex::new(Vec::new()));
-        let source = TestSource {
-            kind: SharedTabType::Agent,
-            grid: None,
-            on_input: {
-                let inputs = inputs.clone();
-                Arc::new(move |b| inputs.lock().unwrap().extend_from_slice(b))
-            },
-            ..TestSource::terminal()
-        };
-        let (share, ticket) = hub
-            .share_start(ShareOpts {
-                title: "Agent".into(),
-                source: Arc::new(source),
-                on_presence: Arc::new(|_| {}),
-                ttl: None,
-                access: Access::Steer,
-            })
-            .await?;
-
-        let (events, sink) = recording_viewer();
-        let handle = join(&ticket, "steerer", sink).await?;
-        wait_until("welcome", || {
-            events
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|e| matches!(e, RemoteHostMsg::Welcome { .. }))
-        })
-        .await;
-
-        // The viewer types, then pings. Both ride one ordered stream, so
-        // Pong arriving proves the Input frame was already processed — and
-        // dropped — rather than still in flight.
-        handle.send_input(b"MUST-NOT-REACH-THE-AGENT");
-        handle.ping();
-        wait_until("pong after input", || {
-            events
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|e| matches!(e, RemoteHostMsg::Pong))
-        })
-        .await;
-        assert!(
-            inputs.lock().unwrap().is_empty(),
-            "raw bytes into an agent share must be dropped before the source sees them"
-        );
-        assert!(
-            !events
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|e| matches!(e, RemoteHostMsg::End { .. })),
-            "the drop is silent: the viewer must not be disconnected over it"
-        );
-        assert_eq!(share.viewer_count(), 1, "and stays on the roster");
-
-        handle.leave().await;
-        hub.share_stop(&share.id);
-        Ok(())
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn raw_terminal_bytes_into_an_app_share_reach_the_source() -> Result<()> {
         // The app-share arm of the Input kind gate: a Steer viewer's raw
         // bytes are forwarded as InputPayload::Bytes — the app source routes
-        // them to the host's ACTIVE terminal — while the agent share beside
-        // this test proves the gate still drops what an agent source must
-        // never see. View-level viewers stay dropped by the access check
-        // both kinds share.
+        // them to the host's active terminal. View-level viewers stay dropped
+        // by the shared access check.
         let hub = RemoteHub::new();
         let inputs: Arc<StdMutex<Vec<u8>>> = Arc::new(StdMutex::new(Vec::new()));
         let source = TestSource {
@@ -2337,92 +2441,249 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_view_only_viewer_can_do_neither() -> Result<()> {
-        let f = agent_share(Access::View, Vec::new()).await?;
-        let seen: Arc<StdMutex<Vec<RemoteHostMsg>>> = Arc::new(StdMutex::new(Vec::new()));
-        let handle = {
-            let s = seen.clone();
-            join(
-                &f.ticket,
-                "watcher",
-                Arc::new(move |m| s.lock().unwrap().push(m)),
-            )
-            .await?
+    async fn v4_contribution_streams_and_attachment_identity_cross_the_real_transport() -> Result<()>
+    {
+        let hub = RemoteHub::new();
+        let payloads: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let source = TestSource {
+            kind: SharedTabType::Contribution,
+            grid: None,
+            on_payload: {
+                let payloads = payloads.clone();
+                Arc::new(move |payload| {
+                    let label = match payload {
+                        InputPayload::RemoteAck {
+                            tab_id, frame_seq, ..
+                        } => {
+                            format!("ack:{tab_id}:{frame_seq}")
+                        }
+                        InputPayload::RemoteIntent {
+                            tab_id, intent_id, ..
+                        } => {
+                            format!("intent:{tab_id}:{intent_id}")
+                        }
+                        _ => return,
+                    };
+                    payloads.lock().unwrap().push(label);
+                })
+            },
+            ..TestSource::terminal()
         };
-        assert!(
-            until(&seen, 20, |ms| ms
-                .iter()
-                .any(|m| matches!(m, RemoteHostMsg::Welcome { .. })))
-            .await
-        );
-        handle.send(RemoteClientMsg::AgentPrompt {
-            text: "hello".into(),
-        });
-        handle.send(RemoteClientMsg::AgentCancel);
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        let (share, ticket) = hub
+            .share_start(ShareOpts {
+                title: "Tabverse".into(),
+                source: Arc::new(source),
+                on_presence: Arc::new(|_| {}),
+                ttl: None,
+                access: Access::Steer,
+            })
+            .await?;
 
-        assert!(f.prompts.lock().unwrap().is_empty());
-        assert_eq!(*f.cancels.lock().unwrap(), 0);
+        let (events, sink) = recording_viewer();
+        let handle = join(&ticket, "v4 viewer", sink).await?;
+        wait_until("v4 attachment welcome", || {
+            events.lock().unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    RemoteHostMsg::Welcome {
+                        proto: 4,
+                        tab_type: Some(SharedTabType::Contribution),
+                        attachment_id: Some(_),
+                        attachment_generation: Some(1),
+                        ..
+                    }
+                )
+            })
+        })
+        .await;
+        let attachment_id = events
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|event| match event {
+                RemoteHostMsg::Welcome {
+                    attachment_id: Some(id),
+                    ..
+                } => Some(id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let viewer = attachment_id
+            .strip_prefix("attachment-")
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+
+        share.broadcast_contribution_snapshot(
+            "browser-1".into(),
+            "browser".into(),
+            "epoch-1".into(),
+            1,
+            0,
+            serde_json::json!({"url": "http://intranet/"}),
+        );
+        share.broadcast_contribution_frame(
+            "browser-1".into(),
+            "browser".into(),
+            "epoch-1".into(),
+            1,
+            serde_json::json!({"type": "replace", "state": {"url": "http://next/"}}),
+        );
+        wait_until("v4 semantic frames", || {
+            let events = events.lock().unwrap();
+            events
+                .iter()
+                .any(|event| matches!(event, RemoteHostMsg::ContributionSnapshot { .. }))
+                && events
+                    .iter()
+                    .any(|event| matches!(event, RemoteHostMsg::ContributionFrame { .. }))
+        })
+        .await;
+
+        handle.send(RemoteClientMsg::RemoteAck {
+            tab_id: "browser-1".into(),
+            epoch: "epoch-1".into(),
+            frame_seq: 1,
+        });
+        handle.send(RemoteClientMsg::RemoteIntent {
+            tab_id: "browser-1".into(),
+            attachment_id: "stale-attachment".into(),
+            attachment_generation: 1,
+            intent_id: "stale-intent".into(),
+            name: "browser.navigate".into(),
+            args: serde_json::json!({"url": "http://blocked/"}),
+        });
+        handle.ping();
+        wait_until("stale attachment refusal", || {
+            events.lock().unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    RemoteHostMsg::IntentResult {
+                        intent_id,
+                        err: Some(error),
+                        ..
+                    } if intent_id == "stale-intent" && error == "stale attachment"
+                )
+            })
+        })
+        .await;
+        assert!(
+            !payloads
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.contains("stale-intent")),
+            "a stale attachment must be rejected before the source"
+        );
+
+        handle.send(RemoteClientMsg::RemoteIntent {
+            tab_id: "browser-1".into(),
+            attachment_id: attachment_id.clone(),
+            attachment_generation: 1,
+            intent_id: "intent-1".into(),
+            name: "browser.navigate".into(),
+            args: serde_json::json!({"url": "http://intranet/"}),
+        });
+        handle.ping();
+        wait_until("v4 ack and intent at source", || {
+            let payloads = payloads.lock().unwrap();
+            payloads.contains(&"ack:browser-1:1".to_string())
+                && payloads.contains(&"intent:browser-1:intent-1".to_string())
+        })
+        .await;
+        share.send_intent_result(
+            viewer,
+            attachment_id,
+            1,
+            "intent-1".into(),
+            Some(serde_json::json!({"accepted": true})),
+            None,
+        );
+        wait_until("directed intent result", || {
+            events.lock().unwrap().iter().any(|event| {
+                matches!(event, RemoteHostMsg::IntentResult { intent_id, ok: Some(_), .. } if intent_id == "intent-1")
+            })
+        })
+        .await;
 
         handle.leave().await;
-        f.hub.share_stop(&f.share.id);
+
+        let (rejoined_events, rejoined_sink) = recording_viewer();
+        let rejoined = join(&ticket, "v4 viewer rejoined", rejoined_sink).await?;
+        wait_until("rejoined attachment generation", || {
+            rejoined_events.lock().unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    RemoteHostMsg::Welcome {
+                        proto: 4,
+                        attachment_generation: Some(2),
+                        ..
+                    }
+                )
+            })
+        })
+        .await;
+        let rejoined_attachment = rejoined_events
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|event| match event {
+                RemoteHostMsg::Welcome {
+                    attachment_id: Some(id),
+                    attachment_generation: Some(2),
+                    ..
+                } => Some(id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        rejoined.send(RemoteClientMsg::RemoteIntent {
+            tab_id: "browser-1".into(),
+            attachment_id: rejoined_attachment.clone(),
+            attachment_generation: 1,
+            intent_id: "old-generation".into(),
+            name: "browser.navigate".into(),
+            args: serde_json::json!({"url": "http://blocked/"}),
+        });
+        rejoined.ping();
+        wait_until("old generation refusal after reconnect", || {
+            rejoined_events.lock().unwrap().iter().any(|event| {
+                matches!(
+                    event,
+                    RemoteHostMsg::IntentResult {
+                        intent_id,
+                        err: Some(error),
+                        ..
+                    } if intent_id == "old-generation" && error == "stale attachment"
+                )
+            })
+        })
+        .await;
+        assert!(!payloads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.contains("old-generation")));
+        rejoined.send(RemoteClientMsg::RemoteIntent {
+            tab_id: "browser-1".into(),
+            attachment_id: rejoined_attachment,
+            attachment_generation: 2,
+            intent_id: "intent-2".into(),
+            name: "browser.navigate".into(),
+            args: serde_json::json!({"url": "http://intranet/"}),
+        });
+        rejoined.ping();
+        wait_until("current generation accepted after reconnect", || {
+            payloads
+                .lock()
+                .unwrap()
+                .contains(&"intent:browser-1:intent-2".to_string())
+        })
+        .await;
+        rejoined.leave().await;
+        hub.share_stop(&share.id);
         Ok(())
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn approving_works_and_losing_the_race_is_said_out_loud() -> Result<()> {
-        // Two answers, one effect. The one that changed nothing has to be told
-        // so — a button that silently does nothing is indistinguishable from a
-        // broken one.
-        let f = agent_share(Access::Approve, Vec::new()).await?;
-        let seen: Arc<StdMutex<Vec<RemoteHostMsg>>> = Arc::new(StdMutex::new(Vec::new()));
-        let handle = {
-            let s = seen.clone();
-            join(
-                &f.ticket,
-                "approver",
-                Arc::new(move |m| s.lock().unwrap().push(m)),
-            )
-            .await?
-        };
-        assert!(
-            until(&seen, 20, |ms| ms
-                .iter()
-                .any(|m| matches!(m, RemoteHostMsg::Welcome { .. })))
-            .await
-        );
-
-        handle.send(RemoteClientMsg::AgentAnswer {
-            call_id: "c1".into(),
-            allow: true,
-            reason: None,
-        });
-        handle.send(RemoteClientMsg::AgentAnswer {
-            call_id: "c1".into(),
-            allow: false,
-            reason: None,
-        });
-
-        assert!(
-            until(&seen, 20, |ms| ms.iter().any(|m| matches!(
-                m,
-                RemoteHostMsg::AgentDecisionTaken { .. }
-            )))
-            .await,
-            "the losing answer must come back as such"
-        );
-        {
-            let answers = f.answers.lock().unwrap();
-            assert_eq!(answers.len(), 2, "both reached the host");
-            assert!(answers[0].1, "and the first one is the one that counted");
-        }
-        handle.leave().await;
-        f.hub.share_stop(&f.share.id);
-        Ok(())
-    }
-
-    /// set_viewer_access on things that are not there: each mistake gets its
-    /// own clean error naming what was missing, and nothing half-applies.
     #[tokio::test(flavor = "multi_thread")]
     async fn set_viewer_access_names_the_missing_share_or_viewer() -> Result<()> {
         let hub = RemoteHub::new();
@@ -2448,132 +2709,104 @@ mod tests {
         Ok(())
     }
 
-    /// The agent arms are re-gated live too: a Steer viewer downgraded to
-    /// View loses the prompt, and upgraded to Approve gains a power the
-    /// share default never had — proof the checks read the viewer's CURRENT
-    /// level, not the share's, and not a copy from join.
     #[tokio::test(flavor = "multi_thread")]
-    async fn live_access_change_regates_agent_frames() -> Result<()> {
-        let f = agent_share(Access::Steer, Vec::new()).await?;
-        let seen: Arc<StdMutex<Vec<RemoteHostMsg>>> = Arc::new(StdMutex::new(Vec::new()));
-        let handle = {
-            let s = seen.clone();
-            join(
-                &f.ticket,
-                "colleague",
-                Arc::new(move |m| s.lock().unwrap().push(m)),
-            )
-            .await?
-        };
-        assert!(
-            until(&seen, 20, |ms| ms.iter().any(|m| matches!(
-                m,
-                RemoteHostMsg::Mode {
-                    access: Some(Access::Steer),
+    async fn browser_response_frames_are_requester_private_even_when_stream_ids_collide(
+    ) -> Result<()> {
+        let hub = RemoteHub::new();
+        let (share, ticket) = hub
+            .share_start(ShareOpts {
+                title: "Browser stream".into(),
+                source: Arc::new(TestSource {
+                    kind: SharedTabType::Contribution,
+                    grid: None,
+                    ..TestSource::terminal()
+                }),
+                on_presence: Arc::new(|_| {}),
+                ttl: None,
+                access: Access::Steer,
+            })
+            .await?;
+        let (events_a, sink_a) = recording_viewer();
+        let (events_b, sink_b) = recording_viewer();
+        let handle_a = join(&ticket, "viewer-a", sink_a).await?;
+        let handle_b = join(&ticket, "viewer-b", sink_b).await?;
+        wait_until("both browser viewers welcomed", || {
+            [events_a.clone(), events_b.clone()].iter().all(|events| {
+                events.lock().unwrap().iter().any(|event| {
+                    matches!(
+                        event,
+                        RemoteHostMsg::Welcome {
+                            attachment_id: Some(_),
+                            ..
+                        }
+                    )
+                })
+            })
+        })
+        .await;
+        let viewer_a = events_a
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|event| match event {
+                RemoteHostMsg::Welcome {
+                    attachment_id: Some(id),
                     ..
-                }
-            )))
-            .await,
-            "join-time Mode must carry the default level"
-        );
-        wait_until("roster with the joined viewer", || {
-            !f.roster.lock().unwrap().is_empty()
-        })
-        .await;
-        let viewer_id = f.roster.lock().unwrap()[0].0;
+                } => id.strip_prefix("attachment-")?.parse::<u64>().ok(),
+                _ => None,
+            })
+            .unwrap();
 
-        // Downgrade, live. The change is applied synchronously host-side, so
-        // once the viewer has SEEN the new Mode, any frame it sends after
-        // that is guaranteed to be judged by the new level.
-        f.hub
-            .set_viewer_access(&f.share.id, viewer_id, Access::View)?;
-        assert!(
-            until(&seen, 20, |ms| ms.iter().any(|m| matches!(
-                m,
-                RemoteHostMsg::Mode {
-                    read_only: true,
-                    access: Some(Access::View)
-                }
-            )))
-            .await,
-            "the downgraded viewer must be told with a coherent Mode"
+        // stream_id=77 may simultaneously exist for viewer-b. Routing uses
+        // (viewer, stream), never the viewer-local id by itself.
+        share.send_browser_response_head(
+            viewer_a,
+            77,
+            200,
+            vec![("content-type".into(), "application/octet-stream".into())],
+            "http://intranet/final".into(),
         );
-        assert_eq!(
-            f.roster.lock().unwrap().as_slice(),
-            &[(viewer_id, Access::View)],
-            "the host roster must carry the viewer's new level"
-        );
-        handle.send(RemoteClientMsg::AgentPrompt {
-            text: "dropped while view".into(),
-        });
-        // Pin the drop to the View window: Pong rides the same ordered
-        // stream, so its arrival proves the prompt was processed — and
-        // dropped — BEFORE the upgrade below could re-open the gate.
-        handle.ping();
-        assert!(
-            until(&seen, 20, |ms| ms
+        share.send_browser_response_chunk(viewer_a, 77, 0, "AAE=".into());
+        share.send_browser_response_end(viewer_a, 77);
+        wait_until("requester received browser stream", || {
+            events_a
+                .lock()
+                .unwrap()
                 .iter()
-                .any(|m| matches!(m, RemoteHostMsg::Pong)))
-            .await,
-            "pong must come back after the doomed prompt"
+                .any(|event| matches!(event, RemoteHostMsg::BrowserResponseEnd { stream_id: 77 }))
+        })
+        .await;
+        assert_eq!(
+            events_a
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RemoteHostMsg::BrowserResponseHead { stream_id: 77, .. }
+                        | RemoteHostMsg::BrowserResponseChunk { stream_id: 77, .. }
+                        | RemoteHostMsg::BrowserResponseEnd { stream_id: 77 }
+                ))
+                .count(),
+            3
         );
-
-        // Upgrade to Approve: more than the share default ever granted.
-        f.hub
-            .set_viewer_access(&f.share.id, viewer_id, Access::Approve)?;
         assert!(
-            until(&seen, 20, |ms| ms.iter().any(|m| matches!(
-                m,
-                RemoteHostMsg::Mode {
-                    read_only: false,
-                    access: Some(Access::Approve)
-                }
-            )))
-            .await,
-            "the upgraded viewer must be told with a coherent Mode"
-        );
-        handle.send(RemoteClientMsg::AgentPrompt {
-            text: "landed at approve".into(),
-        });
-        handle.send(RemoteClientMsg::AgentAnswer {
-            call_id: "c1".into(),
-            allow: true,
-            reason: None,
-        });
-
-        // One ordered stream: by the time the marker prompt landed, the
-        // doomed one had already been processed — and dropped.
-        wait_until("the post-upgrade prompt", || {
-            !f.prompts.lock().unwrap().is_empty()
-        })
-        .await;
-        assert_eq!(
-            f.prompts.lock().unwrap().as_slice(),
-            &["landed at approve".to_string()],
-            "the prompt sent while View must have been dropped by the hub"
-        );
-        wait_until("the post-upgrade answer", || {
-            !f.answers.lock().unwrap().is_empty()
-        })
-        .await;
-        assert_eq!(
-            f.answers.lock().unwrap().as_slice(),
-            &[("c1".to_string(), true)],
-            "Approve must unlock answering, which Steer never allowed"
+            events_b.lock().unwrap().iter().all(|event| !matches!(
+                event,
+                RemoteHostMsg::BrowserResponseHead { .. }
+                    | RemoteHostMsg::BrowserResponseChunk { .. }
+                    | RemoteHostMsg::BrowserResponseEnd { .. }
+                    | RemoteHostMsg::BrowserResponseError { .. }
+            )),
+            "viewer-b must receive zero frames from viewer-a's response"
         );
 
-        handle.leave().await;
-        f.hub.share_stop(&f.share.id);
+        handle_a.leave().await;
+        handle_b.leave().await;
+        hub.share_stop(&share.id);
         Ok(())
     }
 
-    /// An app share end to end, through the real hub and a real join: the
-    /// welcome names the app kind, and the joiner receives the snapshot the
-    /// source produced. This is the discriminating test for the field
-    /// report "the joiner sees no tabs at all" — if this passes, the wire
-    /// and the source are honest and the fault lives in the host's
-    /// webview-event seam (the no-handle path here is the fallback the
-    /// seam's answer replaces).
     #[tokio::test(flavor = "multi_thread")]
     async fn an_app_share_delivers_its_snapshot_to_a_joiner() -> Result<()> {
         use crate::source::ShareSource;
@@ -2604,7 +2837,7 @@ mod tests {
             ) -> Result<InputOutcome> {
                 match p {
                     InputPayload::Action { .. } => Ok(InputOutcome::Applied),
-                    _ => bail!("an app source cannot take terminal or agent input"),
+                    _ => bail!("an app source cannot take terminal input"),
                 }
             }
             fn bind(&self, b: ShareBinding) {

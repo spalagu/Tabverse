@@ -1878,7 +1878,7 @@ mod tests {
         let Inspection::Executable {
             format,
             archs,
-            executable_bit,
+            executable_bit: _executable_bit,
             has_code_signature,
             has_entry_point,
             dylib_count,
@@ -1901,7 +1901,7 @@ mod tests {
         assert_eq!(names[0], "/usr/lib/libSystem.B.dylib");
         assert_eq!(names[1], "@rpath/Helper.dylib");
         #[cfg(unix)]
-        assert!(!executable_bit, "written 0644: no execute bit yet");
+        assert!(!_executable_bit, "written 0644: no execute bit yet");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -2018,7 +2018,7 @@ mod tests {
         let Inspection::Executable {
             format,
             interpreter,
-            executable_bit,
+            executable_bit: _executable_bit,
             ..
         } = insp
         else {
@@ -2027,7 +2027,7 @@ mod tests {
         assert_eq!(format, "script");
         assert_eq!(interpreter.as_deref(), Some("/usr/bin/env python3 -u"));
         #[cfg(unix)]
-        assert!(!executable_bit, "written without +x");
+        assert!(!_executable_bit, "written without +x");
 
         #[cfg(unix)]
         {

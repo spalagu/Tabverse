@@ -157,6 +157,264 @@ export interface ProxyClient {
   failAll(reason: string): void;
 }
 
+export interface BrowserAttachment {
+  readonly id: string;
+  readonly generation: number;
+}
+
+export interface BrowserStreamSend {
+  open(frame: {
+    streamId: number;
+    tabId: string;
+    grantId: string;
+    attachmentId: string;
+    attachmentGeneration: number;
+    method: string;
+    url: string;
+    headers: Array<[string, string]>;
+    bodyLen?: number;
+  }): void;
+  requestChunk(streamId: number, seq: number, b64: string): void;
+  requestEnd(streamId: number): void;
+  credit(streamId: number, bytes: number): void;
+  cancel(streamId: number, reason?: string): void;
+}
+
+export type BrowserStreamHostFrame =
+  | {
+      type: "browserResponseHead";
+      streamId: number;
+      status: number;
+      headers: Array<[string, string]>;
+      finalUrl: string;
+    }
+  | { type: "browserResponseChunk"; streamId: number; seq: number; b64: string }
+  | { type: "browserResponseEnd"; streamId: number }
+  | { type: "browserResponseError"; streamId: number; code: string; message: string };
+
+interface BrowserWaiting {
+  readonly method: string;
+  readonly resolve: (response: Response) => void;
+  readonly reject: (error: Error) => void;
+  readonly abort?: () => void;
+  readonly headTimer: ReturnType<typeof setTimeout>;
+  controller?: ReadableStreamDefaultController<Uint8Array>;
+  expectedSeq: number;
+  uncreditedBytes: number;
+  settled: boolean;
+}
+
+export interface BrowserStreamClient {
+  requestViaHost(
+    tabId: string,
+    input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response>;
+  consume(frame: unknown): boolean;
+  failAll(reason: string): void;
+}
+
+const STREAM_ID_START = 2 ** 31;
+const REQUEST_CHUNK_BYTES = 64 * 1024;
+const INITIAL_RESPONSE_CREDIT = 512 * 1024;
+
+function bytesToB64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function b64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+/** Browser A's http-stream-v2 client: binary request chunks up, a
+ * requester-private ReadableStream down, explicit byte credit, and AbortSignal
+ * cancellation. The host-issued attachment identity is read at open time so a
+ * reconnect cannot reuse an old generation. */
+export function createBrowserStreamClient(
+  send: BrowserStreamSend,
+  attachment: () => BrowserAttachment | null,
+): BrowserStreamClient {
+  const waiting = new Map<number, BrowserWaiting>();
+  let nextStreamId = STREAM_ID_START;
+
+  async function requestViaHost(
+    tabId: string,
+    input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> {
+    const owner = attachment();
+    if (owner === null) throw new Error("browser stream has no live attachment");
+    const request = new Request(input, init);
+    if (!/^https?:$/.test(new URL(request.url).protocol)) {
+      throw new Error("Browser A carries HTTP(S) only");
+    }
+    if (request.signal.aborted) throw new DOMException("request aborted", "AbortError");
+    const body = request.method === "GET" || request.method === "HEAD"
+      ? new Uint8Array()
+      : new Uint8Array(await request.arrayBuffer());
+    const streamId = ++nextStreamId;
+    const headers: Array<[string, string]> = [];
+    request.headers.forEach((value, name) => headers.push([name, value]));
+
+    return new Promise<Response>((resolve, reject) => {
+      const onAbort = () => {
+        send.cancel(streamId, "viewer-abort");
+        const current = waiting.get(streamId);
+        if (current === undefined) return;
+        waiting.delete(streamId);
+        clearTimeout(current.headTimer);
+        const error = new DOMException("request aborted", "AbortError");
+        if (current.controller !== undefined) current.controller.error(error);
+        if (!current.settled) current.reject(error);
+      };
+      request.signal.addEventListener("abort", onAbort, { once: true });
+      const headTimer = setTimeout(() => {
+        const current = waiting.get(streamId);
+        if (current === undefined || current.settled) return;
+        waiting.delete(streamId);
+        send.cancel(streamId, "response-head-timeout");
+        current.abort?.();
+        current.reject(new Error(`browser response head timed out after ${PROXY_TIMEOUT_MS}ms`));
+      }, PROXY_TIMEOUT_MS);
+      waiting.set(streamId, {
+        method: request.method,
+        resolve,
+        reject,
+        abort: () => request.signal.removeEventListener("abort", onAbort),
+        headTimer,
+        expectedSeq: 0,
+        uncreditedBytes: 0,
+        settled: false,
+      });
+      send.open({
+        streamId,
+        tabId,
+        grantId: `browser-grant-v1:${owner.id}:${owner.generation}:${tabId}`,
+        attachmentId: owner.id,
+        attachmentGeneration: owner.generation,
+        method: request.method,
+        url: request.url,
+        headers,
+        bodyLen: body.length === 0 ? undefined : body.length,
+      });
+      for (let offset = 0, seq = 0; offset < body.length; offset += REQUEST_CHUNK_BYTES, seq += 1) {
+        send.requestChunk(
+          streamId,
+          seq,
+          bytesToB64(body.subarray(offset, offset + REQUEST_CHUNK_BYTES)),
+        );
+      }
+      send.credit(streamId, INITIAL_RESPONSE_CREDIT);
+      send.requestEnd(streamId);
+    });
+  }
+
+  function consume(frame: unknown): boolean {
+    if (typeof frame !== "object" || frame === null) return false;
+    const value = frame as Partial<BrowserStreamHostFrame> & Record<string, unknown>;
+    if (
+      value.type !== "browserResponseHead" &&
+      value.type !== "browserResponseChunk" &&
+      value.type !== "browserResponseEnd" &&
+      value.type !== "browserResponseError"
+    ) return false;
+    const streamId = Number(value.streamId);
+    const current = waiting.get(streamId);
+    if (current === undefined) return true;
+
+    if (value.type === "browserResponseHead") {
+      if (current.settled) return true;
+      clearTimeout(current.headTimer);
+      const status = Number(value.status);
+      const nullBody = current.method === "HEAD" || status === 204 || status === 205 || status === 304;
+      let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+      const body = nullBody ? null : new ReadableStream<Uint8Array>({
+        start(next) {
+          controller = next;
+          current.controller = next;
+        },
+        pull() {
+          if (current.uncreditedBytes > 0) {
+            send.credit(streamId, current.uncreditedBytes);
+            current.uncreditedBytes = 0;
+          }
+        },
+        cancel(reason) {
+          send.cancel(streamId, String(reason ?? "response-body-cancelled"));
+          waiting.delete(streamId);
+          current.abort?.();
+        },
+      }, new ByteLengthQueuingStrategy({ highWaterMark: INITIAL_RESPONSE_CREDIT }));
+      const headers = new Headers(value.headers as Array<[string, string]>);
+      if (typeof value.finalUrl === "string") {
+        headers.set("x-tabverse-final-url", value.finalUrl);
+      }
+      current.controller = controller;
+      current.settled = true;
+      current.resolve(new Response(body, { status, headers }));
+      return true;
+    }
+    if (value.type === "browserResponseChunk") {
+      if (Number(value.seq) !== current.expectedSeq || current.controller === undefined) {
+        send.cancel(streamId, "response-chunk-gap");
+        current.controller?.error(new Error("browser response chunk gap"));
+        if (!current.settled) current.reject(new Error("browser response chunk gap"));
+        current.abort?.();
+        clearTimeout(current.headTimer);
+        waiting.delete(streamId);
+        return true;
+      }
+      const bytes = b64ToBytes(String(value.b64));
+      current.expectedSeq += 1;
+      current.controller.enqueue(bytes);
+      current.uncreditedBytes += bytes.byteLength;
+      // Credit follows consumption pressure: while the byte-length queue is
+      // below its high-water mark it can safely take another chunk; once it
+      // fills, pull() alone replenishes the host window.
+      if ((current.controller.desiredSize ?? 0) > 0) {
+        send.credit(streamId, current.uncreditedBytes);
+        current.uncreditedBytes = 0;
+      }
+      return true;
+    }
+    waiting.delete(streamId);
+    clearTimeout(current.headTimer);
+    current.abort?.();
+    if (value.type === "browserResponseEnd") {
+      current.controller?.close();
+      if (!current.settled) current.reject(new Error("browser response ended before its head"));
+    } else {
+      const error = new Error(`${String(value.code)}: ${String(value.message)}`);
+      current.controller?.error(error);
+      if (!current.settled) current.reject(error);
+    }
+    return true;
+  }
+
+  function failAll(reason: string): void {
+    for (const [streamId, current] of waiting) {
+      send.cancel(streamId, "session-ended");
+      const error = new Error(reason);
+      current.controller?.error(error);
+      if (!current.settled) current.reject(error);
+      current.abort?.();
+      clearTimeout(current.headTimer);
+    }
+    waiting.clear();
+  }
+
+  return { requestViaHost, consume, failAll };
+}
+
 /**
  * The proxy ids start far above the rpc channel's counter so the two
  * waiting maps can never both hold the same id: the host echoes whatever

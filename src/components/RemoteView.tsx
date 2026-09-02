@@ -1,12 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { b64decode, b64encode } from "../backend/b64";
-import type { AgentAccess, RemoteHostMsgPayload } from "../backend/types";
-import {
-  applyViewerFrame,
-  initialViewerAgentState,
-  type ViewerAgentState,
-} from "../agent/viewerFrames";
-import type { RemoteAgentActions } from "./RemoteAgentPane";
+import type { ShareAccess, RemoteHostMsgPayload } from "../backend/types";
 import {
   RemoteSessionPane,
   type RemoteRendererKind,
@@ -34,11 +28,12 @@ import {
  * payload union in backend/types.ts picks the new frame up. */
 type RemoteEvent =
   | RemoteHostMsgPayload
-  | { type: "mode"; readOnly: boolean; access?: AgentAccess };
+  | { type: "mode"; readOnly: boolean; access?: ShareAccess };
 
 interface Props {
   tab: Tab;
   active: boolean;
+  residentRuntimeId?: string;
 }
 
 /** Which renderer this share gets. Decided by the welcome's tabType; null
@@ -68,10 +63,7 @@ interface RemoteConnection {
   pending: Array<(sink: RemoteTermSink) => void>;
 }
 
-export function RemoteView({ tab, active }: Props) {
-  // An agent share arrives on the same connection as a terminal one; every
-  // frame goes through this fold, which collects what a transcript needs.
-  const [agentState, setAgentState] = useState<ViewerAgentState>(initialViewerAgentState);
+export function RemoteView({ tab, active, residentRuntimeId }: Props) {
   const [kind, setKind] = useState<RemoteRendererKind>(null);
   const instRef = useRef<RemoteConnection | null>(null);
   const invokeRef = useRef<typeof import("@tauri-apps/api/core").invoke | null>(null);
@@ -90,48 +82,30 @@ export function RemoteView({ tab, active }: Props) {
     // Read-only gating is UX only — the host drops input frames from
     // read-only viewers authoritatively.
     if (!inst || !invoke || inst.disposed || inst.readOnly || !inst.joinId) return;
-    void invoke("remote_input", { id: inst.joinId, dataB64: b64encode(data) });
-  }, []);
+    if (residentRuntimeId !== undefined) {
+      void invoke("resident_intent", {
+        runtimeId: residentRuntimeId,
+        payload: { type: "input", dataB64: b64encode(data) },
+      });
+    } else {
+      void invoke("remote_input", { id: inst.joinId, dataB64: b64encode(data) });
+    }
+  }, [residentRuntimeId]);
 
   /** Viewport report path for the terminal renderer (it does the measuring). */
   const sendViewport = useCallback((cols: number, rows: number) => {
     const inst = instRef.current;
     const invoke = invokeRef.current;
     if (!inst || !invoke || inst.disposed || !inst.joinId) return;
-    void invoke("remote_viewport", { id: inst.joinId, cols, rows }).catch(() => {});
-  }, []);
-
-  /** The agent pane's send side: the desktop's invoke commands, wrapped so
-   * the pane never names a transport. Reconnects swap inst.joinId under
-   * these closures, exactly as they do under sendInput above. */
-  const agentActions = useMemo<RemoteAgentActions>(
-    () => ({
-      prompt: (text) => {
-        const inst = instRef.current;
-        const invoke = invokeRef.current;
-        if (!inst || !invoke || inst.disposed || !inst.joinId) return;
-        void invoke("remote_agent_prompt", { id: inst.joinId, text }).catch(() => {});
-      },
-      answer: (callId, allow) => {
-        const inst = instRef.current;
-        const invoke = invokeRef.current;
-        if (!inst || !invoke || inst.disposed || !inst.joinId) return;
-        void invoke("remote_agent_answer", {
-          id: inst.joinId,
-          callId,
-          allow,
-          reason: null,
-        }).catch(() => {});
-      },
-      cancel: () => {
-        const inst = instRef.current;
-        const invoke = invokeRef.current;
-        if (!inst || !invoke || inst.disposed || !inst.joinId) return;
-        void invoke("remote_agent_cancel", { id: inst.joinId }).catch(() => {});
-      },
-    }),
-    []
-  );
+    const command = residentRuntimeId === undefined ? "remote_viewport" : "resident_intent";
+    const args = residentRuntimeId === undefined
+      ? { id: inst.joinId, cols, rows }
+      : {
+          runtimeId: residentRuntimeId,
+          payload: { type: "viewport", cols, rows },
+        };
+    void invoke(command, args).catch(() => {});
+  }, [residentRuntimeId]);
 
   /** The terminal renderer plugs in here on mount; buffered ops replay so a
    * snapshot that raced the mount is not lost. Returns the detach fn. */
@@ -165,14 +139,12 @@ export function RemoteView({ tab, active }: Props) {
     };
     instRef.current = inst;
     setKind(null);
-    setAgentState(initialViewerAgentState);
     setReadOnly(false);
     setReconnectAttempt(0);
 
-    /** Route a terminal op: dropped for an agent share, buffered until the
-     * terminal renderer mounts, delivered live afterwards. */
+    /** Route a terminal op, buffering it until the renderer mounts. */
     const toTerm = (op: (sink: RemoteTermSink) => void) => {
-      if (inst.disposed || inst.kind === "agent") return;
+      if (inst.disposed) return;
       if (inst.sink) op(inst.sink);
       else inst.pending.push(op);
     };
@@ -198,7 +170,9 @@ export function RemoteView({ tab, active }: Props) {
         if (inst.joinId) {
           const id = inst.joinId;
           inst.joinId = null;
-          void invoke("remote_leave", { id }).catch(() => {});
+          if (residentRuntimeId === undefined) {
+            void invoke("remote_leave", { id }).catch(() => {});
+          }
         }
       };
 
@@ -246,6 +220,94 @@ export function RemoteView({ tab, active }: Props) {
         }, reconnectDelayMs(inst.retryAttempt));
       };
 
+      const routeMessage = (msg: RemoteEvent) => {
+        if (inst.disposed) return;
+        switch (msg.type) {
+          case "welcome": {
+            inst.retryAttempt = 0;
+            setReconnectAttempt(0);
+            const k: Exclude<RemoteRendererKind, null> = "terminal";
+            if (inst.kind !== k) {
+              inst.kind = k;
+              setKind(k);
+            }
+            toTerm((t) => {
+              t.resize(msg.cols, msg.rows);
+              t.rescale();
+            });
+            st().setTabTitle(tab.id, `⇄ ${msg.tabTitle}`);
+            break;
+          }
+          case "mode":
+            inst.readOnly = msg.readOnly;
+            setReadOnly(msg.readOnly);
+            break;
+          case "snapshot":
+            toTerm((t) => {
+              t.reset();
+              t.resize(msg.cols, msg.rows);
+              t.write(b64decode(msg.b64));
+              t.rescale();
+            });
+            break;
+          case "output":
+            toTerm((t) => t.write(b64decode(msg.b64)));
+            break;
+          case "resize":
+            toTerm((t) => {
+              t.resize(msg.cols, msg.rows);
+              t.rescale();
+            });
+            break;
+          case "presence":
+            st().setRemoteViewers(tab.id, msg.viewers);
+            break;
+          case "end":
+            if (isDeliberateEnd(msg.reason)) {
+              endSession(msg.reason);
+            } else if (residentRuntimeId === undefined) {
+              scheduleReconnect();
+            } else {
+              inst.retryAttempt += 1;
+              setReconnectAttempt(inst.retryAttempt);
+            }
+            break;
+          case "pong":
+            break;
+        }
+      };
+
+      if (residentRuntimeId !== undefined) {
+        inst.joinId = residentRuntimeId;
+        let lastAckSeq = 0;
+        const poll = async () => {
+          if (inst.disposed) return;
+          try {
+            const replay = await invoke<{
+              events: Array<{ seq: number; payload: RemoteEvent }>;
+            }>("resident_poll", {
+              runtimeId: residentRuntimeId,
+              lastAckSeq,
+            });
+            for (const event of replay.events) {
+              routeMessage(event.payload);
+              lastAckSeq = Math.max(lastAckSeq, event.seq);
+            }
+          } catch (error) {
+            coreLog("error", `resident remote poll failed: ${error}`);
+          }
+          if (!inst.disposed) window.setTimeout(() => void poll(), 100);
+        };
+        inst.pingTimer = window.setInterval(() => {
+          void invoke("resident_intent", {
+            runtimeId: residentRuntimeId,
+            payload: { type: "ping" },
+          }).catch(() => {});
+        }, 10_000);
+        void poll();
+        return;
+      }
+
       const connect = async () => {
         if (inst.disposed || inst.ended) return;
         const gen = ++inst.connectGen;
@@ -253,71 +315,7 @@ export function RemoteView({ tab, active }: Props) {
           const ch = new Channel<RemoteEvent>();
           ch.onmessage = (msg) => {
             if (inst.disposed || gen !== inst.connectGen) return;
-            // Every frame goes through the same fold, which is where the agent
-            // side of a share is decided. Keeping it out of the switch below is
-            // what lets those rules be tested — a reconnect resending the whole
-            // run is not something this component can be made to do on demand.
-            setAgentState((prev) => applyViewerFrame(prev, msg));
-            switch (msg.type) {
-              case "welcome": {
-                // Host accepted us (again): the rejoin succeeded, so the
-                // next drop starts the backoff over at 1s.
-                inst.retryAttempt = 0;
-                setReconnectAttempt(0);
-                // The welcome names the share's kind (absent = terminal, all
-                // a v1 host could send). Only now does a renderer mount — an
-                // agent share never constructs xterm at all.
-                const k: Exclude<RemoteRendererKind, null> =
-                  msg.tabType === "agent" ? "agent" : "terminal";
-                if (inst.kind !== k) {
-                  inst.kind = k;
-                  if (k === "agent") inst.pending = [];
-                  setKind(k);
-                }
-                toTerm((t) => {
-                  t.resize(msg.cols, msg.rows);
-                  t.rescale();
-                });
-                st().setTabTitle(tab.id, `⇄ ${msg.tabTitle}`);
-                break;
-              }
-              case "mode":
-                inst.readOnly = msg.readOnly;
-                setReadOnly(msg.readOnly);
-                break;
-              case "snapshot":
-                toTerm((t) => {
-                  t.reset();
-                  t.resize(msg.cols, msg.rows);
-                  t.write(b64decode(msg.b64));
-                  t.rescale();
-                });
-                break;
-              case "output":
-                toTerm((t) => t.write(b64decode(msg.b64)));
-                break;
-              case "resize":
-                toTerm((t) => {
-                  t.resize(msg.cols, msg.rows);
-                  t.rescale();
-                });
-                break;
-              case "presence":
-                st().setRemoteViewers(tab.id, msg.viewers);
-                break;
-              case "end":
-                // A host-sent End is deliberate: show the reason and stop.
-                // The client library folds transport loss into a synthesized
-                // End with a recognizable reason — that one reconnects.
-                if (isDeliberateEnd(msg.reason)) {
-                  endSession(msg.reason);
-                } else {
-                  scheduleReconnect();
-                }
-                break;
-              case "pong":
-                break;
-            }
+            routeMessage(msg);
           };
 
           const joinId = await invoke<string>("remote_join", {
@@ -370,7 +368,7 @@ export function RemoteView({ tab, active }: Props) {
       inst.disposed = true;
       if (inst.retryTimer !== null) window.clearTimeout(inst.retryTimer);
       if (inst.pingTimer !== null) window.clearInterval(inst.pingTimer);
-      if (inst.joinId) {
+      if (inst.joinId && residentRuntimeId === undefined) {
         const id = inst.joinId;
         import("@tauri-apps/api/core").then(({ invoke }) =>
           invoke("remote_leave", { id }).catch(() => {})
@@ -380,7 +378,7 @@ export function RemoteView({ tab, active }: Props) {
       invokeRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab.id]);
+  }, [residentRuntimeId, tab.id]);
 
   const showViewport = inSplitPane && viewport !== null;
   return (
@@ -396,15 +394,6 @@ export function RemoteView({ tab, active }: Props) {
             sameHint(previous, next) ? previous : next,
           ),
         imageMemoryMb: terminalImageMemoryMb(),
-      }}
-      agent={{
-        events: agentState.events ?? [],
-        access: agentState.access,
-        notice: agentState.notice,
-        onDismissNotice: () =>
-          setAgentState((state) => ({ ...state, notice: null })),
-        actions: instRef.current?.joinId ? agentActions : null,
-        reconnectAttempt,
       }}
       readOnly={readOnly}
       reconnectAttempt={reconnectAttempt}

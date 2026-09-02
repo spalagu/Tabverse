@@ -5,10 +5,9 @@ members = [
   "crates/tabverse-proto",
   "crates/tabverse-term",
   "crates/tabverse-remote",
+  "crates/tabverse-resident",
   "crates/tabverse-fs",
   "crates/tabverse-web",
-  "crates/tabverse-agent-tools",
-  "crates/tabverse-agent",
 ]
 
 [workspace.package]

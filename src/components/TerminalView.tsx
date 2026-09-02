@@ -91,12 +91,14 @@ import {
   navigateTerminalBlock,
   runTerminalWorkspaceAction,
 } from "@tabverse/workbench/terminal/workspace-controller";
+import { stopResidentTab } from "../residentRuntime";
 
 
 interface Props {
   tab: Tab;
   active: boolean;
   paneId?: PaneId;
+  residentRuntimeId?: string;
 }
 
 interface TermInstance {
@@ -144,7 +146,7 @@ const providePathLinks = createTerminalPathLinkProvider({
   open: openTerminalLink,
 });
 
-export function TerminalView({ tab, active, paneId }: Props) {
+export function TerminalView({ tab, active, paneId, residentRuntimeId }: Props) {
   // The pane this instance IS, as one value with no absent case. An
   // un-split tab's terminal is the pane wearing the tab's id, which is why
   // every key derived from this reads the same before and after a tree
@@ -378,12 +380,21 @@ export function TerminalView({ tab, active, paneId }: Props) {
       });
     }
 
+    const attachmentLeaf = tab.panes
+      ? findLeaf(tab.panes, paneRef.current)
+      : null;
     const spawnController = createTerminalSpawnController<TermHandle>({
       size: () => ({ cols: term.cols, rows: term.rows }),
       attachId:
-        paneRef.current === tab.id ? tab.attachSessionId ?? null : null,
+        paneRef.current === tab.id
+          ? tab.attachSessionId ?? null
+          : attachmentLeaf?.attachSessionId ?? null,
       tabId: paneRef.current === tab.id ? tab.id : null,
-      create: (options) => backend.createTerminal(options),
+      create: (options) => backend.createTerminal({
+        ...options,
+        ownerKey: paneRef.current,
+        residentRuntimeId,
+      }),
       reportCwdFailure: (cwd, error) =>
         coreLog("error", `shell spawn in ${cwd} failed: ${error}`),
       writeCwdFallback: (cwd) =>
@@ -623,7 +634,20 @@ export function TerminalView({ tab, active, paneId }: Props) {
           remoteHostRef.current = null;
         },
         disposeBlocks: blockController.dispose,
-        killHandle: () => inst.handle?.kill(),
+        killHandle: () => {
+          const state = useStore.getState();
+          const owner = state.tabs.find((candidate) => candidate.id === tab.id);
+          if (residentRuntimeId !== undefined && owner !== undefined) {
+            if (owner.panes !== undefined && findLeaf(owner.panes, paneRef.current) === null) {
+              inst.handle?.kill();
+            } else {
+              void inst.handle?.detach();
+            }
+          } else {
+            inst.handle?.kill();
+            if (residentRuntimeId !== undefined) void stopResidentTab(tab.id);
+          }
+        },
         disposeTerminal: () => term.dispose(),
         clearInstance: () => {
           instRef.current = null;
@@ -691,12 +715,12 @@ export function TerminalView({ tab, active, paneId }: Props) {
     return () => window.clearTimeout(t);
   }, [focused, searchOpen]);
 
-  // A command the agent ran, put in front of the user to look at.
+  // A command external automation ran, put in front of the user to inspect.
   //
-  // Typed in, not executed: the agent has already run it, and running it again
+  // Typed in, not executed: the automation has already run it, and running it again
   // on a click could be `rm -rf`, `git push --force`, or a deploy. The user
   // reads it, edits it if they want, and decides whether to press return. The
-  // nonce is what lets the same command land twice — an agent runs the same
+  // nonce is what lets the same command land twice — automation can run the same
   // test command over and over.
   const deliveredCommand = useRef<number | null>(null);
   const rulerPressY = useRef<number | null>(null);

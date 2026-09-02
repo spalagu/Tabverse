@@ -17,12 +17,6 @@ export interface WasmSession {
   viewport(cols: number, rows: number): void;
   /** Close the connection (best-effort; the page may be navigating away). */
   leave(): void;
-  /** Say something to a shared agent. Host-enforced Steer. */
-  sendPrompt(text: string): void;
-  /** Answer an agent permission request. Host-enforced Approve. */
-  sendAnswer(callId: string, allow: boolean, reason?: string): void;
-  /** Stop the agent turn in progress. Host-enforced Steer. */
-  sendCancel(): void;
   /** A store action for the host to execute (app share). Steer-gated on
    * the host; the confirmation comes back as an actionApplied broadcast. */
   sendAction(name: string, args: unknown): void;
@@ -32,6 +26,31 @@ export interface WasmSession {
   sendClipPush(text: string): void;
   sendRpc(id: bigint, cmd: string, args: unknown): void;
   sendProxyReq(id: bigint, head: string, body?: string): void;
+  sendBrowserOpen(
+    streamId: bigint,
+    tabId: string,
+    grantId: string,
+    attachmentId: string,
+    attachmentGeneration: bigint,
+    method: string,
+    url: string,
+    headers: Array<[string, string]>,
+    bodyLen?: bigint,
+  ): void;
+  sendBrowserRequestChunk(streamId: bigint, seq: bigint, b64: string): void;
+  sendBrowserRequestEnd(streamId: bigint): void;
+  sendBrowserCredit(streamId: bigint, bytes: bigint): void;
+  sendBrowserCancel(streamId: bigint, reason?: string): void;
+  sendRemoteAck(tabId: string, epoch: string, frameSeq: bigint): void;
+  requestRemoteSnapshot(tabId: string, epoch?: string): void;
+  sendRemoteIntent(
+    tabId: string,
+    attachmentId: string,
+    attachmentGeneration: bigint,
+    intentId: string,
+    name: string,
+    args: unknown,
+  ): void;
 }
 
 export interface WasmApi {

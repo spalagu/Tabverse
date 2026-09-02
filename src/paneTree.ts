@@ -5,6 +5,8 @@ export interface PaneLeaf {
   kind: "leaf";
   id: PaneId;
   termId?: string;
+  /** Detached resident helper session to attach when this pane mounts. */
+  attachSessionId?: string;
   cwd?: string;
   /** The profile this pane opens under; absent falls back to the tab's. */
   profile?: string;

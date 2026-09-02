@@ -1,0 +1,19 @@
+{
+  "name": "@tabverse/plugin-composition",
+  "private": true,
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "@tabverse/plugin-kernel": "file:../plugin-kernel",
+    "@tabverse/remote-protocol": "file:../remote-protocol",
+    "@tabverse/tab-contracts": "file:../tab-contracts"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run src"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

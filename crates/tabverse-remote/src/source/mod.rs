@@ -10,7 +10,6 @@
 //! policy — access checks, version negotiation, buffering — and the source
 //! keeps mechanism; neither reaches into the other's half.
 
-pub mod agent;
 pub mod terminal;
 
 use std::collections::HashMap;
@@ -42,14 +41,6 @@ pub struct ViewerInfo {
 pub enum InputPayload {
     /// Raw PTY bytes (Steer and above; terminal).
     Bytes(Vec<u8>),
-    /// Say something to the source (Steer and above; agent).
-    AgentPrompt { text: String },
-    /// Decide a permission request (Approve; agent).
-    AgentAnswer {
-        call_id: String,
-        allow: bool,
-        reason: Option<String>,
-    },
     /// Invoke a host command (Steer and above; app shares, v3).
     Rpc {
         id: u64,
@@ -62,43 +53,81 @@ pub enum InputPayload {
         args: serde_json::Value,
     },
     /// Clipboard text from the join page (Steer and above; app, v3).
-    ClipPush { text: String },
+    ClipPush {
+        text: String,
+    },
     /// An HTTP request for the remote proxy (Steer and above; app, v3).
     ProxyReq {
         id: u64,
         head: String,
         body: Option<String>,
     },
-    /// Stop the turn in progress (Steer and above; agent).
-    AgentCancel,
+    BrowserOpen {
+        stream_id: u64,
+        tab_id: String,
+        grant_id: String,
+        attachment_id: String,
+        attachment_generation: u64,
+        method: String,
+        url: String,
+        headers: Vec<(String, String)>,
+        body_len: Option<u64>,
+    },
+    BrowserRequestChunk {
+        stream_id: u64,
+        seq: u64,
+        b64: String,
+    },
+    BrowserRequestEnd {
+        stream_id: u64,
+    },
+    BrowserCredit {
+        stream_id: u64,
+        bytes: u64,
+    },
+    BrowserCancel {
+        stream_id: u64,
+        reason: Option<String>,
+    },
+    /// A viewer acknowledged one ordered contribution frame (v4).
+    RemoteAck {
+        tab_id: String,
+        epoch: String,
+        frame_seq: u64,
+    },
+    /// A viewer detected a gap/epoch change and requires a new snapshot (v4).
+    RemoteResnapshot {
+        tab_id: String,
+        epoch: Option<String>,
+    },
+    /// A schema-declared contribution intent (v4); attachment identity was
+    /// already validated by the hub against the server-issued connection id.
+    RemoteIntent {
+        tab_id: String,
+        attachment_id: String,
+        attachment_generation: u64,
+        intent_id: String,
+        name: String,
+        args: serde_json::Value,
+    },
 }
 
-/// What an injection did. `Raced` only ever comes back for `AgentAnswer`:
-/// somebody answered first, and the hub broadcasts `AgentDecisionTaken` so
-/// the loser learns why their button changed nothing.
+/// What an injection did.
 pub enum InputOutcome {
     Applied,
-    Raced,
 }
 
 /// One shared tab's runtime, behind the seam the hub talks through.
 pub trait ShareSource: Send + Sync + 'static {
     fn kind(&self) -> SharedTabType;
 
-    /// None means cols/rows travel as 0 in `Welcome` — a gridless source,
-    /// which is the agent convention.
+    /// None means cols/rows travel as 0 in `Welcome`.
     fn grid(&self) -> Option<Viewport>;
 
     /// Ordered-stream snapshot (terminal semantics): put a marker in the
     /// output path and answer later via `Share::snapshot_ready`. Sources
     /// without that semantic keep the empty default.
     fn request_snapshot(&self, _viewer: ViewerId) {}
-
-    /// Catch-up history handed over whole at join (agent semantics). Sources
-    /// without it return nothing.
-    fn history(&self) -> Vec<serde_json::Value> {
-        Vec::new()
-    }
 
     /// Injection, called only after the hub let the frame through. `access`
     /// is for audit and logging — enforcement happens in the hub, once; an
@@ -116,9 +145,19 @@ pub trait ShareSource: Send + Sync + 'static {
     /// default.
     fn apply_viewport(&self, _joint: Option<Viewport>) {}
 
+    /// A connection left. Requester-private streams owned by that viewer
+    /// must be cancelled even when no explicit Cancel frame could arrive.
+    fn viewer_detached(&self, _viewer: ViewerId) {}
+
+    /// Host-owned Browser contribution state may rotate the one origin a
+    /// shared Browser Tab grants. Other sources reject this capability.
+    fn update_browser_grant(&self, _tab_id: &str, _url: &str) -> anyhow::Result<()> {
+        anyhow::bail!("this share source does not own Browser network grants")
+    }
+
     /// The share went live: keep the handle and attach the output fan-out
-    /// (a terminal hangs it on its dispatch bridge, an agent on its registry
-    /// slot). Called by the hub before the ticket exists, so nothing a
+    /// (a terminal hangs it on its dispatch bridge). Called by the hub before
+    /// the ticket exists, so nothing a
     /// runtime emits after this can miss the share.
     fn bind(&self, binding: ShareBinding);
 
@@ -189,7 +228,7 @@ mod tests {
         assert!(reg.get("tab-1").is_none(), "an unknown tab has no source");
 
         reg.register("tab-1", Arc::new(NullSource(SharedTabType::Terminal)));
-        reg.register("tab-2", Arc::new(NullSource(SharedTabType::Agent)));
+        reg.register("tab-2", Arc::new(NullSource(SharedTabType::App)));
         assert_eq!(
             reg.get("tab-1")
                 .expect("registered source is retrievable")
@@ -200,13 +239,13 @@ mod tests {
             reg.get("tab-2")
                 .expect("each tab holds its own source")
                 .kind(),
-            SharedTabType::Agent
+            SharedTabType::App
         );
 
         let removed = reg
             .unregister("tab-2")
             .expect("unregister hands the removed source back");
-        assert_eq!(removed.kind(), SharedTabType::Agent);
+        assert_eq!(removed.kind(), SharedTabType::App);
         assert!(
             reg.get("tab-2").is_none(),
             "an unregistered tab has no source any more"

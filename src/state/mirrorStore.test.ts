@@ -5,10 +5,12 @@ import {
   REMOTE_MIRROR_ACTION_NAMES,
   applyMirrorAction,
   applyMirrorSnapshot,
+  configureRemoteTabContributions,
   mirrorSinks,
   resetRemoteMirror,
   useRemoteMirrorStore,
 } from "@tabverse/runtime-remote/app-mirror";
+import { createRemoteTestContributions } from "@tabverse/test-runtime";
 import { MIRROR_ACTIONS } from "./mirrorActions";
 
 const snapshot = () => ({
@@ -54,6 +56,7 @@ const snapshot = () => ({
 });
 
 beforeEach(() => {
+  configureRemoteTabContributions(createRemoteTestContributions());
   resetRemoteMirror();
   resetHostClip();
 });
@@ -82,7 +85,7 @@ describe("remote app mirror snapshots", () => {
 
   it("refuses unknown snapshot versions without replacing the last good state", () => {
     expect(applyMirrorSnapshot(snapshot())).toBe(true);
-    expect(applyMirrorSnapshot({ ...snapshot(), version: 2 })).toBe(false);
+    expect(applyMirrorSnapshot({ ...snapshot(), version: 3 })).toBe(false);
     expect(applyMirrorSnapshot(null)).toBe(false);
     expect(applyMirrorSnapshot({ version: 1, tabs: "invalid" })).toBe(false);
     expect(useRemoteMirrorStore.getState().activeTabId).toBe("browser");
@@ -93,6 +96,27 @@ describe("remote app mirror snapshots", () => {
       applyMirrorSnapshot({ ...snapshot(), activeTabId: "missing" }),
     ).toBe(true);
     expect(useRemoteMirrorStore.getState().activeTabId).toBe("terminal");
+  });
+
+  it("viewer registry refuses Settings, Remote and retired Agent rows", () => {
+    expect(applyMirrorSnapshot({
+      ...snapshot(),
+      tabs: [
+        ...snapshot().tabs,
+        { id: "settings-private", type: "settings", title: "PRIVATE_SETTINGS" },
+        { id: "remote-private", type: "remote", title: "PRIVATE_REMOTE" },
+        { id: "agent-private", type: "agent", title: "PRIVATE_AGENT" },
+      ],
+      activeTabId: "settings-private",
+    })).toBe(true);
+    const state = useRemoteMirrorStore.getState();
+    expect(state.tabs.map((tab) => tab.id)).toEqual([
+      "terminal",
+      "browser",
+      "files",
+    ]);
+    expect(state.activeTabId).toBe("terminal");
+    expect(JSON.stringify(state)).not.toContain("PRIVATE_");
   });
 });
 
@@ -120,16 +144,16 @@ describe("remote app mirror actions", () => {
     ).toBe(true);
     expect(
       applyMirrorAction("addTab", {
-        id: "agent",
-        type: "agent",
-        title: "Agent",
+        id: "new-files",
+        type: "files",
+        title: "New files",
         groupId: null,
         lastActiveAt: 50,
       }),
     ).toBe(true);
 
     const state = useRemoteMirrorStore.getState();
-    expect(state.tabs[0].id).toBe("agent");
+    expect(state.tabs[0].id).toBe("new-files");
     expect(state.tabs.find((tab) => tab.id === "terminal")?.title).toBe(
       "Remote shell",
     );
@@ -137,7 +161,7 @@ describe("remote app mirror actions", () => {
       true,
     );
     expect(state.filesOpenPath.files).toBe("/workspace/new.md");
-    expect(state.activeTabId).toBe("agent");
+    expect(state.activeTabId).toBe("new-files");
   });
 
   it("guards malformed and unknown actions", () => {

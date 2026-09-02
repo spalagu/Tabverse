@@ -141,8 +141,7 @@ describe("the app-share terminal bridge", () => {
   it("a non-terminal active tab still reports its raw id, and ships no snapshot", () => {
     const h = mount(TABS);
     h.activate("b1");
-    // The RAW id reports now (Rust's agent binding keys on it); no
-    // terminal fronts, so no snapshot ships.
+    // The raw id reports; no terminal fronts, so no snapshot ships.
     expect(h.deps.activeReports).toEqual(["b1"]);
     expect(h.deps.snapshots).toEqual([]);
     h.stop();

@@ -9,9 +9,11 @@ import {
 } from "./mirrorActions";
 import {
   applyMirrorSnapshot,
+  configureRemoteTabContributions,
   resetRemoteMirror,
   useRemoteMirrorStore,
 } from "@tabverse/runtime-remote/app-mirror";
+import { createRemoteTestContributions } from "@tabverse/test-runtime";
 import {
   installMirrorBroadcast,
   wireArgsFor,
@@ -22,6 +24,7 @@ import {
 /** Both sides are zero-trace runs: no session inherited, none written. */
 beforeEach(() => {
   localStorage.clear();
+  configureRemoteTabContributions(createRemoteTestContributions());
   resetRemoteMirror();
 });
 
@@ -191,6 +194,42 @@ describe("app-share determinism: one sequence, two stores, zero diff", () => {
 });
 
 describe("the broadcast wrapper's own behavior", () => {
+  it("keeps every Settings tab, group, menu, rename, activate, and close action off the wire", () => {
+    const host = newStore();
+    const sent: Sent[] = [];
+    const restore = installMirrorBroadcast(
+      host,
+      pinnedGen(),
+      (name, args) => sent.push({ name, args })
+    );
+    try {
+      const settings = host.getState().addTab({ type: "settings" });
+      expect(sent).toEqual([]);
+      host.setState((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === settings ? { ...tab, groupId: "settings-private" } : tab
+        ),
+        groups: [
+          ...state.groups,
+          {
+            id: "settings-private",
+            name: "PRIVATE_SETTINGS_GROUP",
+            colorIndex: 0,
+            collapsed: false,
+          },
+        ],
+      }));
+      host.getState().activateTab(settings);
+      host.getState().openMenu(settings, 1, 2);
+      host.getState().renameTab(settings, "PRIVATE_SETTINGS_TITLE");
+      host.getState().toggleGroupCollapsed("settings-private");
+      host.getState().closeTab(settings);
+      expect(sent).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
   it("embeds read-back provenance: the host's id, title and stamp", () => {
     const host = newStore();
     const sent: Sent[] = [];

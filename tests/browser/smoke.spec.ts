@@ -33,19 +33,11 @@ test("new-tab menu exposes every workspace entry", async ({ page }) => {
   const menu = page.locator(".newtab-menu");
   await expect(menu).toBeVisible();
 
-  for (const label of ["Terminal", "Files", "Browser", "Agent", "Join remote…", "Settings"]) {
+  for (const label of ["Terminal", "Files", "Browser", "Join remote…", "Settings"]) {
     await expect(menu.getByRole("button", { name: label, exact: true })).toBeVisible();
   }
 
-  await menu.getByRole("button", { name: "Agent", exact: true }).click();
-  await expect(page.locator(".agent-view")).toBeVisible();
-  await expect(page.getByPlaceholder("Ask the agent to do something")).toBeVisible();
-
-  await page.getByRole("button", { name: /New tab/ }).click();
-  await page
-    .locator(".newtab-menu")
-    .getByRole("button", { name: "Terminal", exact: true })
-    .click();
+  await menu.getByRole("button", { name: "Terminal", exact: true }).click();
   const activeTerminal = page.locator(".pane:not(.pane-hidden) .term-pane");
   await expect(activeTerminal).toBeVisible();
   await expect(activeTerminal.locator(".term-container")).toBeVisible();

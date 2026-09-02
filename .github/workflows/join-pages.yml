@@ -6,10 +6,16 @@ on:
       - ".github/workflows/join-pages.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "package.json"
+      - "package-lock.json"
       - "crates/tabverse-web/**"
       - "src/**"
+      - "tools/build-web.sh"
       - "tools/build-join-pages.mjs"
+      - "tools/build-join-page.mjs"
+      - "tools/check-secrets.mjs"
       - "vite.pages.config.ts"
+      - "vite.web.config.ts"
       - "apps/join/**"
       - "packages/**"
   push:
@@ -18,10 +24,16 @@ on:
       - ".github/workflows/join-pages.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "package.json"
+      - "package-lock.json"
       - "crates/tabverse-web/**"
       - "src/**"
+      - "tools/build-web.sh"
       - "tools/build-join-pages.mjs"
+      - "tools/build-join-page.mjs"
+      - "tools/check-secrets.mjs"
       - "vite.pages.config.ts"
+      - "vite.web.config.ts"
       - "apps/join/**"
       - "packages/**"
   workflow_dispatch:
@@ -83,26 +95,19 @@ jobs:
             ~/.local/bin/wasm-bindgen
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: npm
       - run: npm ci
-      - name: build wasm module
+      - name: build hosted and offline Join artifacts
         run: |
-          export WASI_SDK="$HOME/wasi-sdk"
-          export CC_wasm32_unknown_unknown="$WASI_SDK/bin/clang"
-          export AR_wasm32_unknown_unknown="$WASI_SDK/bin/llvm-ar"
-          export CFLAGS_wasm32_unknown_unknown="--sysroot=$WASI_SDK/share/wasi-sysroot"
-          cargo build -p tabverse-web --target wasm32-unknown-unknown --release
-          ~/.local/bin/wasm-bindgen --target web --out-dir crates/tabverse-web/pkg \
-            --no-typescript target/wasm32-unknown-unknown/release/tabverse_web.wasm
-      - name: build Join page
-        run: |
-          npx vite build --config vite.pages.config.ts
-          TABVERSE_BUILD_ID="${GITHUB_SHA}" node tools/build-join-pages.mjs
+          export PATH="$HOME/.local/bin:$PATH"
+          WASI_SDK="$HOME/wasi-sdk" TABVERSE_BUILD_ID="${GITHUB_SHA}" bash tools/build-web.sh
       - name: build Join page browser-test target
         run: |
           TABVERSE_JOIN_OUT_DIR=dist-pages-test VITE_JOIN_TEST_HARNESS=1 npx vite build --config vite.pages.config.ts
           TABVERSE_JOIN_OUT_DIR=dist-pages-test TABVERSE_JOIN_TEST_HARNESS=1 TABVERSE_BUILD_ID="${GITHUB_SHA}" node tools/build-join-pages.mjs
+      - name: scan generated Join artifacts for plaintext secrets
+        run: npm run check:secrets -- --require-artifact dist-pages --require-artifact dist-pages-test --require-artifact dist-web
       - name: stage Pages artifact at the public Join path
         run: |
           mkdir -p dist-pages-artifact/join
@@ -126,7 +131,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 22
+          node-version: 22.23.2
           cache: npm
       - run: npm ci
       - name: download built Join page
