@@ -227,6 +227,18 @@ const checks = [
     "BrowserView bypasses the runtime-owned BrowserSessionPort",
   ],
   [
+    lib.includes("fn browser_navigation_action(") &&
+      lib.includes(
+        'browser_navigation_action(&app, &webview, &tab_id, "go"',
+      ) &&
+      lib.includes(
+        "browser_navigation_action(&app, &wv, &tab_id, &action, url.as_deref())",
+      ) &&
+      lib.includes("nav_failures::remember_request(tab_id, url)") &&
+      lib.includes("nav_watchdog::watch(app, tab_id, url)"),
+    "BrowserSessionPort navigation and the retained legacy IPC route must preserve one navigation side-effect path",
+  ],
+  [
     lib.includes(".on_browser_closed(move ||") &&
       lib.includes("confirm_browser_closed") &&
       lib.includes("browser close confirmation timed out"),

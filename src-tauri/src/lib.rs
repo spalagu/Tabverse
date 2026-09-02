@@ -3335,24 +3335,19 @@ fn browser_session_command(
         return serde_json::json!({ "ok": false, "code": "SESSION_GONE" });
     };
     let result = match kind {
-        "navigate" => command
-            .get("url")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "missing navigation url".to_string())
-            .and_then(|url| url.parse::<tauri::Url>().map_err(|error| error.to_string()))
-            .and_then(|url| webview.navigate(url).map_err(|error| error.to_string())),
-        "reload" => webview
-            .eval("location.reload()")
-            .map_err(|error| error.to_string()),
+        "navigate" => browser_navigation_action(
+            &app,
+            &webview,
+            &tab_id,
+            "go",
+            command.get("url").and_then(serde_json::Value::as_str),
+        ),
+        "reload" => browser_navigation_action(&app, &webview, &tab_id, "reload", None),
         "stop" => webview
             .eval("window.stop()")
             .map_err(|error| error.to_string()),
-        "back" => webview
-            .eval("history.back()")
-            .map_err(|error| error.to_string()),
-        "forward" => webview
-            .eval("history.forward()")
-            .map_err(|error| error.to_string()),
+        "back" => browser_navigation_action(&app, &webview, &tab_id, "back", None),
+        "forward" => browser_navigation_action(&app, &webview, &tab_id, "forward", None),
         "set-zoom" => command
             .get("level")
             .and_then(serde_json::Value::as_f64)
@@ -3402,6 +3397,44 @@ pub fn browser_label(app: &AppHandle, tab_id: &str) -> Option<String> {
         .cloned()
 }
 
+fn browser_navigation_action(
+    app: &AppHandle,
+    webview: &tauri::Webview<AppRuntime>,
+    tab_id: &str,
+    action: &str,
+    url: Option<&str>,
+) -> Result<(), String> {
+    peek::command_stamp(tab_id);
+    match action {
+        "go" => {
+            let url = url.ok_or_else(|| "no url".to_string())?;
+            let parsed: tauri::Url = url.parse().map_err(|error| format!("bad url: {error}"))?;
+            #[cfg(target_os = "macos")]
+            nav_failures::remember_request(tab_id, url);
+            eprintln!("[core] browser_navigate go tab={tab_id} url={url}");
+            let outcome = webview.navigate(parsed);
+            eprintln!(
+                "[core] browser_navigate returned ok={} tab={tab_id}",
+                outcome.is_ok()
+            );
+            if outcome.is_ok() {
+                nav_watchdog::watch(app, tab_id, url);
+            }
+            outcome.map_err(|error| error.to_string())
+        }
+        "back" => webview
+            .eval("history.back()")
+            .map_err(|error| error.to_string()),
+        "forward" => webview
+            .eval("history.forward()")
+            .map_err(|error| error.to_string()),
+        "reload" => webview
+            .eval("location.reload()")
+            .map_err(|error| error.to_string()),
+        other => Err(format!("unknown action {other}")),
+    }
+}
+
 #[tauri::command]
 fn browser_navigate(
     app: AppHandle,
@@ -3423,29 +3456,7 @@ fn browser_navigate(
     let wv = window
         .get_webview(&label)
         .ok_or_else(|| "webview is gone".to_string())?;
-    peek::command_stamp(&tab_id);
-    match action.as_str() {
-        "go" => {
-            let u = url.ok_or_else(|| "no url".to_string())?;
-            let parsed: tauri::Url = u.parse().map_err(|e| format!("bad url: {e}"))?;
-            #[cfg(target_os = "macos")]
-            nav_failures::remember_request(&tab_id, &u);
-            eprintln!("[core] browser_navigate go tab={tab_id} label={label} url={u}");
-            let outcome = wv.navigate(parsed);
-            eprintln!(
-                "[core] browser_navigate returned ok={} tab={tab_id}",
-                outcome.is_ok()
-            );
-            if outcome.is_ok() {
-                nav_watchdog::watch(&app, &tab_id, &u);
-            }
-            outcome.map_err(|e| e.to_string())
-        }
-        "back" => wv.eval("history.back()").map_err(|e| e.to_string()),
-        "forward" => wv.eval("history.forward()").map_err(|e| e.to_string()),
-        "reload" => wv.eval("location.reload()").map_err(|e| e.to_string()),
-        other => Err(format!("unknown action {other}")),
-    }
+    browser_navigation_action(&app, &wv, &tab_id, &action, url.as_deref())
 }
 
 /// Read the child webview's current title and url back into the app.
