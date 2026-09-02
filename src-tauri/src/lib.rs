@@ -235,10 +235,102 @@ struct AppState {
     downloads: Mutex<HashSet<std::path::PathBuf>>,
     watches: fs_watch::WatchState,
     page_proxy: Mutex<PageProxySlot>,
+    runtime_performance: Option<Arc<RuntimePerformanceProbe>>,
     /// The whole-app share (v3): one per process, lazily built on the first
     /// `app_share_start`. The source's glue seams (snapshot from the
     /// webview, clipboard, proxy) are wired there, once.
     app_source: Arc<app_share::AppShareSource>,
+}
+
+struct RuntimePerformanceProbe {
+    started: std::time::Instant,
+    expected: usize,
+    idle_ms: u64,
+    between_tabs_ms: u64,
+    ready: Mutex<HashSet<String>>,
+}
+
+impl RuntimePerformanceProbe {
+    fn from_env(started: std::time::Instant) -> Option<Arc<Self>> {
+        std::env::var_os("TABVERSE_RUNTIME_PERFORMANCE_ACCEPTANCE")?;
+        let expected = std::env::var("TABVERSE_RUNTIME_PERFORMANCE_TABS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, 20);
+        let idle_ms = std::env::var("TABVERSE_RUNTIME_PERFORMANCE_IDLE_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(1_500);
+        let between_tabs_ms = std::env::var("TABVERSE_RUNTIME_PERFORMANCE_BETWEEN_TABS_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(2_000);
+        Some(Arc::new(Self {
+            started,
+            expected,
+            idle_ms,
+            between_tabs_ms,
+            ready: Mutex::new(HashSet::new()),
+        }))
+    }
+
+    fn ready_count(&self) -> usize {
+        self.ready.lock().unwrap().len()
+    }
+
+    fn page_ready(&self, app: &AppHandle, tab_id: &str) {
+        let ready = {
+            let mut labels = self.ready.lock().unwrap();
+            if !labels.insert(tab_id.to_owned()) {
+                return;
+            }
+            labels.len()
+        };
+        println!(
+            "TABVERSE_RUNTIME_PERFORMANCE_READY index={ready} tab={tab_id} elapsed_ms={}",
+            self.started.elapsed().as_millis()
+        );
+        if ready == self.expected {
+            println!(
+                "TABVERSE_RUNTIME_PERFORMANCE_ALL_READY elapsed_ms={}",
+                self.started.elapsed().as_millis()
+            );
+            let handle = app.clone();
+            let started = self.started;
+            let idle_ms = self.idle_ms;
+            let expected = self.expected;
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(idle_ms)).await;
+                println!(
+                    "TABVERSE_RUNTIME_PERFORMANCE_REQUEST_EXIT elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
+                let _ = tauri::async_runtime::spawn_blocking(cookies::shutdown).await;
+                for index in 1..=expected {
+                    let tab_id = format!("runtime-performance-{index}");
+                    let generation = handle
+                        .state::<AppState>()
+                        .browser_sessions
+                        .snapshot(&tab_id)
+                        .map(|snapshot| snapshot.generation);
+                    if let Some(generation) = generation {
+                        let state_handle = handle.clone();
+                        let state = state_handle.state::<AppState>();
+                        let _ = browser_close_with_state(
+                            handle.clone(),
+                            &state,
+                            tab_id,
+                            generation,
+                            BrowserCloseReason::AppExit,
+                        )
+                        .await;
+                    }
+                }
+                handle.exit(0);
+            });
+        }
+    }
 }
 
 // Filesystem commands run on the blocking pool: a `git status` over a large
@@ -567,9 +659,15 @@ fn fs_watch_stop(state: State<'_, AppState>, tab_id: String) {
 }
 
 fn state_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app_data_dir(app).map(|directory| directory.join("state"))
+}
+
+fn app_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    if let Some(directory) = std::env::var_os("TABVERSE_ACCEPTANCE_APP_DATA_DIR") {
+        return Ok(directory.into());
+    }
     app.path()
         .app_data_dir()
-        .map(|d| d.join("state"))
         .map_err(|e| format!("cannot resolve app data dir: {e}"))
 }
 
@@ -2269,6 +2367,17 @@ async fn browser_create(
     slot_revision: u64,
     bounds: Bounds,
 ) -> Result<(), String> {
+    browser_create_with_state(app, &state, tab_id, generation, slot_revision, bounds).await
+}
+
+async fn browser_create_with_state(
+    app: AppHandle,
+    state: &AppState,
+    tab_id: String,
+    generation: u64,
+    slot_revision: u64,
+    bounds: Bounds,
+) -> Result<(), String> {
     use tauri::WebviewUrl;
 
     eprintln!("[core] browser_create enter tab={tab_id} generation={generation}");
@@ -2489,6 +2598,11 @@ async fn browser_create(
                 cookies::request_snapshot();
                 peek::load_finished(&load_tab);
                 userscripts::on_page_finished(&load_app, &load_tab, &wv);
+                if url == "about:blank" {
+                    if let Some(probe) = load_app.state::<AppState>().runtime_performance.as_ref() {
+                        probe.page_ready(&load_app, &load_tab);
+                    }
+                }
             }
             let _ = wv.window();
             let _ = load_app.emit(
@@ -2507,10 +2621,7 @@ async fn browser_create(
     let builder = if spec.private_mode {
         builder.incognito(true)
     } else {
-        let profile_root = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| error.to_string())?
+        let profile_root = app_data_dir(&app)?
             .join("browser-profiles")
             .join(&spec.profile_id);
         builder.data_directory(profile_root)
@@ -2544,7 +2655,7 @@ async fn browser_create(
             .map(|loaded| loaded.config.network.cover_page_traffic)
             .unwrap_or(false),
     };
-    let proxy = ensure_page_proxy(&app, &state, cover_on, is_coverable_platform());
+    let proxy = ensure_page_proxy(&app, state, cover_on, is_coverable_platform());
     if proxy.is_none() {
         clear_shared_page_proxy(&window);
     }
@@ -3821,6 +3932,16 @@ async fn browser_close(
         "app-exit" => BrowserCloseReason::AppExit,
         _ => return Err(format!("unknown browser close reason: {reason}")),
     };
+    browser_close_with_state(app, &state, tab_id, generation, reason).await
+}
+
+async fn browser_close_with_state(
+    app: AppHandle,
+    state: &AppState,
+    tab_id: String,
+    generation: u64,
+    reason: BrowserCloseReason,
+) -> Result<(), String> {
     let closing = state
         .browser_sessions
         .begin_close(&tab_id, generation, reason)
@@ -4382,6 +4503,87 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
+async fn create_runtime_performance_tab(app: &AppHandle, index: usize) -> Result<(), String> {
+    let tab_id = format!("runtime-performance-{index}");
+    let generation = {
+        let state = app.state::<AppState>();
+        let label = webview_label(&tab_id);
+        let ensured = state
+            .browser_sessions
+            .ensure_session(&tab_id, &label)
+            .map_err(|error| error.to_string())?;
+        let generation = ensured.snapshot().generation;
+        state.browser_specs.lock().unwrap().insert(
+            tab_id.clone(),
+            NativeBrowserSpec {
+                profile_id: "default".into(),
+                initial_url: "about:blank".into(),
+                private_mode: false,
+                network: serde_json::json!({ "kind": "direct" }),
+            },
+        );
+        generation
+    };
+    println!(
+        "TABVERSE_RUNTIME_PERFORMANCE_CREATE index={index} elapsed_ms={}",
+        app.state::<AppState>()
+            .runtime_performance
+            .as_ref()
+            .expect("runtime performance state")
+            .started
+            .elapsed()
+            .as_millis()
+    );
+    let state_handle = app.clone();
+    let state = state_handle.state::<AppState>();
+    browser_create_with_state(
+        app.clone(),
+        &state,
+        tab_id,
+        generation,
+        1,
+        Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 768.0,
+        },
+    )
+    .await
+}
+
+async fn run_runtime_performance_probe(app: AppHandle, probe: Arc<RuntimePerformanceProbe>) {
+    let initial_tabs = if probe.expected == 2 {
+        1
+    } else {
+        probe.expected
+    };
+    for index in 1..=initial_tabs {
+        if let Err(error) = create_runtime_performance_tab(&app, index).await {
+            eprintln!("TABVERSE_RUNTIME_PERFORMANCE_ERROR index={index} error={error}");
+            app.exit(2);
+            return;
+        }
+    }
+    if probe.expected != 2 {
+        return;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while probe.ready_count() < 1 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    if probe.ready_count() != 1 {
+        eprintln!("TABVERSE_RUNTIME_PERFORMANCE_ERROR first tab did not become ready");
+        app.exit(2);
+        return;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(probe.between_tabs_ms)).await;
+    if let Err(error) = create_runtime_performance_tab(&app, 2).await {
+        eprintln!("TABVERSE_RUNTIME_PERFORMANCE_ERROR index=2 error={error}");
+        app.exit(2);
+    }
+}
+
 pub fn run() {
     // The resident helper is the same signed executable in a windowless mode.
     // It answers before Tauri, plugins, HTTP clients, or webviews exist.
@@ -4392,7 +4594,29 @@ pub fn run() {
         std::process::exit(code);
     }
     http::ensure_crypto_provider();
-    tauri::Builder::<AppRuntime>::new()
+    let process_started = std::time::Instant::now();
+    let runtime_performance = RuntimePerformanceProbe::from_env(process_started);
+    let runtime_performance_enabled = runtime_performance.is_some();
+    let builder = tauri::Builder::<AppRuntime>::new();
+    #[cfg(feature = "runtime-cef")]
+    let builder = if let Some(directory) = std::env::var_os("TABVERSE_ACCEPTANCE_ROOT_CACHE") {
+        builder.root_cache_path(directory)
+    } else {
+        builder
+    };
+    #[cfg(feature = "runtime-cef")]
+    let builder = if runtime_performance_enabled {
+        // A clean CI runner has no CEF safe-storage item and cannot answer an
+        // interactive Keychain prompt. Chromium's test switch keeps this
+        // hidden, disposable profile deterministic without changing normal
+        // product launches.
+        builder.command_line_args([("--use-mock-keychain", None::<&str>)])
+    } else {
+        builder
+    };
+    #[cfg(not(feature = "runtime-cef"))]
+    let _ = runtime_performance_enabled;
+    builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
@@ -4484,6 +4708,7 @@ pub fn run() {
             downloads: Mutex::new(HashSet::new()),
             watches: fs_watch::WatchState::new(),
             page_proxy: Mutex::new(PageProxySlot::default()),
+            runtime_performance,
             app_source: app_share::AppShareSource::new(
                 // dispatch_action: the webview applies it and broadcasts
                 // back (see the module doc for why Rust holds no reducer).
@@ -4518,8 +4743,9 @@ pub fn run() {
                 // repeatedly stealing the user's desktop. The ordinary app
                 // never sets this test-only environment switch.
                 #[cfg(target_os = "macos")]
-                let hidden_acceptance =
-                    std::env::var_os("TABVERSE_HIDDEN_WINDOW_ACCEPTANCE").is_some();
+                let hidden_acceptance = std::env::var_os("TABVERSE_HIDDEN_WINDOW_ACCEPTANCE")
+                    .is_some()
+                    || std::env::var_os("TABVERSE_RUNTIME_PERFORMANCE_ACCEPTANCE").is_some();
                 #[cfg(target_os = "macos")]
                 if hidden_acceptance {
                     app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
@@ -4601,6 +4827,25 @@ pub fn run() {
                 }
             }
             cookies::init(app.handle());
+            if let Some(probe) = app
+                .state::<AppState>()
+                .runtime_performance
+                .as_ref()
+                .cloned()
+            {
+                println!(
+                    "TABVERSE_RUNTIME_PERFORMANCE_SETUP runtime={} tabs={} elapsed_ms={}",
+                    if cfg!(feature = "runtime-cef") {
+                        "cef"
+                    } else {
+                        "wry"
+                    },
+                    probe.expected,
+                    probe.started.elapsed().as_millis()
+                );
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(run_runtime_performance_probe(handle, probe));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -4756,6 +5001,35 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|app, event| {
+            if app
+                .try_state::<AppState>()
+                .map(|state| state.runtime_performance.is_some())
+                .unwrap_or(false)
+            {
+                match event {
+                    tauri::RunEvent::ExitRequested { .. } => println!(
+                        "TABVERSE_RUNTIME_PERFORMANCE_EXIT_REQUESTED elapsed_ms={}",
+                        app.state::<AppState>()
+                            .runtime_performance
+                            .as_ref()
+                            .expect("runtime performance state")
+                            .started
+                            .elapsed()
+                            .as_millis()
+                    ),
+                    tauri::RunEvent::Exit => println!(
+                        "TABVERSE_RUNTIME_PERFORMANCE_EXIT elapsed_ms={}",
+                        app.state::<AppState>()
+                            .runtime_performance
+                            .as_ref()
+                            .expect("runtime performance state")
+                            .started
+                            .elapsed()
+                            .as_millis()
+                    ),
+                    _ => {}
+                }
+            }
             // ⌘Q is how people actually quit a Mac app, and it exits the
             // process without ever asking the window to close — so the UI's
             // "flush pending state, then close" handler never ran and the
@@ -4776,7 +5050,11 @@ pub fn run() {
                 // (including the teardown that follows our own close), so
                 // only a user-initiated quit is redirected — otherwise this
                 // would loop forever and the app could never exit.
-                if code.is_none() {
+                let runtime_performance = app
+                    .try_state::<AppState>()
+                    .map(|state| state.runtime_performance.is_some())
+                    .unwrap_or(false);
+                if code.is_none() && !runtime_performance {
                     api.prevent_exit();
                     if let Some(state) = app.try_state::<AppState>() {
                         let closing = state.browser_sessions.request_exit();
@@ -4792,9 +5070,13 @@ pub fn run() {
                     // missed was already covered by the per-page-load
                     // snapshots, except a login in the final seconds.
                     cookies::request_snapshot();
-                    if let Some(w) = app.get_webview_window("main") {
-                        let _ = w.close();
-                    }
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = tauri::async_runtime::spawn_blocking(cookies::shutdown).await;
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.close();
+                        }
+                    });
                 }
             }
         });

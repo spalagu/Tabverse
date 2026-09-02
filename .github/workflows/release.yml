@@ -229,7 +229,7 @@ jobs:
         run: >-
           cargo install tauri-cli
           --git https://github.com/spalagu/tauri.git
-          --rev 0f3325d8a5065b7be484d09a3800cb598c2dfb07
+          --rev a639cadd9df0949ae20cbf8b29da66fc0cbf8d14
           --locked
       - name: Prepare the pinned CEF distribution and license resources
         shell: bash
@@ -346,10 +346,43 @@ jobs:
             --baseline-tag "$baseline_tag" \
             --max-cef-delta-mib 325 \
             --output runtime-rollback.json
+      - name: Verify the signed CEF release candidate performance budget without a visible window
+        shell: bash
+        run: |
+          set -euo pipefail
+          cef="$(find candidate-cef -name 'Tabverse_*_aarch64-cef.dmg' -type f -print -quit)"
+          test -n "$cef"
+          mount_point="$(mktemp -d "${RUNNER_TEMP}/tabverse-cef-performance.XXXXXX")"
+          device="$(hdiutil attach "$cef" -nobrowse -readonly -mountpoint "$mount_point" | awk '/^\/dev\// { print $1; exit }')"
+          cleanup() {
+            if [[ -n "$device" ]]; then hdiutil detach "$device" -force >/dev/null 2>&1 || true; fi
+            rmdir "$mount_point" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          app="$(find "$mount_point" -maxdepth 2 -name 'Tabverse.app' -type d -print -quit)"
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          binary="$app/Contents/MacOS/$executable"
+          test -x "$binary"
+          mkdir -p rc-performance/raw
+          printf 'runtime\ttabs\tsample\texit_code\tforced\tsetup_ms\tfirst_create_ms\tfirst_ready_ms\tsecond_create_ms\tsecond_ready_ms\tall_ready_ms\trequest_exit_ms\texit_ms\twall_ms\tsecond_rss_delta_kb\tpeak_rss_kb\tidle_cpu_percent\n' > rc-performance/samples.tsv
+          for tabs in 1 2 20; do
+            idle_ms=1500
+            if [[ "$tabs" == 20 ]]; then idle_ms=30000; fi
+            for sample in $(seq -w 1 10); do
+              bash tools/run-rc-performance-sample.sh \
+                "$binary" "$tabs" "$sample" "$idle_ms" rc-performance/raw \
+                >> rc-performance/samples.tsv
+            done
+          done
+          node tools/check-rc-performance.mjs \
+            --input rc-performance/samples.tsv \
+            --output rc-performance/result.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: acceptance-macos-arm64-runtime-rollback
-          path: runtime-rollback.json
+          path: |
+            runtime-rollback.json
+            rc-performance/
           if-no-files-found: error
 
   publish:

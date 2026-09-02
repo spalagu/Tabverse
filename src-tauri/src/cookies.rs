@@ -86,7 +86,12 @@ struct SavedCookie {
     same_site: Option<String>,
 }
 
-static SNAPSHOT_TX: OnceLock<mpsc::Sender<()>> = OnceLock::new();
+enum WorkerMessage {
+    Snapshot,
+    Shutdown(mpsc::Sender<()>),
+}
+
+static SNAPSHOT_TX: OnceLock<mpsc::Sender<WorkerMessage>> = OnceLock::new();
 
 /// Flips once the saved cookies are back in the store. Snapshots must not
 /// run before that: a pre-restore snapshot would faithfully record the
@@ -97,8 +102,27 @@ static RESTORE_ONCE: std::sync::Once = std::sync::Once::new();
 /// Ask the worker for a snapshot soon. Callable from any thread; a no-op
 /// before initialization.
 pub fn request_snapshot() {
+    // The CEF provider persists session cookies in its native profile store.
+    // Keeping this worker Wry-only also avoids two writers racing over one
+    // browser session.
+    if cfg!(feature = "runtime-cef") {
+        return;
+    }
     if let Some(tx) = SNAPSHOT_TX.get() {
-        let _ = tx.send(());
+        let _ = tx.send(WorkerMessage::Snapshot);
+    }
+}
+
+/// Flush the final snapshot and wait until the worker has stopped using the
+/// engine cookie store. CEF requires this before its process-global shutdown.
+pub fn shutdown() {
+    if cfg!(feature = "runtime-cef") {
+        return;
+    }
+    let Some(tx) = SNAPSHOT_TX.get() else { return };
+    let (done_tx, done_rx) = mpsc::channel();
+    if tx.send(WorkerMessage::Shutdown(done_tx)).is_ok() {
+        let _ = done_rx.recv_timeout(Duration::from_secs(15));
     }
 }
 
@@ -114,6 +138,9 @@ pub fn request_snapshot() {
 /// executed is proof the main thread is past all that: commands arrive over
 /// IPC, and IPC is only pumped by the ordinary event loop.
 pub fn ensure_restored(app: &AppHandle) {
+    if cfg!(feature = "runtime-cef") {
+        return;
+    }
     RESTORE_ONCE.call_once(|| {
         restore(app);
         RESTORED.store(true, Ordering::Release);
@@ -133,7 +160,10 @@ fn file_path(app: &AppHandle) -> Option<std::path::PathBuf> {
 /// Start the snapshot worker. Deliberately does NOT restore — see
 /// [`ensure_restored`] for why the restore must wait for the first command.
 pub fn init(app: &AppHandle) {
-    let (tx, rx) = mpsc::channel::<()>();
+    if cfg!(feature = "runtime-cef") {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<WorkerMessage>();
     let _ = SNAPSHOT_TX.set(tx);
     let app = app.clone();
     std::thread::Builder::new()
@@ -249,21 +279,33 @@ fn restore(app: &AppHandle) {
     eprintln!("[cookies] restored {ok}/{total} session cookies");
 }
 
-fn worker(app: AppHandle, rx: mpsc::Receiver<()>) {
+fn worker(app: AppHandle, rx: mpsc::Receiver<WorkerMessage>) {
     // Skipping unchanged writes matters because of the tick: without it the
     // file would be rewritten every minute the app sits idle.
     let last_written: Mutex<Option<String>> = Mutex::new(None);
     loop {
+        let mut shutdown = None;
         match rx.recv_timeout(TICK) {
-            Ok(()) => {
+            Ok(WorkerMessage::Snapshot) => {
                 eprintln!("[cookies] snapshot requested");
                 std::thread::sleep(DEBOUNCE);
-                while rx.try_recv().is_ok() {}
+                while let Ok(message) = rx.try_recv() {
+                    if let WorkerMessage::Shutdown(done) = message {
+                        shutdown = Some(done);
+                        break;
+                    }
+                }
             }
+            Ok(WorkerMessage::Shutdown(done)) => shutdown = Some(done),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
         snapshot(&app, &last_written);
+        if let Some(done) = shutdown {
+            let _ = done.send(());
+            eprintln!("[cookies] snapshot worker stopped");
+            return;
+        }
     }
 }
 

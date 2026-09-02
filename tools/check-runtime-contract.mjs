@@ -77,6 +77,14 @@ const runtimeRollbackVerifier = await readFile(
   new URL("./verify-runtime-rollback.mjs", import.meta.url),
   "utf8",
 );
+const rcPerformanceRunner = await readFile(
+  new URL("./run-rc-performance-sample.sh", import.meta.url),
+  "utf8",
+);
+const rcPerformanceVerifier = await readFile(
+  new URL("./check-rc-performance.mjs", import.meta.url),
+  "utf8",
+);
 const releaseAssets = expectedReleaseAssets("0.0.0");
 const forkRevisions = [
   ...rootCargo.matchAll(
@@ -141,7 +149,7 @@ const checks = [
   [
     release.includes("cargo install tauri-cli") &&
       release.includes("--git https://github.com/spalagu/tauri.git") &&
-      release.includes("--rev 0f3325d8a5065b7be484d09a3800cb598c2dfb07") &&
+      release.includes("--rev a639cadd9df0949ae20cbf8b29da66fc0cbf8d14") &&
       release.includes("cargo tauri build") &&
       release.includes("--config target/cef-release-config.json") &&
       release.includes("tools/prepare-cef-release.mjs") &&
@@ -182,6 +190,17 @@ const checks = [
       runtimeRollbackVerifier.includes("sequence: observed") &&
       runtimeRollbackVerifier.includes("cefProfilePreserved: true"),
     "macOS ARM64 release must preserve state and CEF profile across Wry/CEF replacement",
+  ],
+  [
+    release.includes("tools/run-rc-performance-sample.sh") &&
+      release.includes("for tabs in 1 2 20") &&
+      release.includes("for sample in $(seq -w 1 10)") &&
+      release.includes("tools/check-rc-performance.mjs") &&
+      rcPerformanceRunner.includes("TABVERSE_RUNTIME_PERFORMANCE_ACCEPTANCE=1") &&
+      rcPerformanceRunner.includes("TABVERSE_CEF_POC_TRACE_SHUTDOWN=1") &&
+      rcPerformanceVerifier.includes('schema: "tabverse-rc-performance/v1"') &&
+      rcPerformanceVerifier.includes("count !== 10"),
+    "macOS ARM64 CEF release must run the hidden 30-sample performance and clean-shutdown gate",
   ],
   [
     release.includes("cargo-cyclonedx --version 0.5.9 --locked") &&
