@@ -1,17 +1,26 @@
 #![cfg(target_os = "macos")]
 
+#[cfg(feature = "runtime-wry")]
 use std::ffi::CString;
 use std::sync::mpsc::Sender;
 
+#[cfg(feature = "runtime-wry")]
 use base64::Engine as _;
+#[cfg(feature = "runtime-wry")]
 use block2::RcBlock;
+#[cfg(feature = "runtime-wry")]
 use objc2::msg_send;
+#[cfg(feature = "runtime-wry")]
 use objc2::runtime::{AnyClass, AnyObject};
+#[cfg(feature = "runtime-wry")]
 use objc2_app_kit::NSImage;
+#[cfg(feature = "runtime-wry")]
 use objc2_foundation::NSError;
+#[cfg(feature = "runtime-wry")]
 use objc2_web_kit::WKWebView;
 
-pub fn take(webview: &tauri::Webview, tx: Sender<Result<String, String>>) {
+#[cfg(feature = "runtime-wry")]
+pub fn take(webview: &crate::Webview, tx: Sender<Result<String, String>>) {
     // The closure runs on the main thread (the only thread WebKit may be
     // spoken to from); the completion handler is invoked there later, and
     // the channel carries the bytes back to the waiting command.
@@ -32,11 +41,19 @@ pub fn take(webview: &tauri::Webview, tx: Sender<Result<String, String>>) {
     }
 }
 
+#[cfg(feature = "runtime-cef")]
+pub fn take(_webview: &crate::Webview, tx: Sender<Result<String, String>>) {
+    let _ = tx.send(Err(
+        "CEF page snapshots require the Chromium capture provider".into(),
+    ));
+}
+
 /// NSImage -> PNG bytes -> data URL, by direct message sends.
 ///
 /// Raw `msg_send` rather than typed bindings: NSBitmapImageRep is not among
 /// the AppKit classes this crate's feature set compiles typed wrappers for,
 /// and one conversion does not earn widening it.
+#[cfg(feature = "runtime-wry")]
 unsafe fn encode(image: *mut NSImage, error: *mut NSError) -> Result<String, String> {
     if image.is_null() {
         let code: isize = if error.is_null() {
@@ -77,6 +94,7 @@ unsafe fn encode(image: *mut NSImage, error: *mut NSError) -> Result<String, Str
     ))
 }
 
+#[cfg(feature = "runtime-wry")]
 fn class(name: &str) -> Result<&'static AnyClass, String> {
     let c = CString::new(name).map_err(|e| e.to_string())?;
     AnyClass::get(&c).ok_or_else(|| format!("{name} is missing from this system"))

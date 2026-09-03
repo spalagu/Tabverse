@@ -47,7 +47,7 @@ const okHtml = (): Promise<Response> =>
     new Response(htmlDoc, {
       status: 200,
       headers: { "content-type": "text/html" },
-    })
+    }),
   );
 
 describe("BrowserPane", () => {
@@ -57,19 +57,18 @@ describe("BrowserPane", () => {
         url: "http://intranet.local/wiki/Home",
         fetchViaHost: okHtml,
         resolveProxyUrl: proxyUrlFor,
-      })
+      }),
     );
     await flush();
 
     const frame = host.querySelector<HTMLIFrameElement>(".browser-pane-frame");
     expect(frame).not.toBeNull();
-    // Scripts may not run; same origin is kept so relative URLs load
-    // against the join origin rather than dying on a CORS wall.
-    expect(frame!.getAttribute("sandbox")).toBe("allow-same-origin");
+    // No script, form, popup, navigation or same-origin authority is granted.
+    expect(frame!.getAttribute("sandbox")).toBe("");
     // The document's directory, mirrored onto the endpoint path the
     // page's fetch patch (and, later, the SW arm) answers.
     expect(frame!.getAttribute("srcdoc")).toContain(
-      '<base href="/__tabverse_proxy/http/intranet.local/wiki/">'
+      '<base href="/__tabverse_proxy/http/intranet.local/wiki/">',
     );
     expect(frame!.getAttribute("srcdoc")).toContain("<h1>Intranet wiki</h1>");
     expect(host.querySelector(".browser-pane-chip")).not.toBeNull();
@@ -83,38 +82,39 @@ describe("BrowserPane", () => {
             status: 200,
             headers: { "content-type": "text/html" },
           }),
-      })
+      }),
     );
     await flush();
     const bare = host.querySelector<HTMLIFrameElement>(".browser-pane-frame");
-    expect(bare!.getAttribute("srcdoc")).toContain("<head><base href=");
+    expect(bare!.getAttribute("srcdoc")).toContain("<base href=");
   });
 
-  it("rewrites root-relative, directory-relative, and cross-origin resources to the host request endpoint", async () => {
+  it("rewrites retained resources to the host endpoint and drops unsupported external stylesheet links", async () => {
     mount(
       createElement(BrowserPane, {
         url: "http://intranet.local/wiki/Home",
         resolveProxyUrl: proxyUrlFor,
-        fetchViaHost: async () => new Response(
-          '<html><head><link href="/root.css"><style>.x{background:url(../img/a.png)}</style></head>' +
-            '<body><img src="icons/x.png"><a href="https://cdn.local/a">x</a></body></html>',
-          {
-            status: 200,
-            headers: {
-              "content-type": "text/html",
-              "x-tabverse-final-url": "http://intranet.local/redirected/Page",
+        fetchViaHost: async () =>
+          new Response(
+            '<html><head><link href="/root.css"><style>.x{background:url(../img/a.png)}</style></head>' +
+              '<body><img src="icons/x.png"><a href="https://cdn.local/a">x</a></body></html>',
+            {
+              status: 200,
+              headers: {
+                "content-type": "text/html",
+                "x-tabverse-final-url": "http://intranet.local/redirected/Page",
+              },
             },
-          },
-        ),
+          ),
       }),
     );
     await flush();
-    const doc = host.querySelector<HTMLIFrameElement>(".browser-pane-frame")!
+    const doc = host
+      .querySelector<HTMLIFrameElement>(".browser-pane-frame")!
       .getAttribute("srcdoc")!;
-    expect(doc).toContain('/__tabverse_proxy/http/intranet.local/root.css');
-    expect(doc).toContain('/__tabverse_proxy/http/intranet.local/redirected/icons/x.png');
-    expect(doc).toContain('/__tabverse_proxy/http/intranet.local/img/a.png');
-    expect(doc).toContain('/__tabverse_proxy/https/cdn.local/a');
+    expect(doc).not.toContain("root.css");
+    expect(doc).not.toContain("img/a.png");
+    expect(doc).toContain("/__tabverse_proxy/https/cdn.local/a");
     expect(doc).toContain(
       '<base href="/__tabverse_proxy/http/intranet.local/redirected/">',
     );
@@ -130,10 +130,10 @@ describe("BrowserPane", () => {
         fetchViaHost: (url) => {
           asked.push(url);
           return Promise.reject(
-            new Error("the request named no forwardable host")
+            new Error("the request named no forwardable host"),
           );
         },
-      })
+      }),
     );
     await flush();
 
@@ -141,12 +141,14 @@ describe("BrowserPane", () => {
     const pane = host.querySelector(".browser-pane-unmirrored");
     expect(pane).not.toBeNull();
     expect(pane!.textContent).toContain(
-      STR.remote.web.browserPane.unmirroredLabel
+      STR.remote.web.browserPane.unmirroredLabel,
     );
     expect(pane!.textContent).toContain(
-      STR.remote.web.browserPane.unmirroredWhy
+      STR.remote.web.browserPane.unmirroredWhy,
     );
-    expect(pane!.textContent).toContain("the request named no forwardable host");
+    expect(pane!.textContent).toContain(
+      "the request named no forwardable host",
+    );
     const link = host.querySelector<HTMLAnchorElement>(".browser-pane-link");
     expect(link!.getAttribute("href")).toBe("http://members.example/wiki");
     expect(link!.getAttribute("target")).toBe("_blank");
@@ -163,7 +165,7 @@ describe("BrowserPane", () => {
           asked.push(url);
           return okHtml();
         },
-      })
+      }),
     );
     await flush();
     // No up-front refusal anymore: the host terminates TLS (remote_proxy's
@@ -177,12 +179,12 @@ describe("BrowserPane", () => {
       createElement(BrowserPane, {
         url: "http://intranet.local/forbidden",
         fetchViaHost: async () => new Response("no", { status: 403 }),
-      })
+      }),
     );
     await flush();
     let pane = host.querySelector(".browser-pane-unmirrored");
     expect(pane!.textContent).toContain(
-      STR.remote.web.browserPane.unmirroredStatus({ status: "403" })
+      STR.remote.web.browserPane.unmirroredStatus({ status: "403" }),
     );
 
     mount(
@@ -193,12 +195,12 @@ describe("BrowserPane", () => {
             status: 200,
             headers: { "content-type": "application/pdf" },
           }),
-      })
+      }),
     );
     await flush();
     pane = host.querySelector(".browser-pane-unmirrored");
     expect(pane!.textContent).toContain(
-      STR.remote.web.browserPane.unmirroredType
+      STR.remote.web.browserPane.unmirroredType,
     );
     expect(host.querySelector(".browser-pane-frame")).toBeNull();
   });
@@ -208,7 +210,7 @@ describe("BrowserPane", () => {
       createElement(BrowserPane, {
         url: "http://intranet.local/slow",
         fetchViaHost: () => new Promise<Response>(() => {}),
-      })
+      }),
     );
     expect(host.querySelector(".browser-pane-loading")).not.toBeNull();
     expect(host.querySelector(".browser-pane-frame")).toBeNull();
@@ -230,12 +232,15 @@ describe("BrowserPane", () => {
     await flush();
     mount(pane("http://intranet.local/two"));
     await flush();
-    expect(asked).toEqual(["http://intranet.local/one", "http://intranet.local/two"]);
+    expect(asked).toEqual([
+      "http://intranet.local/one",
+      "http://intranet.local/two",
+    ]);
     const frame = host.querySelector<HTMLIFrameElement>(".browser-pane-frame");
     // The second document's base — the first answer never landed on a
     // pane that had already moved to the second URL.
     expect(frame!.getAttribute("srcdoc")).toContain(
-      '<base href="/__tabverse_proxy/http/intranet.local/">'
+      '<base href="/__tabverse_proxy/http/intranet.local/">',
     );
   });
 });

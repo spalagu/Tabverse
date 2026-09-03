@@ -8,7 +8,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_
 use windows::Win32::System::Com::{IStream, STREAM_SEEK_SET};
 use windows::Win32::UI::Shell::SHCreateMemStream;
 
-pub fn take(webview: &tauri::Webview, tx: Sender<Result<String, String>>) {
+pub fn take(webview: &crate::Webview, tx: Sender<Result<String, String>>) {
     let outcome = webview.with_webview(move |pw| unsafe {
         let controller = pw.controller();
         let core = match controller.CoreWebView2() {

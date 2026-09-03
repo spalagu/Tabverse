@@ -1,6 +1,6 @@
 #![cfg(target_os = "windows")]
 
-use tauri::AppHandle;
+use crate::AppHandle;
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
 use webview2_com::WebMessageReceivedEventHandler;
 

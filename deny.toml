@@ -12,11 +12,13 @@ ignore = [
   { id = "RUSTSEC-2024-0419", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
   { id = "RUSTSEC-2024-0420", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
   { id = "RUSTSEC-2024-0436", reason = "The current iroh network stack requires this transitive macro crate; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2025-0057", reason = "The pinned Tauri CEF alpha requires fxhash through its HTML parsing stack; this is an unmaintained notice, not a vulnerability." },
   { id = "RUSTSEC-2025-0075", reason = "Tauri 2's URL pattern parser requires this transitive crate; no maintained compatible replacement is available." },
   { id = "RUSTSEC-2025-0080", reason = "Tauri 2's URL pattern parser requires this transitive crate; no maintained compatible replacement is available." },
   { id = "RUSTSEC-2025-0081", reason = "Tauri 2's URL pattern parser requires this transitive crate; no maintained compatible replacement is available." },
   { id = "RUSTSEC-2025-0098", reason = "Tauri 2's URL pattern parser requires this transitive crate; no maintained compatible replacement is available." },
   { id = "RUSTSEC-2025-0100", reason = "Tauri 2's URL pattern parser requires this transitive crate; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2026-0192", reason = "The pinned Tauri CEF alpha requires ttf-parser through its Linux Wayland stack; the supported CEF artifact is macOS ARM64 only." },
 ]
 
 [licenses]
@@ -29,6 +31,7 @@ allow = [
   "BSD-1-Clause",
   "BSD-2-Clause",
   "BSD-3-Clause",
+  "bzip2-1.0.6",
   "BSL-1.0",
   "CC0-1.0",
   "CDLA-Permissive-2.0",
@@ -44,3 +47,6 @@ allow = [
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+allow-git = [
+  "https://github.com/spalagu/tauri.git",
+]

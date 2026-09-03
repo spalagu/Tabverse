@@ -1,3 +1,4 @@
+use crate::AppHandle;
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use serde::Deserialize;
@@ -18,7 +19,7 @@ use tabverse_resident::{
     AttachReplay, AuthToken, EnsureRuntime, InstallArtifacts, InstallPlan, PlatformKind,
     ProtocolRange, ResidentClient, RuntimeDescriptor, RuntimeRef, RuntimeStatus,
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{Manager, State};
 use zeroize::Zeroizing;
 
 use crate::AppState;

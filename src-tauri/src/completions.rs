@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use tauri::AppHandle;
+use crate::AppHandle;
 
 /// The ceiling one fetched spec may carry. The bundled snapshot is a few
 /// tens of kilobytes; a document worth calling a completion spec has no

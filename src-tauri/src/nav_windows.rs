@@ -1,6 +1,6 @@
 #![cfg(target_os = "windows")]
 
-use tauri::AppHandle;
+use crate::AppHandle;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2Controller, ICoreWebView2_14,
     COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_ALWAYS_ALLOW, COREWEBVIEW2_WEB_ERROR_STATUS,

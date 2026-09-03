@@ -353,6 +353,7 @@ pub fn save_http_auth(key: &str, username: &str, password: &str) -> Result<(), S
     save(AUTH_SERVICE, key, username, password)
 }
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(feature = "runtime-cef", allow(dead_code))]
 pub fn find_http_auth(key: &str) -> Result<Vec<WebCredential>, String> {
     find(AUTH_SERVICE, key)
 }

@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use crate::AppHandle;
 use base64::Engine as _;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{Emitter, Manager, State};
 
 /// Captured-but-not-yet-saved logins, keyed by host. Values live here and
 /// nowhere else until the user decides.

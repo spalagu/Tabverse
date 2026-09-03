@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Emitter};
+use crate::AppHandle;
+use tauri::Emitter;
 
 /// tab id -> the pinned address's host. Only anchored tabs can peek.
 static ANCHORS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
@@ -139,6 +140,7 @@ pub fn intercept(app: &AppHandle, tab_id: &str, url: &tauri::Url) -> bool {
 /// original implementation, on the same main thread), and calls straight
 /// through. Installed once per delegate class.
 #[cfg(target_os = "macos")]
+#[cfg_attr(feature = "runtime-cef", allow(dead_code))]
 pub fn install_frame_probe(delegate: *mut objc2::runtime::AnyObject) {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject, Sel};

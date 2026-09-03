@@ -57,3 +57,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # rand 0.7.3 is a build-only dependency of the pinned Tauri CEF HTML parser.
+          allow-ghsas: GHSA-cq8v-f236-94qc

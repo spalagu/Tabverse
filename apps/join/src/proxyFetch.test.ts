@@ -3,6 +3,7 @@ import {
   createBrowserStreamClient,
   createProxyClient,
   installProxyFetchPatch,
+  MAX_BROWSER_REQUEST_BYTES,
   PROXY_PATH_PREFIX,
   PROXY_TIMEOUT_MS,
   proxyUrlFor,
@@ -11,13 +12,16 @@ import {
 
 function streamRig() {
   const calls: Array<{ fn: string; args: unknown[] }> = [];
-  const client = createBrowserStreamClient({
-    open: (frame) => calls.push({ fn: "open", args: [frame] }),
-    requestChunk: (...args) => calls.push({ fn: "requestChunk", args }),
-    requestEnd: (...args) => calls.push({ fn: "requestEnd", args }),
-    credit: (...args) => calls.push({ fn: "credit", args }),
-    cancel: (...args) => calls.push({ fn: "cancel", args }),
-  }, () => ({ id: "attachment-7", generation: 3 }));
+  const client = createBrowserStreamClient(
+    {
+      open: (frame) => calls.push({ fn: "open", args: [frame] }),
+      requestChunk: (...args) => calls.push({ fn: "requestChunk", args }),
+      requestEnd: (...args) => calls.push({ fn: "requestEnd", args }),
+      credit: (...args) => calls.push({ fn: "credit", args }),
+      cancel: (...args) => calls.push({ fn: "cancel", args }),
+    },
+    () => ({ id: "attachment-7", generation: 3 }),
+  );
   return { calls, client };
 }
 
@@ -25,11 +29,15 @@ describe("http-stream-v2 client", () => {
   it("uploads binary requests in chunks and builds a credited ReadableStream from Head, Chunk, and End", async () => {
     const { calls, client } = streamRig();
     const input = new Uint8Array([0, 255, 1, 128, 2]);
-    const pending = client.requestViaHost("browser-tab", "https://intranet.test/upload", {
-      method: "POST",
-      body: input,
-      headers: { "content-type": "application/octet-stream" },
-    });
+    const pending = client.requestViaHost(
+      "browser-tab",
+      "https://intranet.test/upload",
+      {
+        method: "POST",
+        body: input,
+        headers: { "content-type": "application/octet-stream" },
+      },
+    );
     await settleMicrotasks();
     const open = calls.find((call) => call.fn === "open")?.args[0] as {
       streamId: number;
@@ -51,13 +59,15 @@ describe("http-stream-v2 client", () => {
       "requestEnd",
     ]);
 
-    expect(client.consume({
-      type: "browserResponseHead",
-      streamId: open.streamId,
-      status: 200,
-      headers: [["content-type", "application/octet-stream"]],
-      finalUrl: "https://intranet.test/final",
-    })).toBe(true);
+    expect(
+      client.consume({
+        type: "browserResponseHead",
+        streamId: open.streamId,
+        status: 200,
+        headers: [["content-type", "application/octet-stream"]],
+        finalUrl: "https://intranet.test/final",
+      }),
+    ).toBe(true);
     const response = await pending;
     client.consume({
       type: "browserResponseChunk",
@@ -66,19 +76,27 @@ describe("http-stream-v2 client", () => {
       b64: btoa(String.fromCharCode(9, 0, 255)),
     });
     client.consume({ type: "browserResponseEnd", streamId: open.streamId });
-    expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual([9, 0, 255]);
+    expect(Array.from(new Uint8Array(await response.arrayBuffer()))).toEqual([
+      9, 0, 255,
+    ]);
     expect(response.headers.get("x-tabverse-final-url")).toBe(
       "https://intranet.test/final",
     );
-    expect(calls.filter((call) => call.fn === "credit").at(-1)?.args[1]).toBe(3);
+    expect(calls.filter((call) => call.fn === "credit").at(-1)?.args[1]).toBe(
+      3,
+    );
   });
 
   it("cancels out-of-order responses immediately while AbortSignal stops only its own stream", async () => {
     const { calls, client } = streamRig();
     const abort = new AbortController();
-    const pending = client.requestViaHost("browser-tab", "http://host.test/slow", {
-      signal: abort.signal,
-    });
+    const pending = client.requestViaHost(
+      "browser-tab",
+      "http://host.test/slow",
+      {
+        signal: abort.signal,
+      },
+    );
     await settleMicrotasks();
     const streamId = (calls[0].args[0] as { streamId: number }).streamId;
     client.consume({
@@ -97,13 +115,30 @@ describe("http-stream-v2 client", () => {
       b64: btoa("late"),
     });
     await expect(reading).rejects.toThrow("chunk gap");
-    expect(calls.some((call) => call.fn === "cancel" && call.args[0] === streamId)).toBe(true);
+    expect(
+      calls.some((call) => call.fn === "cancel" && call.args[0] === streamId),
+    ).toBe(true);
 
-    const second = client.requestViaHost("browser-tab", "http://host.test/abort", {
-      signal: abort.signal,
-    });
+    const second = client.requestViaHost(
+      "browser-tab",
+      "http://host.test/abort",
+      {
+        signal: abort.signal,
+      },
+    );
     abort.abort();
     await expect(second).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("rejects an oversized request before opening a Host stream", async () => {
+    const { calls, client } = streamRig();
+    await expect(
+      client.requestViaHost("browser-tab", "https://intranet.test/upload", {
+        method: "POST",
+        body: new Uint8Array(MAX_BROWSER_REQUEST_BYTES + 1),
+      }),
+    ).rejects.toThrow("request-too-large");
+    expect(calls).toEqual([]);
   });
 });
 
@@ -117,7 +152,7 @@ interface Sent {
 function rig() {
   const sent: Sent[] = [];
   const client = createProxyClient((id, head, body) =>
-    sent.push({ id, head, body })
+    sent.push({ id, head, body }),
   );
   return { sent, client };
 }
@@ -130,14 +165,18 @@ const settleMicrotasks = async () => {
 describe("createProxyClient round trip", () => {
   it("a GET document exchange: absolute-form request head, Response from the answer head", async () => {
     const { sent, client } = rig();
-    const pending = client.requestViaProxy("http://intranet.example/dir/page?q=1");
+    const pending = client.requestViaProxy(
+      "http://intranet.example/dir/page?q=1",
+    );
     await settleMicrotasks();
     expect(sent).toHaveLength(1);
     // The head the host's proxy parses: absolute target, the authority
     // in Host, no body on a GET.
-    expect(sent[0].head.startsWith(
-      "GET http://intranet.example/dir/page?q=1 HTTP/1.1\r\n"
-    )).toBe(true);
+    expect(
+      sent[0].head.startsWith(
+        "GET http://intranet.example/dir/page?q=1 HTTP/1.1\r\n",
+      ),
+    ).toBe(true);
     expect(sent[0].head).toContain("Host: intranet.example");
     expect(sent[0].body).toBeUndefined();
 
@@ -146,7 +185,7 @@ describe("createProxyClient round trip", () => {
     client.settle(
       sent[0].id,
       "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n",
-      btoa("<html><body>wiki</body></html>")
+      btoa("<html><body>wiki</body></html>"),
     );
     const res = await pending;
     expect(res.ok).toBe(true);
@@ -164,7 +203,9 @@ describe("createProxyClient round trip", () => {
       headers: { "x-joiner": "page" },
     });
     await settleMicrotasks();
-    expect(sent[0].head).toContain("POST http://intranet.example/form HTTP/1.1");
+    expect(sent[0].head).toContain(
+      "POST http://intranet.example/form HTTP/1.1",
+    );
     expect(sent[0].head).toContain("x-joiner: page");
     // "wär" is 5 bytes as UTF-8, 4 as characters; the whole body
     // "search=wär" is 11 bytes where it is 10 characters — the wire
@@ -210,7 +251,7 @@ describe("createProxyClient failure paths", () => {
       const { client } = rig();
       const pending = client.requestViaProxy("http://slow.example/");
       const expectation = expect(pending).rejects.toThrow(
-        `proxied fetch of slow.example timed out after ${PROXY_TIMEOUT_MS}ms`
+        `proxied fetch of slow.example timed out after ${PROXY_TIMEOUT_MS}ms`,
       );
       await vi.advanceTimersByTimeAsync(PROXY_TIMEOUT_MS);
       await expectation;
@@ -233,13 +274,17 @@ describe("createProxyClient failure paths", () => {
     });
     expect(claimed).toBe(true);
     await expect(pending).rejects.toThrow(
-      "the request named no forwardable host"
+      "the request named no forwardable host",
     );
 
     // Frames that are not this client's to claim fall through: another
     // family's rpcResult, a proxyRes for a dead id, anything else.
-    expect(client.consumeRpcResult({ type: "rpcResult", id: 1, err: "x" })).toBe(false);
-    expect(client.consumeRpcResult({ type: "proxyRes", id: sent[0].id })).toBe(false);
+    expect(
+      client.consumeRpcResult({ type: "rpcResult", id: 1, err: "x" }),
+    ).toBe(false);
+    expect(client.consumeRpcResult({ type: "proxyRes", id: sent[0].id })).toBe(
+      false,
+    );
     expect(client.consumeRpcResult({ type: "actionApplied" })).toBe(false);
   });
 
@@ -259,10 +304,10 @@ describe("createProxyClient failure paths", () => {
 describe("the endpoint path", () => {
   it("mirrors a target URL after the scheme segment, query included", () => {
     expect(proxyUrlFor("http://intranet.example/dir/page?q=1")).toBe(
-      `${PROXY_PATH_PREFIX}http/intranet.example/dir/page?q=1`
+      `${PROXY_PATH_PREFIX}http/intranet.example/dir/page?q=1`,
     );
     expect(proxyUrlFor("https://host.example:8443/")).toBe(
-      `${PROXY_PATH_PREFIX}https/host.example:8443/`
+      `${PROXY_PATH_PREFIX}https/host.example:8443/`,
     );
     // The one scheme family the host's proxy refuses is the caller's
     // error to hear, not a mangled URL to send.
@@ -273,10 +318,10 @@ describe("the endpoint path", () => {
     const read = (path: string) =>
       targetFromProxyUrl(new URL(path, "https://join.example/page"));
     expect(read("/__tabverse_proxy/http/intranet.example/dir/page?q=1")).toBe(
-      "http://intranet.example/dir/page?q=1"
+      "http://intranet.example/dir/page?q=1",
     );
     expect(read("/__tabverse_proxy/https/host.example:8443/")).toBe(
-      "https://host.example:8443/"
+      "https://host.example:8443/",
     );
     expect(read("/__tabverse_proxy/ftp/files/")).toBeNull();
     expect(read("/__tabverse_proxy")).toBeNull();
@@ -288,10 +333,10 @@ describe("the endpoint path", () => {
     // document's base, on the join origin:
     const base = new URL(
       proxyUrlFor("http://intranet.example/dir/"),
-      "https://join.example/anything"
+      "https://join.example/anything",
     );
     expect(targetFromProxyUrl(new URL("logo.png", base))).toBe(
-      "http://intranet.example/dir/logo.png"
+      "http://intranet.example/dir/logo.png",
     );
     // Root-absolute URLs are path form's boundary: URL semantics resolve
     // "/style.css" against the JOIN origin's root, off the endpoint
@@ -300,7 +345,7 @@ describe("the endpoint path", () => {
     expect(targetFromProxyUrl(new URL("/style.css", base))).toBeNull();
     // A cross-origin URL the base never touches stays unproxied.
     expect(
-      targetFromProxyUrl(new URL("https://direct.example/x", base))
+      targetFromProxyUrl(new URL("https://direct.example/x", base)),
     ).toBeNull();
   });
 });
@@ -319,18 +364,23 @@ describe("the page fetch patch", () => {
         return new Response("via the host", { status: 200 });
       }),
     };
-    const passthrough = vi.fn(
-      (): Promise<Response> => Promise.resolve(new Response("passthrough"))
+    const passthrough = vi.fn((): Promise<Response> =>
+      Promise.resolve(new Response("passthrough")),
     );
     globalThis.fetch = passthrough;
-    const restore = installProxyFetchPatch(client, () => "https://join.example/page");
+    const restore = installProxyFetchPatch(
+      client,
+      () => "https://join.example/page",
+    );
     try {
       // Path-relative, absolute-path and Request forms all name the
       // same-origin endpoint and route through the client.
       const a = await fetch("/__tabverse_proxy/http/site.example/doc");
       expect(await a.text()).toBe("via the host");
       const b = await fetch(
-        new Request("https://join.example/__tabverse_proxy/http/site.example/other")
+        new Request(
+          "https://join.example/__tabverse_proxy/http/site.example/other",
+        ),
       );
       expect(b.ok).toBe(true);
       expect(seen).toEqual([
@@ -349,7 +399,8 @@ describe("the page fetch patch", () => {
     }
     expect(globalThis.fetch).toBe(passthrough);
     // And after restore the patch is really gone.
-    await expect(fetch("/__tabverse_proxy/http/site.example/doc")).resolves
-      .toBeDefined();
+    await expect(
+      fetch("/__tabverse_proxy/http/site.example/doc"),
+    ).resolves.toBeDefined();
   });
 });

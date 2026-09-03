@@ -1,13 +1,19 @@
+#[cfg_attr(feature = "runtime-cef", allow(dead_code))]
 mod basic_auth;
 #[cfg(target_os = "windows")]
 mod basic_auth_win;
+pub mod browser;
+#[cfg(feature = "runtime-cef")]
+mod cef_handlers;
 mod cookies;
 mod default_apps;
 #[cfg(target_os = "macos")]
+#[cfg_attr(feature = "runtime-cef", allow(dead_code))]
 mod dialogs;
 #[cfg(target_os = "windows")]
 mod dialogs_win;
 #[cfg(target_os = "macos")]
+#[cfg_attr(feature = "runtime-cef", allow(dead_code))]
 mod nav_failures;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod nav_report;
@@ -15,6 +21,7 @@ mod nav_watchdog;
 #[cfg(target_os = "windows")]
 mod nav_windows;
 #[cfg(target_os = "macos")]
+#[cfg_attr(feature = "runtime-cef", allow(dead_code))]
 mod page_channel;
 #[cfg(target_os = "windows")]
 mod page_channel_win;
@@ -61,6 +68,7 @@ mod fs_watch;
 mod http;
 mod keys;
 mod migrate;
+mod network_broker;
 pub mod page_proxy;
 mod passwords;
 mod profiles;
@@ -91,7 +99,28 @@ use tabverse_term::{
 };
 #[cfg(target_os = "macos")]
 use tauri::menu::SubmenuBuilder;
-use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State, Window};
+use tauri::{ipc::Channel, Emitter, Manager, State};
+
+use browser::session::{
+    BrowserSessionManager, CloseReason as BrowserCloseReason, EnsureSession, SessionPhase,
+    SessionSnapshot,
+};
+
+#[cfg(all(feature = "runtime-wry", feature = "runtime-cef"))]
+compile_error!("runtime-wry and runtime-cef cannot be enabled in the same Tabverse binary");
+
+#[cfg(not(any(feature = "runtime-wry", feature = "runtime-cef")))]
+compile_error!("Tabverse requires exactly one of runtime-wry or runtime-cef");
+
+#[cfg(feature = "runtime-wry")]
+pub type AppRuntime = tauri::Wry;
+
+#[cfg(feature = "runtime-cef")]
+pub type AppRuntime = tauri::Cef;
+
+pub type AppHandle<R = AppRuntime> = tauri::AppHandle<R>;
+pub type Window<R = AppRuntime> = tauri::Window<R>;
+pub type Webview<R = AppRuntime> = tauri::Webview<R>;
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
@@ -183,6 +212,8 @@ impl LocalSink for WebviewSink {
     }
 }
 
+type BrowserCloseWaiters = HashMap<(String, u64), Vec<std::sync::mpsc::Sender<()>>>;
+
 struct AppState {
     helper: terminal_helper::TerminalHelper,
     resident: resident::ResidentBridge,
@@ -198,13 +229,108 @@ struct AppState {
     fs: Arc<FsBackend>,
     /// tab id -> child webview label for browser tabs.
     browsers: Mutex<HashMap<String, String>>,
+    browser_sessions: Arc<BrowserSessionManager>,
+    browser_specs: Mutex<HashMap<String, NativeBrowserSpec>>,
+    browser_close_waiters: Mutex<BrowserCloseWaiters>,
     downloads: Mutex<HashSet<std::path::PathBuf>>,
     watches: fs_watch::WatchState,
     page_proxy: Mutex<PageProxySlot>,
+    runtime_performance: Option<Arc<RuntimePerformanceProbe>>,
     /// The whole-app share (v3): one per process, lazily built on the first
     /// `app_share_start`. The source's glue seams (snapshot from the
     /// webview, clipboard, proxy) are wired there, once.
     app_source: Arc<app_share::AppShareSource>,
+}
+
+struct RuntimePerformanceProbe {
+    started: std::time::Instant,
+    expected: usize,
+    idle_ms: u64,
+    between_tabs_ms: u64,
+    ready: Mutex<HashSet<String>>,
+}
+
+impl RuntimePerformanceProbe {
+    fn from_env(started: std::time::Instant) -> Option<Arc<Self>> {
+        std::env::var_os("TABVERSE_RUNTIME_PERFORMANCE_ACCEPTANCE")?;
+        let expected = std::env::var("TABVERSE_RUNTIME_PERFORMANCE_TABS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, 20);
+        let idle_ms = std::env::var("TABVERSE_RUNTIME_PERFORMANCE_IDLE_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(1_500);
+        let between_tabs_ms = std::env::var("TABVERSE_RUNTIME_PERFORMANCE_BETWEEN_TABS_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(2_000);
+        Some(Arc::new(Self {
+            started,
+            expected,
+            idle_ms,
+            between_tabs_ms,
+            ready: Mutex::new(HashSet::new()),
+        }))
+    }
+
+    fn ready_count(&self) -> usize {
+        self.ready.lock().unwrap().len()
+    }
+
+    fn page_ready(&self, app: &AppHandle, tab_id: &str) {
+        let ready = {
+            let mut labels = self.ready.lock().unwrap();
+            if !labels.insert(tab_id.to_owned()) {
+                return;
+            }
+            labels.len()
+        };
+        println!(
+            "TABVERSE_RUNTIME_PERFORMANCE_READY index={ready} tab={tab_id} elapsed_ms={}",
+            self.started.elapsed().as_millis()
+        );
+        if ready == self.expected {
+            println!(
+                "TABVERSE_RUNTIME_PERFORMANCE_ALL_READY elapsed_ms={}",
+                self.started.elapsed().as_millis()
+            );
+            let handle = app.clone();
+            let started = self.started;
+            let idle_ms = self.idle_ms;
+            let expected = self.expected;
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(idle_ms)).await;
+                println!(
+                    "TABVERSE_RUNTIME_PERFORMANCE_REQUEST_EXIT elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
+                let _ = tauri::async_runtime::spawn_blocking(cookies::shutdown).await;
+                for index in 1..=expected {
+                    let tab_id = format!("runtime-performance-{index}");
+                    let generation = handle
+                        .state::<AppState>()
+                        .browser_sessions
+                        .snapshot(&tab_id)
+                        .map(|snapshot| snapshot.generation);
+                    if let Some(generation) = generation {
+                        let state_handle = handle.clone();
+                        let state = state_handle.state::<AppState>();
+                        let _ = browser_close_with_state(
+                            handle.clone(),
+                            &state,
+                            tab_id,
+                            generation,
+                            BrowserCloseReason::AppExit,
+                        )
+                        .await;
+                    }
+                }
+                handle.exit(0);
+            });
+        }
+    }
 }
 
 // Filesystem commands run on the blocking pool: a `git status` over a large
@@ -533,9 +659,15 @@ fn fs_watch_stop(state: State<'_, AppState>, tab_id: String) {
 }
 
 fn state_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app_data_dir(app).map(|directory| directory.join("state"))
+}
+
+fn app_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    if let Some(directory) = std::env::var_os("TABVERSE_ACCEPTANCE_APP_DATA_DIR") {
+        return Ok(directory.into());
+    }
     app.path()
         .app_data_dir()
-        .map(|d| d.join("state"))
         .map_err(|e| format!("cannot resolve app data dir: {e}"))
 }
 
@@ -644,12 +776,12 @@ fn is_theme_preference(p: &str) -> bool {
 /// ui_plane::set_window_backdrop, so the color can only come from the
 /// generated table (theme token tests pin the call shape).
 #[cfg(target_os = "macos")]
-fn apply_backdrop(window: &tauri::Window, backdrop: &theme_gen::Backdrop) -> Result<(), String> {
+fn apply_backdrop(window: &crate::Window, backdrop: &theme_gen::Backdrop) -> Result<(), String> {
     ui_plane::set_window_backdrop(window, backdrop.r, backdrop.g, backdrop.b)
 }
 
 #[tauri::command]
-fn set_theme(window: tauri::Window, theme: String) -> Result<(), String> {
+fn set_theme(window: crate::Window, theme: String) -> Result<(), String> {
     let Some(entry) = theme_gen::theme(&theme) else {
         return Err(format!("unknown theme {theme:?}"));
     };
@@ -1188,6 +1320,114 @@ struct Bounds {
     y: f64,
     width: f64,
     height: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct NativeBrowserSpec {
+    profile_id: String,
+    initial_url: String,
+    private_mode: bool,
+    network: serde_json::Value,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserSessionHandle {
+    tab_id: String,
+    session_generation: u64,
+    engine: &'static str,
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BrowserSessionEvent {
+    tab_id: String,
+    session_generation: u64,
+    event_seq: u64,
+    event: serde_json::Value,
+}
+
+fn browser_session_event(app: &AppHandle, snapshot: &SessionSnapshot, event: serde_json::Value) {
+    let _ = app.emit(
+        "browser-session-event",
+        BrowserSessionEvent {
+            tab_id: snapshot.tab_id.clone(),
+            session_generation: snapshot.generation,
+            event_seq: snapshot.event_seq,
+            event,
+        },
+    );
+}
+
+fn valid_profile_id(profile_id: &str) -> bool {
+    !profile_id.is_empty()
+        && profile_id.len() <= 80
+        && profile_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && profile_id != "."
+        && profile_id != ".."
+}
+
+fn validate_network_mode(network: &serde_json::Value) -> Result<(), String> {
+    let kind = network
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "browser network mode has no kind".to_string())?;
+    match kind {
+        "system" | "direct" | "doh" | "proxy" => Ok(()),
+        _ => Err(format!("unsupported browser network mode: {kind}")),
+    }
+}
+
+#[tauri::command]
+fn browser_session_ensure(
+    state: State<'_, AppState>,
+    tab_id: String,
+    profile_id: String,
+    initial_url: String,
+    network: serde_json::Value,
+    private_mode: bool,
+) -> Result<BrowserSessionHandle, String> {
+    if !valid_profile_id(&profile_id) {
+        return Err("invalid browser profile id".into());
+    }
+    initial_url
+        .parse::<tauri::Url>()
+        .map_err(|error| format!("bad url: {error}"))?;
+    validate_network_mode(&network)?;
+    let label = webview_label(&tab_id);
+    let requested = NativeBrowserSpec {
+        profile_id,
+        initial_url,
+        private_mode,
+        network,
+    };
+    let ensured = state
+        .browser_sessions
+        .ensure_session(&tab_id, &label)
+        .map_err(|error| error.to_string())?;
+    let snapshot = ensured.snapshot();
+    if matches!(ensured, EnsureSession::Created(_)) {
+        state
+            .browser_specs
+            .lock()
+            .unwrap()
+            .insert(tab_id.clone(), requested);
+    } else if state.browser_specs.lock().unwrap().get(&tab_id) != Some(&requested) {
+        return Err(format!(
+            "browser session specification changed for {tab_id}"
+        ));
+    }
+    Ok(BrowserSessionHandle {
+        tab_id,
+        session_generation: snapshot.generation,
+        engine: if cfg!(feature = "runtime-cef") {
+            "cef"
+        } else {
+            "system-webview"
+        },
+    })
 }
 
 impl Bounds {
@@ -2087,7 +2327,7 @@ fn slot_page_proxy_url(
 /// preserving the cookie jar. Existing pages use the new route for their
 /// next request; the Settings copy names that reality rather than promising
 /// a per-tab configuration WebKit cannot provide.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "runtime-wry"))]
 fn clear_shared_page_proxy(window: &Window) {
     let Some(main) = window.get_webview("main") else {
         return;
@@ -2106,7 +2346,10 @@ fn clear_shared_page_proxy(window: &Window) {
     });
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(
+    not(target_os = "macos"),
+    all(target_os = "macos", feature = "runtime-cef")
+))]
 fn clear_shared_page_proxy(_window: &Window) {}
 
 /// Embed a real web page as a child webview positioned over the tab area.
@@ -2120,12 +2363,52 @@ async fn browser_create(
     app: AppHandle,
     state: State<'_, AppState>,
     tab_id: String,
-    url: String,
+    generation: u64,
+    slot_revision: u64,
+    bounds: Bounds,
+) -> Result<(), String> {
+    browser_create_with_state(app, &state, tab_id, generation, slot_revision, bounds).await
+}
+
+async fn browser_create_with_state(
+    app: AppHandle,
+    state: &AppState,
+    tab_id: String,
+    generation: u64,
+    slot_revision: u64,
     bounds: Bounds,
 ) -> Result<(), String> {
     use tauri::WebviewUrl;
 
-    eprintln!("[core] browser_create enter tab={tab_id} url={url}");
+    eprintln!("[core] browser_create enter tab={tab_id} generation={generation}");
+    let current = state
+        .browser_sessions
+        .snapshot(&tab_id)
+        .ok_or_else(|| format!("no browser session for {tab_id}"))?;
+    if current.generation != generation {
+        return Err(format!(
+            "stale browser generation {generation}; current is {}",
+            current.generation
+        ));
+    }
+    if current.phase != SessionPhase::Creating {
+        return if matches!(current.phase, SessionPhase::Ready | SessionPhase::Attached) {
+            Ok(())
+        } else {
+            Err(format!(
+                "browser session is not creatable in {:?}",
+                current.phase
+            ))
+        };
+    }
+    let spec = state
+        .browser_specs
+        .lock()
+        .unwrap()
+        .get(&tab_id)
+        .cloned()
+        .ok_or_else(|| format!("no browser specification for {tab_id}"))?;
+    let url = spec.initial_url.clone();
     // A restored tab must not fire its first request before the saved
     // session cookies are back in the store — that request would go out
     // logged-out and could overwrite the very cookie about to be restored.
@@ -2139,7 +2422,17 @@ async fn browser_create(
         .ok_or_else(|| "main window is gone".to_string())?;
     let label = webview_label(&tab_id);
     if window.get_webview(&label).is_some() {
-        eprintln!("[core] browser_create already exists");
+        let ready = state
+            .browser_sessions
+            .mark_ready(&tab_id, generation)
+            .map_err(|error| error.to_string())?;
+        let attached = state
+            .browser_sessions
+            .attach_surface(&tab_id, generation, slot_revision)
+            .map_err(|error| error.to_string())?;
+        browser_session_event(&app, &ready, serde_json::json!({ "type": "session-ready" }));
+        let _ = attached;
+        eprintln!("[core] browser_create already exists generation={generation}");
         return Ok(());
     }
     let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url: {e}"))?;
@@ -2305,6 +2598,11 @@ async fn browser_create(
                 cookies::request_snapshot();
                 peek::load_finished(&load_tab);
                 userscripts::on_page_finished(&load_app, &load_tab, &wv);
+                if url == "about:blank" {
+                    if let Some(probe) = load_app.state::<AppState>().runtime_performance.as_ref() {
+                        probe.page_ready(&load_app, &load_tab);
+                    }
+                }
             }
             let _ = wv.window();
             let _ = load_app.emit(
@@ -2320,6 +2618,14 @@ async fn browser_create(
                 },
             );
         });
+    let builder = if spec.private_mode {
+        builder.incognito(true)
+    } else {
+        let profile_root = app_data_dir(&app)?
+            .join("browser-profiles")
+            .join(&spec.profile_id);
+        builder.data_directory(profile_root)
+    };
     // A page asking for a new window gets a new browser TAB: Deny tells the
     // engine no native webview came to exist, and the app opens the URL
     // itself. This is the one route that sees both window.open and a plain
@@ -2337,10 +2643,19 @@ async fn browser_create(
     } else {
         builder
     };
-    let cover_on = config::load()
-        .map(|loaded| loaded.config.network.cover_page_traffic)
-        .unwrap_or(false);
-    let proxy = ensure_page_proxy(&app, &state, cover_on, is_coverable_platform());
+    let network_kind = spec
+        .network
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("system");
+    let cover_on = match network_kind {
+        "direct" => false,
+        "doh" | "proxy" => true,
+        _ => config::load()
+            .map(|loaded| loaded.config.network.cover_page_traffic)
+            .unwrap_or(false),
+    };
+    let proxy = ensure_page_proxy(&app, state, cover_on, is_coverable_platform());
     if proxy.is_none() {
         clear_shared_page_proxy(&window);
     }
@@ -2352,12 +2667,65 @@ async fn browser_create(
         ),
         None => builder,
     };
-    window
-        .add_child(builder, bounds.position(), bounds.size())
-        .map_err(|e| format!("add_child failed: {e}"))?;
+    #[cfg(feature = "runtime-cef")]
+    let builder = {
+        let auth_app = app.clone();
+        let certificate_app = app.clone();
+        let certificate_tab = tab_id.clone();
+        let permission_app = app.clone();
+        let media_app = app.clone();
+        let crashed_app = app.clone();
+        let crashed_tab = tab_id.clone();
+        let closed_app = app.clone();
+        let closed_tab = tab_id.clone();
+        builder
+            .browser_runtime_style(tauri_runtime_cef::RuntimeStyle::Alloy)
+            .on_authentication_request(move |request, responder| {
+                cef_handlers::authentication(auth_app.clone(), request, responder);
+            })
+            .on_certificate_error(move |request, responder| {
+                cef_handlers::certificate(
+                    certificate_app.clone(),
+                    certificate_tab.clone(),
+                    request,
+                    responder,
+                );
+            })
+            .on_permission_prompt(move |request, responder| {
+                cef_handlers::permission(permission_app.clone(), request, responder);
+            })
+            .on_media_access_request(move |request, responder| {
+                cef_handlers::media(media_app.clone(), request, responder);
+            })
+            .on_process_terminated(move |termination| {
+                if let Some(state) = crashed_app.try_state::<AppState>() {
+                    if let Ok(snapshot) = state
+                        .browser_sessions
+                        .renderer_crashed(&crashed_tab, generation)
+                    {
+                        browser_session_event(
+                            &crashed_app,
+                            &snapshot,
+                            serde_json::json!({
+                                "type": "renderer-crashed",
+                                "errorCode": termination.error_code,
+                            }),
+                        );
+                    }
+                }
+            })
+            .on_browser_closed(move || {
+                confirm_browser_closed(&closed_app, &closed_tab, generation);
+            })
+    };
+    if let Err(error) = window.add_child(builder, bounds.position(), bounds.size()) {
+        let _ = state.browser_sessions.abort_create(&tab_id, generation);
+        state.browser_specs.lock().unwrap().remove(&tab_id);
+        return Err(format!("add_child failed: {error}"));
+    }
 
     eprintln!("[core] browser_create added child webview {label}");
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "runtime-wry"))]
     if let Some(wv) = window.get_webview(&label) {
         let auth_app = app.clone();
         let nav_tab_id = tab_id.clone();
@@ -2397,6 +2765,15 @@ async fn browser_create(
         });
     }
     state.browsers.lock().unwrap().insert(tab_id.clone(), label);
+    let ready = state
+        .browser_sessions
+        .mark_ready(&tab_id, generation)
+        .map_err(|error| error.to_string())?;
+    let _attached = state
+        .browser_sessions
+        .attach_surface(&tab_id, generation, slot_revision)
+        .map_err(|error| error.to_string())?;
+    browser_session_event(&app, &ready, serde_json::json!({ "type": "session-ready" }));
     Ok(())
 }
 
@@ -2746,6 +3123,7 @@ async fn migrate_import_apply(
 }
 
 #[tauri::command]
+#[allow(clippy::needless_return)]
 fn browser_dialog_answer(
     app: AppHandle,
     dialog_id: u64,
@@ -2754,14 +3132,25 @@ fn browser_dialog_answer(
     remember: bool,
     kind: Option<String>,
 ) -> Result<(), String> {
+    #[cfg(feature = "runtime-cef")]
+    let _ = &text;
     if kind.as_deref() == Some("notifications") {
         return page_notify::answer(&app, dialog_id, ok, remember);
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(feature = "runtime-cef")]
+    if cef_handlers::answer_permission(&app, dialog_id, ok, remember)? {
+        return Ok(());
+    }
+    #[cfg(all(not(feature = "runtime-cef"), target_os = "macos"))]
     return dialogs::answer(app, dialog_id, ok, text, remember, kind);
-    #[cfg(target_os = "windows")]
+    #[cfg(all(not(feature = "runtime-cef"), target_os = "windows"))]
     return dialogs_win::answer(app, dialog_id, ok, text, remember, kind);
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(feature = "runtime-cef")]
+    return Err(format!("unknown CEF dialog: {dialog_id}"));
+    #[cfg(all(
+        not(feature = "runtime-cef"),
+        not(any(target_os = "macos", target_os = "windows"))
+    ))]
     {
         let _ = (app, dialog_id, ok, text, remember, kind);
         Err("not implemented on this platform".into())
@@ -2821,6 +3210,7 @@ fn browser_ask_unload(
 /// Platform-independent command over the macOS-only implementation, so the
 /// command table itself never varies by platform.
 #[tauri::command]
+#[allow(clippy::needless_return)]
 fn browser_auth_answer(
     app: AppHandle,
     challenge_id: u64,
@@ -2828,11 +3218,19 @@ fn browser_auth_answer(
     password: Option<String>,
     save: bool,
 ) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(feature = "runtime-cef")]
+    {
+        let _ = app;
+        return cef_handlers::answer_auth(challenge_id, username, password, save);
+    }
+    #[cfg(all(not(feature = "runtime-cef"), target_os = "macos"))]
     return basic_auth::answer(app, challenge_id, username, password, save);
-    #[cfg(target_os = "windows")]
+    #[cfg(all(not(feature = "runtime-cef"), target_os = "windows"))]
     return basic_auth_win::answer(app, challenge_id, username, password, save);
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(all(
+        not(feature = "runtime-cef"),
+        not(any(target_os = "macos", target_os = "windows"))
+    ))]
     {
         let _ = (app, challenge_id, username, password, save);
         Err("not implemented on this platform".into())
@@ -2844,9 +3242,15 @@ fn browser_set_bounds(
     app: AppHandle,
     state: State<'_, AppState>,
     tab_id: String,
+    generation: u64,
+    slot_revision: u64,
     bounds: Bounds,
     visible: bool,
 ) -> Result<(), String> {
+    state
+        .browser_sessions
+        .attach_surface(&tab_id, generation, slot_revision)
+        .map_err(|error| error.to_string())?;
     let label = state
         .browsers
         .lock()
@@ -2890,6 +3294,98 @@ fn browser_set_bounds(
     Ok(())
 }
 
+#[tauri::command]
+fn browser_session_command(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tab_id: String,
+    generation: u64,
+    command: serde_json::Value,
+) -> serde_json::Value {
+    let Some(kind) = command.get("type").and_then(serde_json::Value::as_str) else {
+        return serde_json::json!({ "ok": false, "code": "INVALID_INPUT" });
+    };
+    let recovering = kind == "reload"
+        && state
+            .browser_sessions
+            .snapshot(&tab_id)
+            .is_some_and(|snapshot| {
+                snapshot.generation == generation && snapshot.phase == SessionPhase::Crashed
+            });
+    let snapshot = match state.browser_sessions.accept_command(&tab_id, generation) {
+        Ok(snapshot) => snapshot,
+        Err(browser::session::SessionError::NotCommandable {
+            phase: SessionPhase::Crashed,
+        }) if kind == "reload" => match state.browser_sessions.mark_ready(&tab_id, generation) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return serde_json::json!({ "ok": false, "code": "SESSION_GONE" }),
+        },
+        Err(browser::session::SessionError::StaleGeneration { .. }) => {
+            return serde_json::json!({ "ok": false, "code": "STALE_GENERATION" });
+        }
+        Err(browser::session::SessionError::NotFound { .. }) => {
+            return serde_json::json!({ "ok": false, "code": "SESSION_GONE" });
+        }
+        Err(_) => return serde_json::json!({ "ok": false, "code": "SESSION_GONE" }),
+    };
+    let Some(window) = app.get_window("main") else {
+        return serde_json::json!({ "ok": false, "code": "SESSION_GONE" });
+    };
+    let Some(webview) = window.get_webview(&snapshot.label) else {
+        return serde_json::json!({ "ok": false, "code": "SESSION_GONE" });
+    };
+    let result = match kind {
+        "navigate" => browser_navigation_action(
+            &app,
+            &webview,
+            &tab_id,
+            "go",
+            command.get("url").and_then(serde_json::Value::as_str),
+        ),
+        "reload" => browser_navigation_action(&app, &webview, &tab_id, "reload", None),
+        "stop" => webview
+            .eval("window.stop()")
+            .map_err(|error| error.to_string()),
+        "back" => browser_navigation_action(&app, &webview, &tab_id, "back", None),
+        "forward" => browser_navigation_action(&app, &webview, &tab_id, "forward", None),
+        "set-zoom" => command
+            .get("level")
+            .and_then(serde_json::Value::as_f64)
+            .filter(|level| level.is_finite() && *level > 0.0 && *level <= 5.0)
+            .ok_or_else(|| "invalid zoom level".to_string())
+            .and_then(|level| webview.set_zoom(level).map_err(|error| error.to_string())),
+        "find" => {
+            let query = command
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .filter(|query| !query.is_empty());
+            match query {
+                Some(query) => {
+                    let backwards = command.get("direction").and_then(serde_json::Value::as_str)
+                        == Some("previous");
+                    browser_find(app.clone(), state, tab_id, query.to_string(), backwards)
+                }
+                None => Err("empty find query".into()),
+            }
+        }
+        "answer-prompt" => Err("prompt answers use their dedicated capability".into()),
+        _ => return serde_json::json!({ "ok": false, "code": "UNSUPPORTED" }),
+    };
+    match result {
+        Ok(()) => {
+            if recovering {
+                browser_session_event(
+                    &app,
+                    &snapshot,
+                    serde_json::json!({ "type": "session-ready" }),
+                );
+            }
+            serde_json::json!({ "ok": true })
+        }
+        Err(_) => serde_json::json!({ "ok": false, "code": "INVALID_INPUT" }),
+    }
+}
+
 /// Which child webview belongs to a tab. Shared with the navigation
 /// watchdog, which has to ask the same question to try again.
 pub fn browser_label(app: &AppHandle, tab_id: &str) -> Option<String> {
@@ -2899,6 +3395,44 @@ pub fn browser_label(app: &AppHandle, tab_id: &str) -> Option<String> {
         .ok()?
         .get(tab_id)
         .cloned()
+}
+
+fn browser_navigation_action(
+    app: &AppHandle,
+    webview: &tauri::Webview<AppRuntime>,
+    tab_id: &str,
+    action: &str,
+    url: Option<&str>,
+) -> Result<(), String> {
+    peek::command_stamp(tab_id);
+    match action {
+        "go" => {
+            let url = url.ok_or_else(|| "no url".to_string())?;
+            let parsed: tauri::Url = url.parse().map_err(|error| format!("bad url: {error}"))?;
+            #[cfg(target_os = "macos")]
+            nav_failures::remember_request(tab_id, url);
+            eprintln!("[core] browser_navigate go tab={tab_id} url={url}");
+            let outcome = webview.navigate(parsed);
+            eprintln!(
+                "[core] browser_navigate returned ok={} tab={tab_id}",
+                outcome.is_ok()
+            );
+            if outcome.is_ok() {
+                nav_watchdog::watch(app, tab_id, url);
+            }
+            outcome.map_err(|error| error.to_string())
+        }
+        "back" => webview
+            .eval("history.back()")
+            .map_err(|error| error.to_string()),
+        "forward" => webview
+            .eval("history.forward()")
+            .map_err(|error| error.to_string()),
+        "reload" => webview
+            .eval("location.reload()")
+            .map_err(|error| error.to_string()),
+        other => Err(format!("unknown action {other}")),
+    }
 }
 
 #[tauri::command]
@@ -2922,29 +3456,7 @@ fn browser_navigate(
     let wv = window
         .get_webview(&label)
         .ok_or_else(|| "webview is gone".to_string())?;
-    peek::command_stamp(&tab_id);
-    match action.as_str() {
-        "go" => {
-            let u = url.ok_or_else(|| "no url".to_string())?;
-            let parsed: tauri::Url = u.parse().map_err(|e| format!("bad url: {e}"))?;
-            #[cfg(target_os = "macos")]
-            nav_failures::remember_request(&tab_id, &u);
-            eprintln!("[core] browser_navigate go tab={tab_id} label={label} url={u}");
-            let outcome = wv.navigate(parsed);
-            eprintln!(
-                "[core] browser_navigate returned ok={} tab={tab_id}",
-                outcome.is_ok()
-            );
-            if outcome.is_ok() {
-                nav_watchdog::watch(&app, &tab_id, &u);
-            }
-            outcome.map_err(|e| e.to_string())
-        }
-        "back" => wv.eval("history.back()").map_err(|e| e.to_string()),
-        "forward" => wv.eval("history.forward()").map_err(|e| e.to_string()),
-        "reload" => wv.eval("location.reload()").map_err(|e| e.to_string()),
-        other => Err(format!("unknown action {other}")),
-    }
+    browser_navigation_action(&app, &wv, &tab_id, &action, url.as_deref())
 }
 
 /// Read the child webview's current title and url back into the app.
@@ -3039,7 +3551,7 @@ fn browser_print(app: AppHandle, state: State<'_, AppState>, tab_id: String) -> 
         .get_webview(&label)
         .ok_or_else(|| "webview is gone".to_string())?;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", feature = "runtime-wry"))]
     {
         wv.with_webview(|pw| unsafe {
             use objc2::msg_send;
@@ -3089,6 +3601,10 @@ fn browser_print(app: AppHandle, state: State<'_, AppState>, tab_id: String) -> 
         })
         .map_err(|e| e.to_string())?;
         return Ok(());
+    }
+    #[cfg(all(target_os = "macos", feature = "runtime-cef"))]
+    {
+        return wv.print().map_err(|e| e.to_string());
     }
     #[cfg(target_os = "windows")]
     {
@@ -3381,9 +3897,75 @@ fn ui_focus(app: AppHandle) -> Result<(), String> {
     wv.set_focus().map_err(|e| e.to_string())
 }
 
+fn confirm_browser_closed(app: &AppHandle, tab_id: &str, generation: u64) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let Ok(snapshot) = state.browser_sessions.confirm_closed(tab_id, generation) else {
+        return;
+    };
+    state.browsers.lock().unwrap().remove(tab_id);
+    state.browser_specs.lock().unwrap().remove(tab_id);
+    browser_session_event(
+        app,
+        &snapshot,
+        serde_json::json!({
+            "type": "session-closed",
+            "reason": snapshot
+                .close_reason
+                .unwrap_or(BrowserCloseReason::TabClose)
+                .as_str(),
+        }),
+    );
+    if let Some(waiters) = state
+        .browser_close_waiters
+        .lock()
+        .unwrap()
+        .remove(&(tab_id.to_owned(), generation))
+    {
+        for waiter in waiters {
+            let _ = waiter.send(());
+        }
+    };
+}
+
 #[tauri::command]
-fn browser_close(app: AppHandle, state: State<'_, AppState>, tab_id: String) -> Result<(), String> {
-    let label = state.browsers.lock().unwrap().remove(&tab_id);
+async fn browser_close(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    tab_id: String,
+    generation: u64,
+    reason: String,
+) -> Result<(), String> {
+    let reason = match reason.as_str() {
+        "tab-close" => BrowserCloseReason::TabClose,
+        "plugin-disable" => BrowserCloseReason::PluginDisable,
+        "app-exit" => BrowserCloseReason::AppExit,
+        _ => return Err(format!("unknown browser close reason: {reason}")),
+    };
+    browser_close_with_state(app, &state, tab_id, generation, reason).await
+}
+
+async fn browser_close_with_state(
+    app: AppHandle,
+    state: &AppState,
+    tab_id: String,
+    generation: u64,
+    reason: BrowserCloseReason,
+) -> Result<(), String> {
+    let closing = state
+        .browser_sessions
+        .begin_close(&tab_id, generation, reason)
+        .map_err(|error| error.to_string())?;
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+    state
+        .browser_close_waiters
+        .lock()
+        .unwrap()
+        .entry((tab_id.clone(), generation))
+        .or_default()
+        .push(closed_tx);
+    let label = Some(closing.label);
     #[cfg(target_os = "macos")]
     nav_failures::forget_tab(&tab_id);
     peek::forget_tab(&tab_id);
@@ -3392,10 +3974,29 @@ fn browser_close(app: AppHandle, state: State<'_, AppState>, tab_id: String) -> 
     page_notify::forget_tab(&tab_id);
     if let (Some(label), Some(window)) = (label, app.get_window("main")) {
         if let Some(wv) = window.get_webview(&label) {
-            let _ = wv.close();
+            if let Err(error) = wv.close() {
+                state
+                    .browser_close_waiters
+                    .lock()
+                    .unwrap()
+                    .remove(&(tab_id.clone(), generation));
+                return Err(error.to_string());
+            }
+            #[cfg(feature = "runtime-wry")]
+            confirm_browser_closed(&app, &tab_id, generation);
+        } else {
+            confirm_browser_closed(&app, &tab_id, generation);
         }
+    } else {
+        confirm_browser_closed(&app, &tab_id, generation);
     }
-    Ok(())
+    tauri::async_runtime::spawn_blocking(move || {
+        closed_rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .map_err(|_| "browser close confirmation timed out".to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -3578,7 +4179,7 @@ fn cmd_item(
     bindings: &keys::Bindings,
     id: &str,
     label: &str,
-) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
+) -> tauri::Result<tauri::menu::MenuItem<AppRuntime>> {
     let accel = bindings.accelerator(id);
     if accel.is_empty() {
         return tauri::menu::MenuItemBuilder::with_id(id, label).build(handle);
@@ -3913,6 +4514,87 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
+async fn create_runtime_performance_tab(app: &AppHandle, index: usize) -> Result<(), String> {
+    let tab_id = format!("runtime-performance-{index}");
+    let generation = {
+        let state = app.state::<AppState>();
+        let label = webview_label(&tab_id);
+        let ensured = state
+            .browser_sessions
+            .ensure_session(&tab_id, &label)
+            .map_err(|error| error.to_string())?;
+        let generation = ensured.snapshot().generation;
+        state.browser_specs.lock().unwrap().insert(
+            tab_id.clone(),
+            NativeBrowserSpec {
+                profile_id: "default".into(),
+                initial_url: "about:blank".into(),
+                private_mode: false,
+                network: serde_json::json!({ "kind": "direct" }),
+            },
+        );
+        generation
+    };
+    println!(
+        "TABVERSE_RUNTIME_PERFORMANCE_CREATE index={index} elapsed_ms={}",
+        app.state::<AppState>()
+            .runtime_performance
+            .as_ref()
+            .expect("runtime performance state")
+            .started
+            .elapsed()
+            .as_millis()
+    );
+    let state_handle = app.clone();
+    let state = state_handle.state::<AppState>();
+    browser_create_with_state(
+        app.clone(),
+        &state,
+        tab_id,
+        generation,
+        1,
+        Bounds {
+            x: 0.0,
+            y: 0.0,
+            width: 1024.0,
+            height: 768.0,
+        },
+    )
+    .await
+}
+
+async fn run_runtime_performance_probe(app: AppHandle, probe: Arc<RuntimePerformanceProbe>) {
+    let initial_tabs = if probe.expected == 2 {
+        1
+    } else {
+        probe.expected
+    };
+    for index in 1..=initial_tabs {
+        if let Err(error) = create_runtime_performance_tab(&app, index).await {
+            eprintln!("TABVERSE_RUNTIME_PERFORMANCE_ERROR index={index} error={error}");
+            app.exit(2);
+            return;
+        }
+    }
+    if probe.expected != 2 {
+        return;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while probe.ready_count() < 1 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    if probe.ready_count() != 1 {
+        eprintln!("TABVERSE_RUNTIME_PERFORMANCE_ERROR first tab did not become ready");
+        app.exit(2);
+        return;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(probe.between_tabs_ms)).await;
+    if let Err(error) = create_runtime_performance_tab(&app, 2).await {
+        eprintln!("TABVERSE_RUNTIME_PERFORMANCE_ERROR index=2 error={error}");
+        app.exit(2);
+    }
+}
+
 pub fn run() {
     // The resident helper is the same signed executable in a windowless mode.
     // It answers before Tauri, plugins, HTTP clients, or webviews exist.
@@ -3923,7 +4605,29 @@ pub fn run() {
         std::process::exit(code);
     }
     http::ensure_crypto_provider();
-    tauri::Builder::default()
+    let process_started = std::time::Instant::now();
+    let runtime_performance = RuntimePerformanceProbe::from_env(process_started);
+    let runtime_performance_enabled = runtime_performance.is_some();
+    let builder = tauri::Builder::<AppRuntime>::new();
+    #[cfg(feature = "runtime-cef")]
+    let builder = if let Some(directory) = std::env::var_os("TABVERSE_ACCEPTANCE_ROOT_CACHE") {
+        builder.root_cache_path(directory)
+    } else {
+        builder
+    };
+    #[cfg(feature = "runtime-cef")]
+    let builder = if runtime_performance_enabled {
+        // A clean CI runner has no CEF safe-storage item and cannot answer an
+        // interactive Keychain prompt. Chromium's test switch keeps this
+        // hidden, disposable profile deterministic without changing normal
+        // product launches.
+        builder.command_line_args([("--use-mock-keychain", None::<&str>)])
+    } else {
+        builder
+    };
+    #[cfg(not(feature = "runtime-cef"))]
+    let _ = runtime_performance_enabled;
+    builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
@@ -4009,9 +4713,13 @@ pub fn run() {
             joins: Mutex::new(HashMap::new()),
             fs: Arc::new(FsBackend::new()),
             browsers: Mutex::new(HashMap::new()),
+            browser_sessions: Arc::new(BrowserSessionManager::new()),
+            browser_specs: Mutex::new(HashMap::new()),
+            browser_close_waiters: Mutex::new(HashMap::new()),
             downloads: Mutex::new(HashSet::new()),
             watches: fs_watch::WatchState::new(),
             page_proxy: Mutex::new(PageProxySlot::default()),
+            runtime_performance,
             app_source: app_share::AppShareSource::new(
                 // dispatch_action: the webview applies it and broadcasts
                 // back (see the module doc for why Rust holds no reducer).
@@ -4046,8 +4754,9 @@ pub fn run() {
                 // repeatedly stealing the user's desktop. The ordinary app
                 // never sets this test-only environment switch.
                 #[cfg(target_os = "macos")]
-                let hidden_acceptance =
-                    std::env::var_os("TABVERSE_HIDDEN_WINDOW_ACCEPTANCE").is_some();
+                let hidden_acceptance = std::env::var_os("TABVERSE_HIDDEN_WINDOW_ACCEPTANCE")
+                    .is_some()
+                    || std::env::var_os("TABVERSE_RUNTIME_PERFORMANCE_ACCEPTANCE").is_some();
                 #[cfg(target_os = "macos")]
                 if hidden_acceptance {
                     app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
@@ -4129,6 +4838,25 @@ pub fn run() {
                 }
             }
             cookies::init(app.handle());
+            if let Some(probe) = app
+                .state::<AppState>()
+                .runtime_performance
+                .as_ref()
+                .cloned()
+            {
+                println!(
+                    "TABVERSE_RUNTIME_PERFORMANCE_SETUP runtime={} tabs={} elapsed_ms={}",
+                    if cfg!(feature = "runtime-cef") {
+                        "cef"
+                    } else {
+                        "wry"
+                    },
+                    probe.expected,
+                    probe.started.elapsed().as_millis()
+                );
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(run_runtime_performance_probe(handle, probe));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -4206,6 +4934,8 @@ pub fn run() {
             set_theme,
             theme_pref_save,
             theme_pref_load,
+            browser_session_ensure,
+            browser_session_command,
             browser_create,
             browser_find,
             browser_clear_find,
@@ -4282,6 +5012,35 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|app, event| {
+            if app
+                .try_state::<AppState>()
+                .map(|state| state.runtime_performance.is_some())
+                .unwrap_or(false)
+            {
+                match event {
+                    tauri::RunEvent::ExitRequested { .. } => println!(
+                        "TABVERSE_RUNTIME_PERFORMANCE_EXIT_REQUESTED elapsed_ms={}",
+                        app.state::<AppState>()
+                            .runtime_performance
+                            .as_ref()
+                            .expect("runtime performance state")
+                            .started
+                            .elapsed()
+                            .as_millis()
+                    ),
+                    tauri::RunEvent::Exit => println!(
+                        "TABVERSE_RUNTIME_PERFORMANCE_EXIT elapsed_ms={}",
+                        app.state::<AppState>()
+                            .runtime_performance
+                            .as_ref()
+                            .expect("runtime performance state")
+                            .started
+                            .elapsed()
+                            .as_millis()
+                    ),
+                    _ => {}
+                }
+            }
             // ⌘Q is how people actually quit a Mac app, and it exits the
             // process without ever asking the window to close — so the UI's
             // "flush pending state, then close" handler never ran and the
@@ -4302,17 +5061,33 @@ pub fn run() {
                 // (including the teardown that follows our own close), so
                 // only a user-initiated quit is redirected — otherwise this
                 // would loop forever and the app could never exit.
-                if code.is_none() {
+                let runtime_performance = app
+                    .try_state::<AppState>()
+                    .map(|state| state.runtime_performance.is_some())
+                    .unwrap_or(false);
+                if code.is_none() && !runtime_performance {
                     api.prevent_exit();
+                    if let Some(state) = app.try_state::<AppState>() {
+                        let closing = state.browser_sessions.request_exit();
+                        eprintln!(
+                            "[browser-session] app exit requested; closing={} live={}",
+                            closing.len(),
+                            state.browser_sessions.live_count()
+                        );
+                    }
                     // Best-effort last snapshot while the webviews still
                     // exist; the close below gives the worker a moment (the
                     // UI's flush window) but does not wait for it. Anything
                     // missed was already covered by the per-page-load
                     // snapshots, except a login in the final seconds.
                     cookies::request_snapshot();
-                    if let Some(w) = app.get_webview_window("main") {
-                        let _ = w.close();
-                    }
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = tauri::async_runtime::spawn_blocking(cookies::shutdown).await;
+                        if let Some(window) = handle.get_webview_window("main") {
+                            let _ = window.close();
+                        }
+                    });
                 }
             }
         });
@@ -4791,6 +5566,31 @@ mod theme_preference_read {
             let dir = dir_with(tag, contents);
             assert_eq!(theme_preference_in(&dir), "system", "for {contents:?}");
             let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+#[cfg(test)]
+mod browser_session_input_tests {
+    use super::{valid_profile_id, validate_network_mode};
+
+    #[test]
+    fn profile_ids_cannot_escape_the_app_owned_directory() {
+        for valid in ["default", "work-1", "private.profile", "team_a"] {
+            assert!(valid_profile_id(valid), "{valid:?} should be valid");
+        }
+        for invalid in ["", ".", "..", "../outside", "a/b", "a\\b", "space here"] {
+            assert!(!valid_profile_id(invalid), "{invalid:?} escaped validation");
+        }
+    }
+
+    #[test]
+    fn network_modes_are_an_explicit_closed_set() {
+        for kind in ["system", "direct", "doh", "proxy"] {
+            assert!(validate_network_mode(&serde_json::json!({ "kind": kind })).is_ok());
+        }
+        for value in [serde_json::json!({}), serde_json::json!({ "kind": "open" })] {
+            assert!(validate_network_mode(&value).is_err());
         }
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "tabverse"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 description = "Tabverse: a cross-platform terminal that can replace most of your desktop."
 license.workspace = true
@@ -11,6 +11,11 @@ repository.workspace = true
 name = "tabverse_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = ["runtime-wry"]
+runtime-wry = ["tauri/wry"]
+runtime-cef = ["tauri/cef", "dep:tauri-runtime-cef"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 # build.rs reads tauri.conf.json to bake the claimed file types into the
@@ -18,7 +23,16 @@ tauri-build = { version = "2", features = [] }
 serde_json = { workspace = true }
 
 [dependencies]
-tauri = { version = "2", features = ["unstable", "macos-proxy"] }
+tauri = { version = "2.11.5", default-features = false, features = [
+  "common-controls-v6",
+  "compression",
+  "dbus",
+  "dynamic-acl",
+  "macos-proxy",
+  "unstable",
+  "x11",
+] }
+tauri-runtime-cef = { git = "https://github.com/spalagu/tauri.git", rev = "a639cadd9df0949ae20cbf8b29da66fc0cbf8d14", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
@@ -99,4 +113,4 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "rin
 # The app-share action seam test needs an AppHandle without a GUI: the
 # mock runtime runs the real event system in-process. Same crate, one
 # more feature, tests only — the shipped binary never sees it.
-tauri = { version = "2", features = ["test"] }
+tauri = { version = "2.11.5", default-features = false, features = ["test"] }

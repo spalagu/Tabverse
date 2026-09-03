@@ -12,13 +12,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::AppHandle;
 use serde::{Deserialize, Serialize};
 use tabverse_term::{
     client::{HelperClient, HelperEventCallback},
     helper::HelperServer,
     protocol::AuthToken,
 };
-use tauri::AppHandle;
 use zeroize::Zeroizing;
 
 const ENDPOINT_FILE: &str = "terminal-helper.json";

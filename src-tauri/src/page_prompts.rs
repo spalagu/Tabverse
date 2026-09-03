@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tauri::AppHandle;
+use crate::AppHandle;
 #[cfg(target_os = "windows")]
 use tauri::Emitter;
 

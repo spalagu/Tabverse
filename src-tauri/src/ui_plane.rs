@@ -29,11 +29,14 @@
 
 use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
+#[cfg(feature = "runtime-wry")]
 use objc2_foundation::NSString;
 
 /// `NSWindowOrderingMode` values; the enum itself lives behind an
 /// objc2-app-kit header feature this crate does not compile.
+#[cfg(feature = "runtime-wry")]
 const NS_WINDOW_ABOVE: isize = 1;
+#[cfg(feature = "runtime-wry")]
 const NS_WINDOW_BELOW: isize = -1;
 
 /// Put a webview above every sibling, or back below them.
@@ -47,7 +50,8 @@ const NS_WINDOW_BELOW: isize = -1;
 /// question being asked — the app's interface either owns the top of the
 /// window or it does not; there is never a reason to interleave it between
 /// pages.
-pub fn set_plane_on_top(webview: &tauri::Webview, on_top: bool) -> Result<(), String> {
+#[cfg(feature = "runtime-wry")]
+pub fn set_plane_on_top(webview: &crate::Webview, on_top: bool) -> Result<(), String> {
     let place = if on_top {
         NS_WINDOW_ABOVE
     } else {
@@ -77,6 +81,13 @@ pub fn set_plane_on_top(webview: &tauri::Webview, on_top: bool) -> Result<(), St
         .map_err(|e| e.to_string())
 }
 
+#[cfg(feature = "runtime-cef")]
+pub fn set_plane_on_top(_webview: &crate::Webview, _on_top: bool) -> Result<(), String> {
+    // The CEF runtime owns child-view stacking and pins the application view.
+    // There is no WKWebView sibling tree to reorder.
+    Ok(())
+}
+
 /// Paint the window itself in the app's own background colour.
 ///
 /// Once the app's webview stops drawing a background, whatever this document
@@ -84,7 +95,7 @@ pub fn set_plane_on_top(webview: &tauri::Webview, on_top: bool) -> Result<(), St
 /// would flash white exactly where a page is not yet placed. Setting it to the
 /// app's own background makes "no page here yet" look like the app, not like a
 /// hole.
-pub fn set_window_backdrop(window: &tauri::Window, r: f64, g: f64, b: f64) -> Result<(), String> {
+pub fn set_window_backdrop(window: &crate::Window, r: f64, g: f64, b: f64) -> Result<(), String> {
     let win = window.clone();
     window
         .run_on_main_thread(move || unsafe {
@@ -110,7 +121,8 @@ pub fn set_window_backdrop(window: &tauri::Window, r: f64, g: f64, b: f64) -> Re
 ///
 /// The first responder is usually an inner content view rather than the
 /// WKWebView itself, so the answer walks up the view chain.
-pub fn holds_keyboard(webview: &tauri::Webview) -> Result<bool, String> {
+#[cfg(feature = "runtime-wry")]
+pub fn holds_keyboard(webview: &crate::Webview) -> Result<bool, String> {
     let (tx, rx) = std::sync::mpsc::channel::<bool>();
     webview
         .with_webview(move |pw| unsafe {
@@ -143,14 +155,21 @@ pub fn holds_keyboard(webview: &tauri::Webview) -> Result<bool, String> {
         .map_err(|e| e.to_string())
 }
 
+#[cfg(feature = "runtime-cef")]
+pub fn holds_keyboard(_webview: &crate::Webview) -> Result<bool, String> {
+    // Conservatively reclaim focus when a CEF child is parked off-screen.
+    Ok(true)
+}
+
 /// Stop the app's webview from painting its own background, so whatever the
 /// DOM leaves transparent shows the page sitting behind it.
 ///
 /// `drawsBackground` is a private KVC key on WKWebView. It is the same key
 /// wry sets for its `transparent` feature, so this is the path this stack
 /// already depends on rather than a new bet.
+#[cfg(feature = "runtime-wry")]
 pub fn set_app_plane_transparent(
-    webview: &tauri::Webview,
+    webview: &crate::Webview,
     transparent: bool,
 ) -> Result<(), String> {
     webview
@@ -161,5 +180,16 @@ pub fn set_app_plane_transparent(
             let _: () = msg_send![view, setValue: value, forKey: &*key];
             eprintln!("[ui-plane] app plane transparent={transparent}");
         })
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "runtime-cef")]
+pub fn set_app_plane_transparent(
+    webview: &crate::Webview,
+    transparent: bool,
+) -> Result<(), String> {
+    let color = (!transparent).then_some(tauri::webview::Color(255, 255, 255, 255));
+    webview
+        .set_background_color(color)
         .map_err(|e| e.to_string())
 }

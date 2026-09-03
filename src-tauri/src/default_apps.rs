@@ -44,8 +44,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::AppHandle;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{Manager, Runtime};
 
 // The claimed file types, baked in from tauri.conf.json at build time.
 //

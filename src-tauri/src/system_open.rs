@@ -16,8 +16,9 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use crate::AppHandle;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, Runtime, Url};
+use tauri::{Emitter, Manager, Runtime, Url};
 
 use crate::default_apps::{self, Kind};
 

@@ -1,7 +1,7 @@
 {
   "name": "tabverse",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.0.3",
   "license": "Apache-2.0",
   "description": "A cross-platform workspace for terminals, files, the web, and shareable sessions.",
   "homepage": "https://github.com/spalagu/Tabverse#readme",
@@ -29,11 +29,12 @@
     "test:browser": "playwright test",
     "check:workbench": "npm run -w @tabverse/workbench check && node tools/check-workbench-boundary.mjs",
     "check:architecture": "node tools/architecture/check-plugin-boundaries.mjs",
+    "check:runtime-contract": "node tools/check-runtime-contract.mjs",
     "check:agent-retirement": "node tools/check-agent-retirement.mjs",
     "check:secrets": "node tools/check-secrets.mjs",
     "check:security-mutations": "node tools/security-mutation-check.mjs",
     "evidence:security": "node tools/run-local-security-evidence.mjs",
-    "check:quality": "npm run check:workbench && npm run check:architecture && npm run build && npm test && npm run check:agent-retirement && npm run check:secrets -- --require-artifact dist && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
+    "check:quality": "npm run check:workbench && npm run check:architecture && npm run check:runtime-contract && npm run build && npm test && npm run check:agent-retirement && npm run check:secrets -- --require-artifact dist && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

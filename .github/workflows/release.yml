@@ -32,9 +32,60 @@ jobs:
           key: release-verify
       - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run check:security-mutations
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories licenses sources
       - run: npm run check:quality
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:browser
+
+  sbom:
+    needs: verify
+    name: Dual-runtime SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.23.2
+          cache: npm
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: . -> target
+          key: release-sbom-cargo-cyclonedx-0.5.9
+      - run: npm ci
+      - name: Generate source and runtime-specific CycloneDX SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          test "v${version}" = "$GITHUB_REF_NAME"
+          npm sbom --sbom-format cyclonedx --omit=dev > "Tabverse_${version}_source-npm.cdx.json"
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx \
+            --manifest-path src-tauri/Cargo.toml \
+            --format json \
+            --all \
+            --no-default-features \
+            --features runtime-wry \
+            --target aarch64-apple-darwin \
+            --override-filename "Tabverse_${version}_aarch64-wry.cdx"
+          cargo cyclonedx \
+            --manifest-path src-tauri/Cargo.toml \
+            --format json \
+            --all \
+            --no-default-features \
+            --features runtime-cef \
+            --target aarch64-apple-darwin \
+            --override-filename "Tabverse_${version}_aarch64-cef.cdx"
+          mv "src-tauri/Tabverse_${version}_aarch64-wry.cdx.json" .
+          mv "src-tauri/Tabverse_${version}_aarch64-cef.cdx.json" .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-sbom
+          path: Tabverse_*.cdx.json
+          if-no-files-found: error
 
   build:
     needs: [verify, resident-service]
@@ -130,11 +181,178 @@ jobs:
           path: ${{ steps.asset.outputs.asset }}
           if-no-files-found: error
 
+  build-cef:
+    needs: [verify, resident-service]
+    name: macOS ARM64 CEF installer
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.23.2
+          cache: npm
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: . -> target
+          key: release-macos-26-aarch64-apple-darwin-cef
+      - run: npm ci
+      - name: Verify CEF release feature
+        run: |
+          cargo clippy --workspace --all-targets --no-default-features --features runtime-cef -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features runtime-cef remote_proxy::tests
+      - name: Install the pinned CEF-aware Tauri CLI
+        run: >-
+          cargo install tauri-cli
+          --git https://github.com/spalagu/tauri.git
+          --rev a639cadd9df0949ae20cbf8b29da66fc0cbf8d14
+          --locked
+      - name: Prepare the pinned CEF distribution and license resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          cef_path="$(find target -path '*/build/cef-dll-sys-*/out/cef_macos_aarch64' -type d -print -quit)"
+          test -n "$cef_path"
+          node tools/prepare-cef-release.mjs \
+            --distribution "$cef_path" \
+            --output target/cef-release-config.json
+          echo "CEF_PATH=$PWD/target/cef-release-cache" >> "$GITHUB_ENV"
+      - name: Build signed Resident artifacts
+        run: npm run build:resident-artifacts
+        env:
+          TABVERSE_BUILD_TARGET: aarch64-apple-darwin
+          TABVERSE_RESIDENT_SIGNING_KEY_HEX: ${{ secrets.TABVERSE_RESIDENT_SIGNING_KEY_HEX }}
+      - name: Build CEF installer without signing key in the process environment
+        run: |
+          set -euo pipefail
+          node -e "if (process.env.TABVERSE_RESIDENT_SIGNING_KEY_HEX) throw new Error('Resident signing key leaked past the signing step')"
+          cargo tauri build \
+            --config target/cef-release-config.json \
+            --features runtime-cef \
+            --target aarch64-apple-darwin \
+            --bundles dmg \
+            -- --no-default-features
+        env:
+          TABVERSE_RESIDENT_SIGNING_KEY_HEX: ""
+      - name: Name CEF release asset
+        id: asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          test "v${version}" = "$GITHUB_REF_NAME"
+          source="$(find . -path '*/aarch64-apple-darwin/release/bundle/dmg/*.dmg' -type f -print -quit)"
+          test -n "$source"
+          asset="Tabverse_${version}_aarch64-cef.dmg"
+          cp "$source" "$asset"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+      - name: Verify CEF architecture, runtime payload, and license material
+        run: node tools/verify-macos-release.mjs "${{ steps.asset.outputs.asset }}" cef arm64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-aarch64-apple-darwin-cef
+          path: ${{ steps.asset.outputs.asset }}
+          if-no-files-found: error
+
+  macos-arm64-gate:
+    needs: [build, build-cef]
+    name: macOS ARM64 offline install and rollback gate
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.23.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-aarch64-apple-darwin
+          path: candidate-wry
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-aarch64-apple-darwin-cef
+          path: candidate-cef
+      - name: Download the previous default Wry release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          baseline_tag="$(gh release list \
+            --repo "$GITHUB_REPOSITORY" \
+            --exclude-drafts \
+            --exclude-pre-releases \
+            --limit 100 \
+            --json tagName \
+            --jq '.[].tagName' \
+            | awk -v current="$GITHUB_REF_NAME" '$0 != current { print; exit }')"
+          test -n "$baseline_tag"
+          gh release download "$baseline_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Tabverse_*_aarch64.dmg' \
+            --dir baseline
+          echo "baseline_tag=$baseline_tag" >> "$GITHUB_ENV"
+      - name: Verify offline Wry to CEF to Wry replacement
+        run: |
+          set -euo pipefail
+          baseline="$(find baseline -name 'Tabverse_*_aarch64.dmg' -type f -print -quit)"
+          wry="$(find candidate-wry -name 'Tabverse_*_aarch64.dmg' -type f -print -quit)"
+          cef="$(find candidate-cef -name 'Tabverse_*_aarch64-cef.dmg' -type f -print -quit)"
+          test -n "$baseline" && test -n "$wry" && test -n "$cef"
+          node tools/verify-runtime-rollback.mjs \
+            --baseline-wry "$baseline" \
+            --candidate-wry "$wry" \
+            --candidate-cef "$cef" \
+            --state-fixture tools/fixtures/runtime-rollback/session.json \
+            --baseline-tag "$baseline_tag" \
+            --max-cef-delta-mib 325 \
+            --output runtime-rollback.json
+      - name: Verify the CEF release candidate performance budget without a visible window
+        shell: bash
+        run: |
+          set -euo pipefail
+          cef="$(find candidate-cef -name 'Tabverse_*_aarch64-cef.dmg' -type f -print -quit)"
+          test -n "$cef"
+          mount_point="$(mktemp -d "${RUNNER_TEMP}/tabverse-cef-performance.XXXXXX")"
+          device="$(hdiutil attach "$cef" -nobrowse -readonly -mountpoint "$mount_point" | awk '/^\/dev\// { print $1; exit }')"
+          cleanup() {
+            if [[ -n "$device" ]]; then hdiutil detach "$device" -force >/dev/null 2>&1 || true; fi
+            rmdir "$mount_point" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          app="$(find "$mount_point" -maxdepth 2 -name 'Tabverse.app' -type d -print -quit)"
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+          binary="$app/Contents/MacOS/$executable"
+          test -x "$binary"
+          mkdir -p rc-performance/raw
+          printf 'runtime\ttabs\tsample\texit_code\tforced\tsetup_ms\tfirst_create_ms\tfirst_ready_ms\tsecond_create_ms\tsecond_ready_ms\tall_ready_ms\trequest_exit_ms\texit_ms\twall_ms\tsecond_rss_delta_kb\tpeak_rss_kb\tidle_cpu_percent\n' > rc-performance/samples.tsv
+          for tabs in 1 2 20; do
+            idle_ms=1500
+            if [[ "$tabs" == 20 ]]; then idle_ms=30000; fi
+            for sample in $(seq -w 1 10); do
+              bash tools/run-rc-performance-sample.sh \
+                "$binary" "$tabs" "$sample" "$idle_ms" rc-performance/raw \
+                >> rc-performance/samples.tsv
+            done
+          done
+          node tools/check-rc-performance.mjs \
+            --input rc-performance/samples.tsv \
+            --output rc-performance/result.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: acceptance-macos-arm64-runtime-rollback
+          path: |
+            runtime-rollback.json
+            rc-performance/
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, build-cef, sbom, macos-arm64-gate]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -142,9 +360,21 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: release-assets
-      - name: Write release checksums
+      - name: Write release manifest and checksums
         working-directory: release-assets
-        run: sha256sum * > SHA256SUMS
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('../package.json').version")"
+          node ../tools/release-manifest.mjs \
+            --directory . \
+            --version "$version" \
+            --tag "$GITHUB_REF_NAME" \
+            --commit "$GITHUB_SHA" \
+            --output RELEASE-MANIFEST.json
+          sha256sum * > SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-assets/*
       - name: Write release notes
         shell: bash
         run: |
