@@ -214,6 +214,8 @@ const checks = [
       release.includes("tools/check-rc-performance.mjs") &&
       rcPerformanceRunner.includes("TABVERSE_RUNTIME_PERFORMANCE_ACCEPTANCE=1") &&
       rcPerformanceRunner.includes("TABVERSE_CEF_POC_TRACE_SHUTDOWN=1") &&
+      rcPerformanceRunner.includes("index($0, marker)") &&
+      !rcPerformanceRunner.includes("rg ") &&
       rcPerformanceVerifier.includes('schema: "tabverse-rc-performance/v1"') &&
       rcPerformanceVerifier.includes("count !== 10"),
     "macOS ARM64 CEF release must run the hidden 30-sample performance and clean-shutdown gate",
