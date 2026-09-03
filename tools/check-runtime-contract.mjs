@@ -82,6 +82,10 @@ const rcPerformanceVerifier = await readFile(
   "utf8",
 );
 const releaseAssets = expectedReleaseAssets("0.0.0");
+const cefReleaseJob = release.slice(
+  release.indexOf("\n  build-cef:"),
+  release.indexOf("\n  macos-arm64-gate:"),
+);
 const forkRevisions = [
   ...rootCargo.matchAll(
     /(?:tauri|tauri-build) = \{ git = "https:\/\/github\.com\/spalagu\/tauri\.git", rev = "([0-9a-f]{40})" \}/g,
@@ -146,11 +150,14 @@ const checks = [
     release.includes("cargo install tauri-cli") &&
       release.includes("--git https://github.com/spalagu/tauri.git") &&
       release.includes("--rev a639cadd9df0949ae20cbf8b29da66fc0cbf8d14") &&
+      cefReleaseJob.includes(
+        "targets: aarch64-apple-darwin,x86_64-apple-darwin",
+      ) &&
       release.includes("cargo tauri build") &&
       release.includes("--config target/cef-release-config.json") &&
       release.includes("tools/prepare-cef-release.mjs") &&
       cefReleasePreparation.includes("CEF-CREDITS.html.gz"),
-    "CEF release must build and bundle with the pinned CEF-aware Tauri CLI",
+    "CEF release must install both helper targets and bundle with the pinned CEF-aware Tauri CLI",
   ],
   [
     release.includes("needs: [build, build-cef, sbom, macos-arm64-gate]") &&
