@@ -124,12 +124,24 @@ marker_ms() {
   local marker=$1
   local position=${2:-first}
   local line
-  if [[ "$position" == "last" ]]; then
-    line=$(rg "$marker" "$log_file" | tail -1 || true)
-  else
-    line=$(rg "$marker" "$log_file" | head -1 || true)
-  fi
+  line=$(awk -v marker="$marker" -v position="$position" '
+    index($0, marker) {
+      if (position == "first") {
+        print
+        exit
+      }
+      matched = $0
+    }
+    END {
+      if (position == "last" && matched != "") print matched
+    }
+  ' "$log_file")
   sed -E 's/.*elapsed_ms=([0-9]+).*/\1/' <<<"$line"
+}
+
+marker_count() {
+  local marker=$1
+  awk -v marker="$marker" 'index($0, marker) { count++ } END { print count + 0 }' "$log_file"
 }
 
 setup_ms=$(marker_ms 'TABVERSE_RUNTIME_PERFORMANCE_SETUP')
@@ -140,8 +152,8 @@ second_ready_ms=$(marker_ms 'TABVERSE_RUNTIME_PERFORMANCE_READY index=2')
 all_ready_ms=$(marker_ms 'TABVERSE_RUNTIME_PERFORMANCE_ALL_READY' last)
 request_exit_ms=$(marker_ms 'TABVERSE_RUNTIME_PERFORMANCE_REQUEST_EXIT' last)
 exit_ms=$(marker_ms 'TABVERSE_RUNTIME_PERFORMANCE_EXIT elapsed_ms=' last)
-ready_count=$(rg -c 'TABVERSE_RUNTIME_PERFORMANCE_READY index=' "$log_file" || true)
-all_ready_count=$(rg -c 'TABVERSE_RUNTIME_PERFORMANCE_ALL_READY' "$log_file" || true)
+ready_count=$(marker_count 'TABVERSE_RUNTIME_PERFORMANCE_READY index=')
+all_ready_count=$(marker_count 'TABVERSE_RUNTIME_PERFORMANCE_ALL_READY')
 idle_cpu_percent=$(awk -v start="$all_ready_ms" -v end="$request_exit_ms" '
   NR > 1 && $1 <= start { start_elapsed = $1; start_cpu = $4 }
   NR > 1 && $1 <= end { end_elapsed = $1; end_cpu = $4 }
