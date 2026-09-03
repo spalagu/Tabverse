@@ -10,18 +10,16 @@ import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { gunzipSync } from "node:zlib";
 
-const [imageArgument, runtime, architecture, mode] = process.argv.slice(2);
+const [imageArgument, runtime, architecture] = process.argv.slice(2);
 if (
   !imageArgument ||
   !["wry", "cef"].includes(runtime) ||
-  !architecture ||
-  ![undefined, "--preflight"].includes(mode)
+  !architecture
 ) {
   throw new Error(
-    "usage: verify-macos-release.mjs <dmg> <wry|cef> <architecture> [--preflight]",
+    "usage: verify-macos-release.mjs <dmg> <wry|cef> <architecture>",
   );
 }
-const releaseQualified = mode !== "--preflight";
 const image = resolve(imageArgument);
 const mount = mkdtempSync(join(tmpdir(), "tabverse-release-mount-"));
 let attached = false;
@@ -73,16 +71,15 @@ try {
       `bundle identity drift: ${JSON.stringify({ identifier, version })}`,
     );
   }
+  if (config.bundle?.macOS?.signingIdentity !== "-") {
+    throw new Error(
+      "macOS distribution policy drifted from the v0.0.2 ad-hoc identity",
+    );
+  }
   const architectures = run("lipo", ["-archs", executable], true).split(/\s+/);
   if (!architectures.includes(architecture)) {
     throw new Error(`bundle does not contain ${architecture}`);
   }
-  const cefFramework = join(
-    app,
-    "Contents",
-    "Frameworks",
-    "Chromium Embedded Framework.framework",
-  );
   const hasCef = (() => {
     try {
       return readdirSync(join(app, "Contents", "Frameworks")).some(
@@ -174,20 +171,6 @@ try {
       throw new Error(`${helper} does not contain ${architecture}`);
     }
   }
-  if (releaseQualified) {
-    if (hasCef)
-      run("codesign", ["--verify", "--deep", "--strict", cefFramework]);
-    run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", app]);
-    const signature = run("codesign", ["-dv", "--verbose=4", app], true);
-    if (/Signature=adhoc|TeamIdentifier=not set/.test(signature)) {
-      throw new Error(
-        "application is ad-hoc signed instead of Developer ID signed",
-      );
-    }
-    run("spctl", ["--assess", "--type", "execute", "--verbose=2", app]);
-    run("xcrun", ["stapler", "validate", app]);
-    run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", image]);
-  }
   process.stdout.write(
     `${JSON.stringify({
       schema: "tabverse-macos-release/v1",
@@ -199,8 +182,8 @@ try {
       cefHelpers: cefHelpers.length,
       cefCredits: hasCefCredits,
       residentFiles: residentFiles.length,
-      releaseQualified,
-      notarized: releaseQualified,
+      appleDistribution: "adhoc",
+      notarized: false,
     })}\n`,
   );
 } finally {

@@ -101,14 +101,12 @@ jobs:
             bundle: dmg
             extension: dmg
             asset_suffix: x64.dmg
-            architecture: x86_64
           - label: macOS ARM64 installer
             os: macos-26
             target: aarch64-apple-darwin
             bundle: dmg
             extension: dmg
             asset_suffix: aarch64.dmg
-            architecture: arm64
           - label: Windows x64 installer
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -149,17 +147,6 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
       - run: npm ci
-      - name: Require release signing environment
-        run: node tools/check-release-environment.mjs
-        env:
-          TABVERSE_RELEASE_PLATFORM: ${{ runner.os }}
-          TABVERSE_RESIDENT_SIGNING_KEY_HEX: ${{ secrets.TABVERSE_RESIDENT_SIGNING_KEY_HEX }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       - name: Build signed Resident artifacts
         run: npm run build:resident-artifacts
         env:
@@ -174,12 +161,6 @@ jobs:
           --bundles ${{ matrix.bundle }}
         env:
           TABVERSE_RESIDENT_SIGNING_KEY_HEX: ""
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Preserve the byte-exact signed Resident workers in Linux AppImages.
           NO_STRIP: "1"
       - name: Name release asset
@@ -194,9 +175,6 @@ jobs:
           asset="Tabverse_${version}_${{ matrix.asset_suffix }}"
           cp "$source" "$asset"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
-      - name: Verify Developer ID signature, notarization, architecture, and Wry payload
-        if: runner.os == 'macOS'
-        run: node tools/verify-macos-release.mjs "${{ steps.asset.outputs.asset }}" wry "${{ matrix.architecture }}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.target }}
@@ -241,17 +219,6 @@ jobs:
             --distribution "$cef_path" \
             --output target/cef-release-config.json
           echo "CEF_PATH=$PWD/target/cef-release-cache" >> "$GITHUB_ENV"
-      - name: Require release signing environment
-        run: node tools/check-release-environment.mjs
-        env:
-          TABVERSE_RELEASE_PLATFORM: ${{ runner.os }}
-          TABVERSE_RESIDENT_SIGNING_KEY_HEX: ${{ secrets.TABVERSE_RESIDENT_SIGNING_KEY_HEX }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       - name: Build signed Resident artifacts
         run: npm run build:resident-artifacts
         env:
@@ -269,12 +236,6 @@ jobs:
             -- --no-default-features
         env:
           TABVERSE_RESIDENT_SIGNING_KEY_HEX: ""
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       - name: Name CEF release asset
         id: asset
         shell: bash
@@ -287,7 +248,7 @@ jobs:
           asset="Tabverse_${version}_aarch64-cef.dmg"
           cp "$source" "$asset"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
-      - name: Verify Developer ID signature, notarization, architecture, and CEF payload
+      - name: Verify CEF architecture, runtime payload, and license material
         run: node tools/verify-macos-release.mjs "${{ steps.asset.outputs.asset }}" cef arm64
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -346,7 +307,7 @@ jobs:
             --baseline-tag "$baseline_tag" \
             --max-cef-delta-mib 325 \
             --output runtime-rollback.json
-      - name: Verify the signed CEF release candidate performance budget without a visible window
+      - name: Verify the CEF release candidate performance budget without a visible window
         shell: bash
         run: |
           set -euo pipefail

@@ -61,10 +61,6 @@ const joinApp = await readFile(
   new URL("../apps/join/src/App.tsx", import.meta.url),
   "utf8",
 );
-const releaseEnvironment = await readFile(
-  new URL("./check-release-environment.mjs", import.meta.url),
-  "utf8",
-);
 const macosReleaseVerifier = await readFile(
   new URL("./verify-macos-release.mjs", import.meta.url),
   "utf8",
@@ -174,14 +170,21 @@ const checks = [
     "release manifest does not preserve the six default Wry assets and one macOS ARM64 CEF asset",
   ],
   [
-    releaseEnvironment.includes('"APPLE_CERTIFICATE"') &&
-      releaseEnvironment.includes('"APPLE_SIGNING_IDENTITY"') &&
-      releaseEnvironment.includes('"APPLE_TEAM_ID"') &&
-      release.includes("verify-macos-release.mjs") &&
-      macosReleaseVerifier.includes('"stapler", "validate"') &&
+    !release.includes("APPLE_CERTIFICATE") &&
+      !release.includes("APPLE_CERTIFICATE_PASSWORD") &&
+      !release.includes("APPLE_SIGNING_IDENTITY") &&
+      !release.includes("APPLE_ID") &&
+      !release.includes("APPLE_PASSWORD") &&
+      !release.includes("APPLE_TEAM_ID") &&
+      (release.match(/verify-macos-release\.mjs/g) ?? []).length === 1 &&
+      !macosReleaseVerifier.includes('run("codesign"') &&
+      !macosReleaseVerifier.includes('run("spctl"') &&
+      !macosReleaseVerifier.includes('"stapler", "validate"') &&
+      macosReleaseVerifier.includes('appleDistribution: "adhoc"') &&
+      macosReleaseVerifier.includes("notarized: false") &&
       macosReleaseVerifier.includes("Chromium Embedded Framework.framework") &&
       macosReleaseVerifier.includes("CEF-CREDITS.html.gz"),
-    "release signing and notarization must be secret-gated and artifact-verified",
+    "release must preserve v0.0.2 ad-hoc macOS distribution and verify only the CEF artifact payload",
   ],
   [
     release.includes("macos-arm64-gate:") &&
