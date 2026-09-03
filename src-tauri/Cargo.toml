@@ -1,6 +1,6 @@
 [package]
 name = "tabverse"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 description = "Tabverse: a cross-platform terminal that can replace most of your desktop."
 license.workspace = true
