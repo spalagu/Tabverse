@@ -2,22 +2,6 @@ name: Build and deploy Join page
 
 on:
   pull_request:
-    paths:
-      - ".github/workflows/join-pages.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "package.json"
-      - "package-lock.json"
-      - "crates/tabverse-web/**"
-      - "src/**"
-      - "tools/build-web.sh"
-      - "tools/build-join-pages.mjs"
-      - "tools/build-join-page.mjs"
-      - "tools/check-secrets.mjs"
-      - "vite.pages.config.ts"
-      - "vite.web.config.ts"
-      - "apps/join/**"
-      - "packages/**"
   push:
     branches: [main]
     paths:
