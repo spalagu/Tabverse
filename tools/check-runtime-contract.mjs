@@ -187,6 +187,12 @@ const checks = [
     "release must preserve v0.0.2 ad-hoc macOS distribution and verify only the CEF artifact payload",
   ],
   [
+    release.indexOf("- run: npm run check:quality") >= 0 &&
+      release.indexOf("- run: npm run check:security-mutations") >
+        release.indexOf("- run: npm run check:quality"),
+    "release security mutations must run after the quality gate primes offline Cargo dependencies",
+  ],
+  [
     release.includes("macos-arm64-gate:") &&
       release.includes("tools/verify-runtime-rollback.mjs") &&
       release.includes("--max-cef-delta-mib 325") &&
