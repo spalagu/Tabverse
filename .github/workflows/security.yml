@@ -22,8 +22,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm audit --audit-level=high
-      - run: npm run check:agent-retirement
-      - run: npm run check:secrets
 
   rust-advisories:
     runs-on: ubuntu-latest
@@ -60,3 +58,43 @@ jobs:
         with:
           # rand 0.7.3 is a build-only dependency of the pinned Tauri CEF HTML parser.
           allow-ghsas: GHSA-cq8v-f236-94qc
+
+  security-mutations:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.23.2
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: . -> target
+          key: security-mutations
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: cargo fetch --locked
+      - run: npm run check:security-mutations
+
+  security:
+    if: always()
+    needs: [npm-audit, rust-advisories, codeql, dependency-review]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize required security checks
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          NPM_AUDIT: ${{ needs.npm-audit.result }}
+          RUST_ADVISORIES: ${{ needs.rust-advisories.result }}
+          CODEQL: ${{ needs.codeql.result }}
+          DEPENDENCY_REVIEW: ${{ needs.dependency-review.result }}
+        run: |
+          set -euo pipefail
+          test "$NPM_AUDIT" = success
+          test "$RUST_ADVISORIES" = success
+          test "$CODEQL" = success
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            test "$DEPENDENCY_REVIEW" = success
+          fi

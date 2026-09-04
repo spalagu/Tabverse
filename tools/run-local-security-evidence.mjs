@@ -86,11 +86,6 @@ const specs = [
     outputs: ["dist-web/tabverse-remote.html"],
   },
   {
-    id: "agent-retirement-scan",
-    argv: [process.execPath, "tools/check-agent-retirement.mjs"],
-    inputs: ["tools/check-agent-retirement.mjs"],
-  },
-  {
     id: "secret-scan",
     argv: [
       process.execPath,

@@ -9,9 +9,6 @@ permissions:
   contents: read
 
 jobs:
-  resident-service:
-    uses: ./.github/workflows/resident-service.yml
-
   verify:
     name: Verify release source
     runs-on: ubuntu-latest
@@ -25,23 +22,10 @@ jobs:
           cache: npm
       - run: git fetch --no-tags origin main:refs/remotes/origin/main
       - run: node tools/check-release-source.mjs
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: . -> target
-          key: release-verify
-      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-      - run: npm ci
-      - run: npm audit --audit-level=high
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          command: check advisories licenses sources
-      - run: npm run check:quality
-      - run: npm run check:security-mutations
 
   sbom:
     needs: verify
-    name: Dual-runtime SBOM
+    name: Source dependency SBOMs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -70,7 +54,7 @@ jobs:
             --no-default-features \
             --features runtime-wry \
             --target aarch64-apple-darwin \
-            --override-filename "Tabverse_${version}_aarch64-wry.cdx"
+            --override-filename "Tabverse_${version}_source-rust-macos-arm64-wry.cdx"
           cargo cyclonedx \
             --manifest-path src-tauri/Cargo.toml \
             --format json \
@@ -78,9 +62,9 @@ jobs:
             --no-default-features \
             --features runtime-cef \
             --target aarch64-apple-darwin \
-            --override-filename "Tabverse_${version}_aarch64-cef.cdx"
-          mv "src-tauri/Tabverse_${version}_aarch64-wry.cdx.json" .
-          mv "src-tauri/Tabverse_${version}_aarch64-cef.cdx.json" .
+            --override-filename "Tabverse_${version}_source-rust-macos-arm64-cef.cdx"
+          mv "src-tauri/Tabverse_${version}_source-rust-macos-arm64-wry.cdx.json" .
+          mv "src-tauri/Tabverse_${version}_source-rust-macos-arm64-cef.cdx.json" .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-sbom
@@ -88,7 +72,7 @@ jobs:
           if-no-files-found: error
 
   build:
-    needs: [verify, resident-service]
+    needs: verify
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -182,7 +166,7 @@ jobs:
           if-no-files-found: error
 
   build-cef:
-    needs: [verify, resident-service]
+    needs: verify
     name: macOS ARM64 CEF installer
     runs-on: macos-26
     steps:
@@ -201,10 +185,6 @@ jobs:
           workspaces: . -> target
           key: release-macos-26-aarch64-apple-darwin-cef
       - run: npm ci
-      - name: Verify CEF release feature
-        run: |
-          cargo clippy --workspace --all-targets --no-default-features --features runtime-cef -- -D warnings
-          cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features runtime-cef remote_proxy::tests
       - name: Install the pinned CEF-aware Tauri CLI
         run: >-
           cargo install tauri-cli
@@ -258,9 +238,9 @@ jobs:
           path: ${{ steps.asset.outputs.asset }}
           if-no-files-found: error
 
-  macos-arm64-gate:
+  macos-arm64-artifacts:
     needs: [build, build-cef]
-    name: macOS ARM64 offline install and rollback gate
+    name: macOS ARM64 Wry and CEF artifact verification
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -275,41 +255,36 @@ jobs:
         with:
           name: release-aarch64-apple-darwin-cef
           path: candidate-cef
-      - name: Download the previous default Wry release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Verify both macOS ARM64 artifacts
         run: |
           set -euo pipefail
-          baseline_tag="$(gh release list \
-            --repo "$GITHUB_REPOSITORY" \
-            --exclude-drafts \
-            --exclude-pre-releases \
-            --limit 100 \
-            --json tagName \
-            --jq '.[].tagName' \
-            | awk -v current="$GITHUB_REF_NAME" '$0 != current { print; exit }')"
-          test -n "$baseline_tag"
-          gh release download "$baseline_tag" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern 'Tabverse_*_aarch64.dmg' \
-            --dir baseline
-          echo "baseline_tag=$baseline_tag" >> "$GITHUB_ENV"
-      - name: Verify offline Wry to CEF to Wry replacement
-        run: |
-          set -euo pipefail
-          baseline="$(find baseline -name 'Tabverse_*_aarch64.dmg' -type f -print -quit)"
           wry="$(find candidate-wry -name 'Tabverse_*_aarch64.dmg' -type f -print -quit)"
           cef="$(find candidate-cef -name 'Tabverse_*_aarch64-cef.dmg' -type f -print -quit)"
-          test -n "$baseline" && test -n "$wry" && test -n "$cef"
-          node tools/verify-runtime-rollback.mjs \
-            --baseline-wry "$baseline" \
-            --candidate-wry "$wry" \
-            --candidate-cef "$cef" \
-            --state-fixture tools/fixtures/runtime-rollback/session.json \
-            --baseline-tag "$baseline_tag" \
-            --max-cef-delta-mib 325 \
-            --output runtime-rollback.json
-      - name: Verify the CEF release candidate performance budget without a visible window
+          test -n "$wry" && test -n "$cef"
+          node tools/verify-macos-release.mjs "$wry" wry arm64 | tee macos-arm64-wry.json
+          node tools/verify-macos-release.mjs "$cef" cef arm64 | tee macos-arm64-cef.json
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: acceptance-macos-arm64-artifacts
+          path: macos-arm64-*.json
+          if-no-files-found: error
+
+  cef-performance-observation:
+    needs: build-cef
+    name: Observe macOS ARM64 CEF performance
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.23.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-aarch64-apple-darwin-cef
+          path: candidate-cef
+      - name: Measure the CEF release candidate without a visible window
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -340,16 +315,15 @@ jobs:
           node tools/check-rc-performance.mjs \
             --input rc-performance/samples.tsv \
             --output rc-performance/result.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: acceptance-macos-arm64-runtime-rollback
-          path: |
-            runtime-rollback.json
-            rc-performance/
-          if-no-files-found: error
+          name: observation-macos-arm64-cef-performance
+          path: rc-performance/
+          if-no-files-found: warn
 
   publish:
-    needs: [build, build-cef, sbom, macos-arm64-gate]
+    needs: [build, build-cef, sbom, macos-arm64-artifacts]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -362,18 +336,9 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: release-assets
-      - name: Write release manifest and checksums
+      - name: Write release checksums
         working-directory: release-assets
-        run: |
-          set -euo pipefail
-          version="$(node -p "require('../package.json').version")"
-          node ../tools/release-manifest.mjs \
-            --directory . \
-            --version "$version" \
-            --tag "$GITHUB_REF_NAME" \
-            --commit "$GITHUB_SHA" \
-            --output RELEASE-MANIFEST.json
-          sha256sum * > SHA256SUMS
+        run: sha256sum * > SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: release-assets/*

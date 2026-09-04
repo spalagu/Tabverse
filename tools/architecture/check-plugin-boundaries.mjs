@@ -79,6 +79,27 @@ const COMPOSITION_ROOTS = [
   },
 ];
 
+const APPLICATION_BOUNDARIES = [
+  {
+    root: "packages/workbench/src",
+    forbidden: [
+      /^@tauri-apps\//,
+      /^@tabverse\/runtime-(?:desktop|remote)(?:\/|$)/,
+      /^node:/,
+      /(?:^|\/)src\//,
+      /(?:^|\/)(?:web|apps)\//,
+    ],
+  },
+  {
+    root: "apps/join/src",
+    forbidden: [/(?:^|\/)src\//],
+  },
+  {
+    root: "packages/runtime-desktop/src",
+    forbidden: [/(?:^|\/)(?:src|apps)\//],
+  },
+];
+
 function sourceFiles(path) {
   if (!existsSync(path)) return [];
   return readdirSync(path, { withFileTypes: true }).flatMap((entry) => {
@@ -216,6 +237,20 @@ for (const root of COMPOSITION_ROOTS) {
   }
 }
 
+for (const boundary of APPLICATION_BOUNDARIES) {
+  for (const file of sourceFiles(join(ROOT, boundary.root))) {
+    const source = readFileSync(file, "utf8");
+    for (const match of source.matchAll(IMPORT_SPECIFIER)) {
+      const specifier = match[1];
+      if (boundary.forbidden.some((rule) => rule.test(specifier))) {
+        violations.push(
+          `${relative(ROOT, file)} crosses the ${boundary.root} application boundary via ${JSON.stringify(specifier)}`,
+        );
+      }
+    }
+  }
+}
+
 for (const path of CORE_KIND_FILES) {
   const source = readFileSync(join(ROOT, path), "utf8");
   if (source.includes("fixture.reference")) {
@@ -237,6 +272,7 @@ console.log(JSON.stringify({
   retiredPaths: RETIRED_PATHS,
   retiredSymbols: RETIRED_SYMBOLS,
   compositionRoots: COMPOSITION_ROOTS.map(({ path }) => path).sort(),
+  applicationBoundaries: APPLICATION_BOUNDARIES.map(({ root }) => root).sort(),
   workspaceEdges: edges.sort(),
   cycles,
   violations: [],
