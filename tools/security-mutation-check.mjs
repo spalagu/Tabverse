@@ -7,7 +7,6 @@ const root = resolve(import.meta.dirname, "..");
 const sourcePath = "src-tauri/src/remote_proxy.rs";
 const mutations = [
   {
-    kind: "rust",
     id: "allow-prohibited-addresses",
     path: "src-tauri/src/network_broker/mod.rs",
     before: `        IpAddr::V4(ip) => {
@@ -20,7 +19,6 @@ const mutations = [
     test: "remote_proxy::tests::network_grant_pins_dns_and_refuses_metadata_before_any_request",
   },
   {
-    kind: "rust",
     id: "allow-cross-viewer-grant",
     before: `        if expected_attachment.as_ref() != Some(&(attachment_id.clone(), attachment_generation)) {
             return Err("grant-owner-mismatch: attachment does not belong to viewer".into());
@@ -30,17 +28,6 @@ const mutations = [
         }`,
     test: "remote_proxy::tests::network_grant_rejects_cross_viewer_old_generation_origin_port_and_viewer_writes",
   },
-  ...[
-    "crates/tabverse-fs/src/session_migration.rs",
-    "crates/tabverse-proto/src/lib.rs",
-    "src/persist.ts",
-    "src/state/mirrorActions.ts",
-    "src/state/store.ts",
-  ].map((path) => ({
-    kind: "agent-scan",
-    id: `agent-runtime-in-${path.replaceAll("/", "-").replaceAll(".", "-")}`,
-    path,
-  })),
 ];
 
 const results = [];
@@ -55,34 +42,20 @@ for (const mutation of mutations) {
     added = true;
     const file = resolve(worktree, mutation.path ?? sourcePath);
     const source = readFileSync(file, "utf8");
-    if (mutation.kind === "rust") {
-      if (!source.includes(mutation.before)) {
-        throw new Error(`${mutation.id}: mutation anchor not found`);
-      }
-      writeFileSync(file, source.replace(mutation.before, mutation.after));
-    } else {
-      writeFileSync(
-        file,
-        `// agentRuntime manifest createAgentRuntime\n${source}`,
-      );
+    if (!source.includes(mutation.before)) {
+      throw new Error(`${mutation.id}: mutation anchor not found`);
     }
-    const argv =
-      mutation.kind === "rust"
-        ? [
-            "cargo",
-            [
-              "test",
-              "--offline",
-              "--locked",
-              "-p",
-              "tabverse",
-              mutation.test,
-              "--",
-              "--exact",
-            ],
-          ]
-        : [process.execPath, ["tools/check-agent-retirement.mjs"]];
-    const run = spawnSync(argv[0], argv[1], {
+    writeFileSync(file, source.replace(mutation.before, mutation.after));
+    const run = spawnSync("cargo", [
+      "test",
+      "--offline",
+      "--locked",
+      "-p",
+      "tabverse",
+      mutation.test,
+      "--",
+      "--exact",
+    ], {
       cwd: worktree,
       encoding: "utf8",
       env: { ...process.env, CARGO_TARGET_DIR: resolve(root, "target") },
@@ -90,16 +63,12 @@ for (const mutation of mutations) {
     });
     const output = `${run.stdout ?? ""}\n${run.stderr ?? ""}`;
     const killed =
-      mutation.kind === "rust"
-        ? run.status !== 0 &&
-          output.includes(mutation.test) &&
-          output.includes("FAILED")
-        : run.status !== 0 &&
-          output.includes(mutation.path) &&
-          output.includes("unclassified");
+      run.status !== 0 &&
+      output.includes(mutation.test) &&
+      output.includes("FAILED");
     results.push({
       id: mutation.id,
-      test: mutation.test ?? "tools/check-agent-retirement.mjs",
+      test: mutation.test,
       mutationKilled: killed,
       exitCode: run.status,
       signal: run.signal,

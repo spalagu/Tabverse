@@ -37,7 +37,33 @@ env:
   WASI_SDK_SHA256: 0ba8b5bfaeb2adf3f29bab5841d76cf5318ab8e1642ea195f88baba1abd47bce
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.paths.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - id: paths
+        name: Select Join page checks
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" != "pull_request" || -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$BASE_SHA" "$GITHUB_SHA" -- Cargo.lock Cargo.toml package.json package-lock.json crates/tabverse-web src apps/join packages tests/join-browser tools/build-web.sh tools/build-join-pages.mjs tools/build-join-page.mjs tools/check-secrets.mjs vite.pages.config.ts vite.web.config.ts playwright.join.config.ts .github/workflows/join-pages.yml; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -109,7 +135,8 @@ jobs:
           retention-days: 1
 
   visual-regression:
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.run == 'true'
     runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -165,3 +192,20 @@ jobs:
           done
           echo "The deployed Join page did not expose build ${GITHUB_SHA}" >&2
           exit 1
+
+  join-page:
+    if: always()
+    needs: [changes, build, visual-regression]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize Join page checks
+        env:
+          REQUIRED: ${{ needs.changes.outputs.run }}
+          BUILD: ${{ needs.build.result }}
+          VISUAL_REGRESSION: ${{ needs.visual-regression.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$REQUIRED" == "true" ]]; then
+            test "$BUILD" = success
+            test "$VISUAL_REGRESSION" = success
+          fi
