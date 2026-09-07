@@ -3,7 +3,7 @@ name: Quality core
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, architecture-v3]
   workflow_dispatch:
 
 permissions:
