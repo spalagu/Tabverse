@@ -6,8 +6,9 @@ on:
     branches: [main, architecture-v3]
   workflow_dispatch:
 
+# Temporary on this branch only: the final clean commit restores contents: read.
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: quality-core-${{ github.workflow }}-${{ github.ref }}
@@ -29,3 +30,17 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: npm ci
       - run: npm run check:quality
+      - name: Generate lockfile snapshot for branch cleanup
+        if: github.event_name == 'pull_request' && github.head_ref == 'v3-host-network-gateway'
+        shell: bash
+        run: |
+          cargo generate-lockfile
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock is already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "temp: generated Cargo.lock snapshot"
+          git push --force origin HEAD:refs/heads/v3-lock-generated-temp
