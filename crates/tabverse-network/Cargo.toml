@@ -22,4 +22,8 @@ tokio = { version = "1.53.1", features = ["io-util", "net", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 
 [dev-dependencies]
+# The real localhost gateway test builds a reqwest client in this standalone
+# crate. Production installs the same ring provider at the Host HTTP factory;
+# keeping this test-only preserves that ownership boundary.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "io-util", "net", "time"] }
