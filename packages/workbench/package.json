@@ -27,6 +27,7 @@
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "exports": {
+    "./feature-modules": "./src/featureModules.ts",
     "./tabs": "./src/tabs.ts",
     "./tab-view": "./src/tabView.tsx",
     "./remote-tab-view": "./src/remoteTabView.tsx",

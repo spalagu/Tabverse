@@ -4,6 +4,7 @@ import {
   type TabType,
   type WorkbenchRuntime,
 } from "@tabverse/runtime-contracts";
+import { BUILT_IN_FEATURE_MODULES } from "./featureModules";
 
 export interface TabDefinition {
   readonly type: TabType;
@@ -11,15 +12,15 @@ export interface TabDefinition {
   readonly hint: string;
 }
 
-/** The one renderer-facing registry for every Tabverse tab type. */
-export const TAB_DEFINITIONS: readonly TabDefinition[] = [
-  { type: "terminal", label: "Terminal", hint: "A shell session" },
-  { type: "files", label: "Files", hint: "Explorer with git status and previews" },
-  { type: "browser", label: "Browser", hint: "Embedded web page, loaded by the host" },
-  { type: "agent", label: "Agent", hint: "A coding agent working in a folder" },
-  { type: "remote", label: "Join remote…", hint: "Join a shared Tabverse session" },
-  { type: "settings", label: "Settings", hint: "Preferences" },
-] as const;
+/**
+ * Compatibility projection used by the existing Workbench while V3 migrates
+ * tab behavior incrementally to BuiltInFeatureModuleDefinition.
+ *
+ * There is one source of built-in feature identity/metadata: featureModules.
+ */
+export const TAB_DEFINITIONS: readonly TabDefinition[] = BUILT_IN_FEATURE_MODULES.map(
+  ({ kind, label, hint }) => ({ type: kind, label, hint }),
+);
 
 const byType = new Map(TAB_DEFINITIONS.map((definition) => [definition.type, definition]));
 
@@ -37,5 +38,5 @@ export function tabDefinitionsForRuntime(
 
 /** Fails at module load if the runtime contract gains a tab without a UI entry. */
 if (TAB_DEFINITIONS.length !== TAB_TYPES.length) {
-  throw new Error("Workbench tab registry does not cover every TabType");
+  throw new Error("Workbench feature registry does not cover every TabType");
 }

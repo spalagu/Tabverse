@@ -1,5 +1,6 @@
 export * from "./agent";
 export * from "./appShare";
+export * from "./openIntent";
 export * from "./remote";
 
 /** Shared facts that every Tabverse renderer may depend on. This package is

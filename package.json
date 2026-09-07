@@ -25,7 +25,9 @@
     "tauri": "tauri",
     "test": "vitest run",
     "test:browser": "playwright test",
-    "check:workbench": "npm run -w @tabverse/workbench check && node tools/check-workbench-boundary.mjs",
+    "check:content-catalog": "node tools/check-content-catalog.mjs",
+    "check:architecture": "node tools/check-workbench-boundary.mjs && npm run check:content-catalog",
+    "check:workbench": "npm run -w @tabverse/workbench check && npm run check:architecture",
     "check:quality": "npm run check:workbench && npm run build && npm test && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
   },
   "dependencies": {
