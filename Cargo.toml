@@ -5,6 +5,7 @@ members = [
   "crates/tabverse-proto",
   "crates/tabverse-term",
   "crates/tabverse-remote",
+  "crates/tabverse-network",
   "crates/tabverse-fs",
   "crates/tabverse-web",
   "crates/tabverse-agent-tools",
