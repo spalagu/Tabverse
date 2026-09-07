@@ -10,7 +10,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
 use http::header::{HeaderName, HeaderValue};
-use reqwest::redirect::Policy;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
@@ -118,35 +117,25 @@ pub enum HttpResponseStart {
 
 /// Host-side HTTP implementation. It deliberately owns only HTTP mechanics;
 /// cookie/session policy belongs to the Remote Browser context above it.
+///
+/// The concrete HTTP client is injected by the Host adapter. This crate does
+/// not own DNS, proxy, TLS, redirect, or timeout policy and therefore cannot
+/// create a second network-policy boundary beside the application's canonical
+/// HTTP client factory.
 #[derive(Clone)]
 pub struct HostNetworkGateway {
-    client: std::result::Result<reqwest::Client, String>,
-}
-
-impl Default for HostNetworkGateway {
-    fn default() -> Self {
-        Self::new()
-    }
+    client: reqwest::Client,
 }
 
 impl HostNetworkGateway {
-    /// Build the production client once. There is no whole-request timeout:
-    /// connect/idle policy belongs to concrete operations, while large or long
-    /// streams must be able to remain alive. Redirects are surfaced to the
-    /// remote renderer so its logical navigation/history can stay coherent.
-    pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .tls_backend_rustls()
-            .redirect(Policy::none())
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| e.to_string());
+    /// Bind the streaming gateway to a Host-provided HTTP client.
+    ///
+    /// Production callers are responsible for constructing this client at the
+    /// application network-policy boundary. In particular, Remote Browser
+    /// navigation expects redirects to be surfaced rather than followed so the
+    /// remote renderer can keep its own logical history coherent.
+    pub fn new(client: reqwest::Client) -> Self {
         Self { client }
-    }
-
-    #[cfg(test)]
-    fn with_client(client: reqwest::Client) -> Self {
-        Self { client: Ok(client) }
     }
 
     /// Serve one HTTP exchange over an already-authenticated bidirectional
@@ -161,18 +150,6 @@ impl HostNetworkGateway {
         let head: HttpRequestHead = read_json_frame(&mut recv)
             .await
             .context("read remote HTTP request head")?;
-
-        let client = match &self.client {
-            Ok(client) => client,
-            Err(message) => {
-                write_failure(
-                    &mut send,
-                    NetworkFailure::invalid("network-client-unavailable", message.clone()),
-                )
-                .await?;
-                return Ok(());
-            }
-        };
 
         let method = match reqwest::Method::from_bytes(head.method.as_bytes()) {
             Ok(method) => method,
@@ -212,7 +189,7 @@ impl HostNetworkGateway {
             }
         };
 
-        let mut request = client.request(method, url);
+        let mut request = self.client.request(method, url);
         for pair in head.headers {
             let Ok(name) = HeaderName::from_bytes(pair.name.as_bytes()) else {
                 write_failure(
@@ -413,12 +390,7 @@ mod tests {
             socket.shutdown().await.unwrap();
         });
 
-        let client = reqwest::Client::builder()
-            .redirect(Policy::none())
-            .no_proxy()
-            .build()
-            .unwrap();
-        let gateway = HostNetworkGateway::with_client(client);
+        let gateway = HostNetworkGateway::new(Default::default());
         let (client_side, host_side) = tokio::io::duplex(64 * 1024);
         let (mut client_recv, mut client_send) = tokio::io::split(client_side);
         let (host_recv, host_send) = tokio::io::split(host_side);
