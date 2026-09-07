@@ -1,0 +1,22 @@
+[package]
+name = "tabverse-network"
+version = "0.1.0"
+edition = "2021"
+description = "Host-network delegation primitives for Tabverse Remote."
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy", "http2", "stream"] }
+tokio = { version = "1.53.1", features = ["io-util", "net", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "io-util", "net", "time"] }
