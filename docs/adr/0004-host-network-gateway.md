@@ -37,6 +37,8 @@ zero or more independent bidirectional data streams
 
 Each data stream begins with a small preface describing its kind and Remote Browser context. An HTTP stream then carries a request head followed by raw request body bytes until EOF; the reverse direction carries a response-start frame followed by raw response bytes until EOF.
 
+The preface is routing metadata, not an authorization token. Host network capability must only be attached to a connection after the existing Remote share authentication and viewer-access checks have succeeded; a caller-controlled `context_id` must never grant or widen access.
+
 ## Browser state
 `context_id` identifies Remote Browser context state. It deliberately does not identify or synchronize a local Wry BrowserSession. Cookie/cache layers may later key their own state by this context without changing the data transport.
 
