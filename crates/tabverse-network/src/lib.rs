@@ -228,7 +228,10 @@ impl HostNetworkGateway {
                 .await?;
                 return Ok(());
             };
-            if is_hop_by_hop(&name) || name == http::header::HOST || name == http::header::CONTENT_LENGTH {
+            if is_hop_by_hop(&name)
+                || name == http::header::HOST
+                || name == http::header::CONTENT_LENGTH
+            {
                 continue;
             }
             let Ok(value) = HeaderValue::from_str(&pair.value) else {
@@ -294,7 +297,10 @@ impl HostNetworkGateway {
     }
 }
 
-async fn write_failure<W: AsyncWrite + Unpin>(send: &mut W, error: NetworkFailure) -> Result<()> {
+async fn write_failure<W: AsyncWrite + Unpin>(
+    send: &mut W,
+    error: NetworkFailure,
+) -> Result<()> {
     write_json_frame(send, &HttpResponseStart::Error { error }).await?;
     send.shutdown().await?;
     Ok(())
@@ -352,7 +358,9 @@ async fn write_json_frame<W: AsyncWrite + Unpin, T: Serialize>(
     Ok(())
 }
 
-async fn read_json_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(reader: &mut R) -> Result<T> {
+async fn read_json_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(
+    reader: &mut R,
+) -> Result<T> {
     let mut len = [0u8; 4];
     reader.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len);
