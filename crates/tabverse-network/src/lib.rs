@@ -205,10 +205,7 @@ impl HostNetworkGateway {
             Err(error) => {
                 write_failure(
                     &mut send,
-                    NetworkFailure::invalid(
-                        "network-invalid-url",
-                        format!("invalid URL: {error}"),
-                    ),
+                    NetworkFailure::invalid("network-invalid-url", format!("invalid URL: {error}")),
                 )
                 .await?;
                 return Ok(());
@@ -297,10 +294,7 @@ impl HostNetworkGateway {
     }
 }
 
-async fn write_failure<W: AsyncWrite + Unpin>(
-    send: &mut W,
-    error: NetworkFailure,
-) -> Result<()> {
+async fn write_failure<W: AsyncWrite + Unpin>(send: &mut W, error: NetworkFailure) -> Result<()> {
     write_json_frame(send, &HttpResponseStart::Error { error }).await?;
     send.shutdown().await?;
     Ok(())
@@ -353,14 +347,14 @@ async fn write_json_frame<W: AsyncWrite + Unpin, T: Serialize>(
     if bytes.len() as u64 > MAX_HEAD_FRAME as u64 {
         bail!("network metadata frame too large: {}", bytes.len());
     }
-    writer.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
+    writer
+        .write_all(&(bytes.len() as u32).to_be_bytes())
+        .await?;
     writer.write_all(&bytes).await?;
     Ok(())
 }
 
-async fn read_json_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(
-    reader: &mut R,
-) -> Result<T> {
+async fn read_json_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(reader: &mut R) -> Result<T> {
     let mut len = [0u8; 4];
     reader.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len);
