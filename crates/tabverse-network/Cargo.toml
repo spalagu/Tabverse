@@ -14,7 +14,10 @@ serde_json = { workspace = true }
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 http = "1"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy", "http2", "stream"] }
+# The core gateway only consumes a Host-provided client and streams bodies.
+# DNS, proxy, TLS, redirect, and timeout policy belong to the Host adapter's
+# canonical HTTP client factory, not this Tauri-independent crate.
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 tokio = { version = "1.53.1", features = ["io-util", "net", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 
