@@ -38,6 +38,7 @@ const CORE_RUST_MANIFESTS = [
   "crates/tabverse-proto/Cargo.toml",
   "crates/tabverse-term/Cargo.toml",
   "crates/tabverse-remote/Cargo.toml",
+  "crates/tabverse-network/Cargo.toml",
   "crates/tabverse-fs/Cargo.toml",
   "crates/tabverse-web/Cargo.toml",
   "crates/tabverse-agent-tools/Cargo.toml",
