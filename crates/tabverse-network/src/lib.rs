@@ -363,6 +363,11 @@ mod tests {
 
     #[tokio::test]
     async fn host_gateway_uses_host_dns_and_streams_bodies_beyond_the_old_one_mib_cap() {
+        // This standalone crate does not run the Tauri composition root. Match
+        // the Host HTTP factory's process-wide choice before reqwest builds a
+        // client; an Err means another test installed the same provider first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         const BODY_LEN: usize = 1024 * 1024 + 131_072;
