@@ -5851,6 +5851,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "tabverse-network",
  "tabverse-proto",
  "wasm-bindgen",
  "wasm-bindgen-futures",

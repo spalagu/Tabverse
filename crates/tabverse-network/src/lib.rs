@@ -8,10 +8,14 @@
 //! in this layer.
 
 use anyhow::{anyhow, bail, Context, Result};
-use futures_util::StreamExt;
-use http::header::{HeaderName, HeaderValue};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+#[cfg(not(target_arch = "wasm32"))]
+use futures_util::StreamExt;
+#[cfg(not(target_arch = "wasm32"))]
+use http::header::{HeaderName, HeaderValue};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_util::io::ReaderStream;
 
 /// Data-stream protocol version. This is intentionally independent from the
@@ -82,6 +86,7 @@ pub struct NetworkFailure {
 }
 
 impl NetworkFailure {
+    #[cfg(not(target_arch = "wasm32"))]
     fn invalid(code: &str, message: impl Into<String>) -> Self {
         Self {
             code: code.to_string(),
@@ -90,6 +95,7 @@ impl NetworkFailure {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn reqwest(error: &reqwest::Error) -> Self {
         let code = if error.is_timeout() {
             "network-timeout"
@@ -123,10 +129,12 @@ pub enum HttpResponseStart {
 /// create a second network-policy boundary beside the application's canonical
 /// HTTP client factory.
 #[derive(Clone)]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct HostNetworkGateway {
     client: reqwest::Client,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl HostNetworkGateway {
     /// Bind the streaming gateway to a Host-provided HTTP client.
     ///
@@ -271,12 +279,14 @@ impl HostNetworkGateway {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn write_failure<W: AsyncWrite + Unpin>(send: &mut W, error: NetworkFailure) -> Result<()> {
     write_json_frame(send, &HttpResponseStart::Error { error }).await?;
     send.shutdown().await?;
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn is_hop_by_hop(name: &HeaderName) -> bool {
     matches!(
         name.as_str().to_ascii_lowercase().as_str(),

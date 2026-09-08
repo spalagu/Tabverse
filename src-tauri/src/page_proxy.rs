@@ -216,7 +216,7 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
 /// proxy to imply it. RFC 9110 lets a server insist on origin-form, and
 /// the real ones do — the echo stub this proxy was born against accepted
 /// anything, which is exactly how a verbatim forwarder shipped green.
-/// Shared with the remote-proxy entry (remote_proxy.rs), which speaks
+/// Shared with the remote data-plane gateway, which speaks
 /// the same rewrite frame-side.
 pub(crate) fn origin_form_head(head: &str, authority: &str) -> String {
     let mut lines = head.lines();
@@ -415,7 +415,7 @@ fn resolve(host: &str, port: u16, shared: &Shared) -> Result<Vec<SocketAddr>, Re
 
 /// One name's addresses through the host's own resolver, port attached —
 /// the policy's System arm on its own, factored out because the remote
-/// proxy (remote_proxy.rs) is built entirely on it: the names it carries
+/// remote gateway is built entirely on it: the names it carries
 /// are the host's intranet's, answerable only by the host's system
 /// resolver, so that arm is the whole of its resolution. `None` when the
 /// resolver answered with nothing or not at all.
@@ -489,7 +489,7 @@ fn pump(mut from: TcpStream, mut to: TcpStream) {
 /// Byte by byte — the house pattern for heads (http.rs's stubs read the same
 /// way) — because a BufReader would quietly hold bytes of what follows, and
 /// the tunnel that follows must see every one of them. Shared with the
-/// remote-proxy entry (remote_proxy.rs), which reads answer heads the same
+/// remote data-plane gateway, which reads answer heads the same
 /// way — one blank line ends them both.
 pub(crate) fn read_head(stream: &mut TcpStream) -> std::io::Result<String> {
     let mut head: Vec<u8> = Vec::new();
@@ -516,7 +516,7 @@ pub(crate) fn read_head(stream: &mut TcpStream) -> std::io::Result<String> {
 
 /// An absolute-form target's authority and the port its scheme defaults to,
 /// or `None` when the target is not absolute (a path, or another scheme).
-/// Shared with the remote-proxy entry (remote_proxy.rs).
+/// Shared with the remote data-plane gateway.
 pub(crate) fn absolute_form(target: &str) -> Option<(&str, u16)> {
     let (rest, default_port) = if let Some(rest) = target.strip_prefix("http://") {
         (rest, 80u16)
@@ -530,7 +530,7 @@ pub(crate) fn absolute_form(target: &str) -> Option<(&str, u16)> {
 
 /// Split an authority into host and port, square brackets understood for
 /// IPv6 literals; `None` when the port is not a number. Shared with the
-/// remote-proxy entry (remote_proxy.rs).
+/// remote data-plane gateway.
 pub(crate) fn split_authority(authority: &str, default_port: u16) -> Option<(String, u16)> {
     if let Some(rest) = authority.strip_prefix('[') {
         let (host, rest) = rest.split_once(']')?;

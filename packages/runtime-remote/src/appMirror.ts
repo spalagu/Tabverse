@@ -381,6 +381,5 @@ export function mirrorSinks(): AppFrameSinks {
     onClip: (seq, text) => {
       receiveClip(seq, text);
     },
-    onProxy: () => {},
   };
 }

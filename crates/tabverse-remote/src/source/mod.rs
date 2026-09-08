@@ -63,12 +63,6 @@ pub enum InputPayload {
     },
     /// Clipboard text from the join page (Steer and above; app, v3).
     ClipPush { text: String },
-    /// An HTTP request for the remote proxy (Steer and above; app, v3).
-    ProxyReq {
-        id: u64,
-        head: String,
-        body: Option<String>,
-    },
     /// Stop the turn in progress (Steer and above; agent).
     AgentCancel,
 }

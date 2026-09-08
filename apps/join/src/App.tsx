@@ -174,23 +174,18 @@ function JoinApp() {
 
   const proxy = useMemo<ProxyClient>(
     () =>
-      createProxyClient((id, head, body) => {
-        inst.session?.sendProxyReq(BigInt(id), head, body);
-      }),
+      createProxyClient(
+        (contextId, method, url, headers) => {
+          const session = inst.session;
+          if (session === null) return Promise.reject(new Error("the session is not connected"));
+          return session.openHttpStream(contextId, method, url, headers);
+        },
+        () => useRemoteMirrorStore.getState().activeTabId ?? "remote-browser",
+      ),
     [inst]
   );
 
-  /** The app-frame sinks with the proxy owner attached: the mirror
-   * hears actions and snapshots, the clipboard channel hears clipSync,
-   * and proxyRes settles onto the client above (the no-op sink
-   * mirrorSinks ships for terminal-only joins is overridden here). */
-  const appSinks = useMemo<AppFrameSinks>(
-    () => ({
-      ...mirrorSinks(),
-      onProxy: (id, head, body) => proxy.settle(id, head, body),
-    }),
-    [proxy]
-  );
+  const appSinks = useMemo<AppFrameSinks>(() => mirrorSinks(), []);
 
   const appChannel = useMemo(
     () =>
@@ -395,12 +390,10 @@ function JoinApp() {
       // Every frame goes through the same fold the app's RemoteView uses;
       // it collects what an agent transcript needs and ignores the rest.
       // The app family first: its frames never reach the terminal/agent
-      // branches below, which never see one. The proxy client gets the
-      // first offer — the host answers a ProxyReq it could not run with
-      // an rpcResult carrying the same id, and only the ids it is
-      // waiting on are claimed; every other frame falls to the sinks.
+      // branches below, which never see one. Browser HTTP uses independent
+      // QUIC data streams and therefore never enters this control dispatcher.
       if (isAppFrame(msg)) {
-        if (!proxy.consumeRpcResult(msg) && !appChannel.consume(msg as Record<string, unknown>)) {
+        if (!appChannel.consume(msg as Record<string, unknown>)) {
           dispatchAppFrame(msg, appSinks);
         }
         return;

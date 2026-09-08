@@ -3,157 +3,91 @@ import {
   createProxyClient,
   installProxyFetchPatch,
   PROXY_PATH_PREFIX,
-  PROXY_TIMEOUT_MS,
   proxyUrlFor,
   targetFromProxyUrl,
+  type HeaderPair,
+  type HttpDataStream,
 } from "@tabverse/remote-client/proxy-fetch";
 
-/** One sent ProxyReq, as the wasm seam would carry it. */
-interface Sent {
-  id: number;
-  head: string;
-  body: string | undefined;
+interface Opened {
+  contextId: string;
+  method: string;
+  url: string;
+  headers: HeaderPair[];
+  requestChunks: Uint8Array[];
+  finished: boolean;
 }
 
-function rig() {
-  const sent: Sent[] = [];
-  const client = createProxyClient((id, head, body) =>
-    sent.push({ id, head, body })
-  );
-  return { sent, client };
+function rig(body = "hello", status = 200) {
+  const opened: Opened[] = [];
+  const encoded = new TextEncoder().encode(body);
+  const client = createProxyClient(async (contextId, method, url, headers) => {
+    const record: Opened = { contextId, method, url, headers, requestChunks: [], finished: false };
+    opened.push(record);
+    let read = false;
+    const stream: HttpDataStream = {
+      async writeRequestChunk(bytes) { record.requestChunks.push(bytes); },
+      finishRequest() { record.finished = true; },
+      async responseStart() {
+        return { type: "response", head: { status, finalUrl: url, headers: [{ name: "content-type", value: "text/plain" }] } };
+      },
+      async readResponseChunk() {
+        if (read) return new Uint8Array();
+        read = true;
+        return encoded;
+      },
+    };
+    return stream;
+  }, () => "browser-tab-7");
+  return { opened, client };
 }
 
-/** Let the request build (its body read is a real microtask chain). */
-const settleMicrotasks = async () => {
-  for (let i = 0; i < 5; i++) await Promise.resolve();
-};
-
-describe("createProxyClient round trip", () => {
-  it("a GET document exchange: absolute-form request head, Response from the answer head", async () => {
-    const { sent, client } = rig();
-    const pending = client.requestViaProxy("http://intranet.example/dir/page?q=1");
-    await settleMicrotasks();
-    expect(sent).toHaveLength(1);
-    // The head the host's proxy parses: absolute target, the authority
-    // in Host, no body on a GET.
-    expect(sent[0].head.startsWith(
-      "GET http://intranet.example/dir/page?q=1 HTTP/1.1\r\n"
-    )).toBe(true);
-    expect(sent[0].head).toContain("Host: intranet.example");
-    expect(sent[0].body).toBeUndefined();
-
-    // The frame body is base64 now (the host encodes bytes, text and
-    // binary alike); the assertion's document rides the same way.
-    client.settle(
-      sent[0].id,
-      "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n",
-      btoa("<html><body>wiki</body></html>")
-    );
-    const res = await pending;
-    expect(res.ok).toBe(true);
-    expect(res.status).toBe(200);
-    expect(res.statusText).toBe("OK");
-    expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
-    expect(await res.text()).toBe("<html><body>wiki</body></html>");
+describe("createProxyClient data streams", () => {
+  it("carries request metadata and streams raw response bytes", async () => {
+    const { opened, client } = rig("wiki");
+    const response = await client.requestViaProxy("http://intranet.example/wiki?q=1");
+    expect(opened[0]).toMatchObject({ contextId: "browser-tab-7", method: "GET", url: "http://intranet.example/wiki?q=1", finished: true });
+    expect(await response.text()).toBe("wiki");
   });
 
-  it("a POST carries its body and a byte-accurate Content-Length", async () => {
-    const { sent, client } = rig();
-    const pending = client.requestViaProxy("http://intranet.example/form", {
-      method: "POST",
-      body: "search=wär",
-      headers: { "x-joiner": "page" },
+  it("streams a UTF-8 request body without base64 or whole-body framing", async () => {
+    const { opened, client } = rig("", 204);
+    const response = await client.requestViaProxy("http://intranet.example/form", {
+      method: "POST", body: "search=wär", headers: { "x-joiner": "page" },
     });
-    await settleMicrotasks();
-    expect(sent[0].head).toContain("POST http://intranet.example/form HTTP/1.1");
-    expect(sent[0].head).toContain("x-joiner: page");
-    // "wär" is 5 bytes as UTF-8, 4 as characters; the whole body
-    // "search=wär" is 11 bytes where it is 10 characters — the wire
-    // counts bytes.
-    expect(sent[0].head).toContain("Content-Length: 11");
-    expect(sent[0].body).toBe("search=wär");
-    client.settle(sent[0].id, "HTTP/1.1 204 No Content\r\n");
-    const res = await pending;
-    expect(res.status).toBe(204);
-    // A null-body status must not explode on the Response constructor.
-    expect(await res.text()).toBe("");
+    expect(response.status).toBe(204);
+    expect(new TextDecoder().decode(opened[0].requestChunks[0])).toBe("search=wär");
+    expect(opened[0].headers).toContainEqual({ name: "x-joiner", value: "page" });
   });
 
-  it("every request takes a fresh id, and a settle for an unknown id is dropped", async () => {
-    const { sent, client } = rig();
-    const first = client.requestViaProxy("http://a/");
-    const second = client.requestViaProxy("http://b/");
-    await settleMicrotasks();
-    expect(sent[1].id).not.toBe(sent[0].id);
-
-    // An answer that correlates with nothing (already timed out, or
-    // another client's) must be silence, not a throw.
-    client.settle(sent[0].id + 5000, "HTTP/1.1 200 OK");
-    client.settle(sent[0].id, "HTTP/1.1 200 OK");
-    client.settle(sent[1].id, "HTTP/1.1 200 OK");
-    expect((await first).ok).toBe(true);
-    expect((await second).ok).toBe(true);
+  it("surfaces a bounded response-start error", async () => {
+    const client = createProxyClient(async () => ({
+      async writeRequestChunk() {}, finishRequest() {},
+      async responseStart() { return { type: "error" as const, error: { code: "denied", message: "steer access required", retryable: false } }; },
+      async readResponseChunk() { return new Uint8Array(); },
+    }));
+    await expect(client.requestViaProxy("https://refused.example/")).rejects.toThrow("steer access required");
   });
 
-  it("a malformed answer head rejects that one request, not the session", async () => {
-    const { sent, client } = rig();
-    const pending = client.requestViaProxy("http://garbled/");
-    await settleMicrotasks();
-    client.settle(sent[0].id, "not an http head at all");
-    await expect(pending).rejects.toThrow("not an HTTP head");
-  });
-});
-
-describe("createProxyClient failure paths", () => {
-  it("a request nobody answers rejects at the budget", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    try {
-      const { client } = rig();
-      const pending = client.requestViaProxy("http://slow.example/");
-      const expectation = expect(pending).rejects.toThrow(
-        `proxied fetch of slow.example timed out after ${PROXY_TIMEOUT_MS}ms`
-      );
-      await vi.advanceTimersByTimeAsync(PROXY_TIMEOUT_MS);
-      await expectation;
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("the host's error arm — an rpcResult with the same id — rejects with its words, and only claims its own ids", async () => {
-    const { sent, client } = rig();
-    const pending = client.requestViaProxy("https://refused.example/");
-    await settleMicrotasks();
-    // The host runs a refused ProxyReq as an rpcResult, not a proxyRes
-    // (app_share.rs's error arm) — the frame the page dispatch offers
-    // the client before the sinks.
-    const claimed = client.consumeRpcResult({
-      type: "rpcResult",
-      id: sent[0].id,
-      err: "the request named no forwardable host",
+  it("failAll ends in-flight work but does not poison the next connection generation", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    const client = createProxyClient(async (_context, _method, url) => {
+      calls += 1;
+      if (calls === 1) await blocked;
+      let read = false;
+      return {
+        async writeRequestChunk() {}, finishRequest() {},
+        async responseStart() { return { type: "response" as const, head: { status: 200, finalUrl: url, headers: [] } }; },
+        async readResponseChunk() { if (read) return new Uint8Array(); read = true; return new TextEncoder().encode("ok"); },
+      };
     });
-    expect(claimed).toBe(true);
-    await expect(pending).rejects.toThrow(
-      "the request named no forwardable host"
-    );
-
-    // Frames that are not this client's to claim fall through: another
-    // family's rpcResult, a proxyRes for a dead id, anything else.
-    expect(client.consumeRpcResult({ type: "rpcResult", id: 1, err: "x" })).toBe(false);
-    expect(client.consumeRpcResult({ type: "proxyRes", id: sent[0].id })).toBe(false);
-    expect(client.consumeRpcResult({ type: "actionApplied" })).toBe(false);
-  });
-
-  it("failAll rejects every waiter once, and the session's answers find silence", async () => {
-    const { sent, client } = rig();
-    const a = client.requestViaProxy("http://a/");
-    const b = client.requestViaProxy("http://b/");
-    await settleMicrotasks();
-    client.failAll("the session ended");
-    await expect(a).rejects.toThrow("the session ended");
-    await expect(b).rejects.toThrow("the session ended");
-    // A late frame for a failed waiter must not throw into the void.
-    client.settle(sent[0].id, "HTTP/1.1 200 OK");
+    const oldRequest = client.requestViaProxy("http://old/");
+    client.failAll("connection lost");
+    await expect(oldRequest).rejects.toThrow("connection lost");
+    release();
+    expect(await (await client.requestViaProxy("http://new/")).text()).toBe("ok");
   });
 });
 

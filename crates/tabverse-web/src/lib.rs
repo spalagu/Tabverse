@@ -8,6 +8,10 @@
 
 use iroh::{endpoint::presets, Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
+use tabverse_network::{
+    read_http_response_start, write_data_stream_preface, write_http_request_head,
+    DataStreamPreface, HeaderPair, HttpRequestHead,
+};
 use tabverse_proto::{announce_proto, RemoteClientMsg, RemoteHostMsg, REMOTE_ALPN};
 use wasm_bindgen::prelude::*;
 
@@ -42,7 +46,66 @@ const MAX_FRAME: u32 = 16 * 1024 * 1024;
 #[wasm_bindgen]
 pub struct WebJoin {
     endpoint: Endpoint,
+    connection: iroh::endpoint::Connection,
     input_tx: async_channel::Sender<RemoteClientMsg>,
+}
+
+/// One streamed HTTP exchange beside the semantic control stream.
+#[wasm_bindgen]
+pub struct WebHttpStream {
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
+    request_finished: bool,
+}
+
+#[wasm_bindgen]
+impl WebHttpStream {
+    /// Send one raw request-body chunk. No JSON/base64 envelope is involved.
+    #[wasm_bindgen(js_name = writeRequestChunk)]
+    pub async fn write_request_chunk(&mut self, bytes: Vec<u8>) -> Result<(), JsValue> {
+        if self.request_finished {
+            return Err(JsValue::from_str("the HTTP request stream is already finished"));
+        }
+        self.send
+            .write_all(&bytes)
+            .await
+            .map_err(|error| JsValue::from_str(&format!("write request body: {error}")))
+    }
+
+    /// Half-close the request while keeping the streamed response alive.
+    #[wasm_bindgen(js_name = finishRequest)]
+    pub fn finish_request(&mut self) -> Result<(), JsValue> {
+        if !self.request_finished {
+            self.send
+                .finish()
+                .map_err(|error| JsValue::from_str(&format!("finish request body: {error}")))?;
+            self.request_finished = true;
+        }
+        Ok(())
+    }
+
+    /// Read the bounded response metadata frame.
+    #[wasm_bindgen(js_name = responseStart)]
+    pub async fn response_start(&mut self) -> Result<JsValue, JsValue> {
+        let start = read_http_response_start(&mut self.recv)
+            .await
+            .map_err(|error| JsValue::from_str(&format!("read response head: {error:#}")))?;
+        serde_wasm_bindgen::to_value(&start)
+            .map_err(|error| JsValue::from_str(&format!("encode response head: {error}")))
+    }
+
+    /// Read at most `limit` raw response bytes. An empty array is EOF.
+    #[wasm_bindgen(js_name = readResponseChunk)]
+    pub async fn read_response_chunk(&mut self, limit: u32) -> Result<Vec<u8>, JsValue> {
+        let mut bytes = vec![0; limit.clamp(1, 1024 * 1024) as usize];
+        let read = self
+            .recv
+            .read(&mut bytes)
+            .await
+            .map_err(|error| JsValue::from_str(&format!("read response body: {error}")))?;
+        bytes.truncate(read.unwrap_or(0));
+        Ok(bytes)
+    }
 }
 
 #[wasm_bindgen]
@@ -121,13 +184,41 @@ impl WebJoin {
         let _ = self.input_tx.try_send(RemoteClientMsg::ClipPush { text });
     }
 
-    /// One HTTP request for the remote proxy (app share). Steer-gated; the
-    /// answer is a proxyRes with the same id.
-    #[wasm_bindgen(js_name = sendProxyReq)]
-    pub fn send_proxy_req(&self, id: u64, head: String, body: Option<String>) {
-        let _ = self
-            .input_tx
-            .try_send(RemoteClientMsg::ProxyReq { id, head, body });
+    /// Open one Host-network HTTP stream on this authenticated connection.
+    /// The Host rechecks current viewer access before starting network I/O.
+    #[wasm_bindgen(js_name = openHttpStream)]
+    pub async fn open_http_stream(
+        &self,
+        context_id: String,
+        method: String,
+        url: String,
+        headers: JsValue,
+    ) -> Result<WebHttpStream, JsValue> {
+        let headers: Vec<HeaderPair> = serde_wasm_bindgen::from_value(headers)
+            .map_err(|error| JsValue::from_str(&format!("invalid HTTP headers: {error}")))?;
+        let (mut send, recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|error| JsValue::from_str(&format!("open HTTP data stream: {error}")))?;
+        write_data_stream_preface(&mut send, &DataStreamPreface::http(context_id))
+            .await
+            .map_err(|error| JsValue::from_str(&format!("write data-stream preface: {error:#}")))?;
+        write_http_request_head(
+            &mut send,
+            &HttpRequestHead {
+                method,
+                url,
+                headers,
+            },
+        )
+        .await
+        .map_err(|error| JsValue::from_str(&format!("write HTTP request head: {error:#}")))?;
+        Ok(WebHttpStream {
+            send,
+            recv,
+            request_finished: false,
+        })
     }
 
     /// Close the connection. The close handshake is best-effort: the page may
@@ -229,6 +320,7 @@ pub async fn join_share(
 
     Ok(WebJoin {
         endpoint: ep,
+        connection: conn,
         input_tx,
     })
 }

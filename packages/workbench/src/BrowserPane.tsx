@@ -69,7 +69,7 @@ export function BrowserPane({
     let alive = true;
     setState({ kind: "loading" });
     // http AND https both ride the host's proxy now: the host terminates
-    // TLS itself (remote_proxy.rs's reqwest half), so an https target is
+    // TLS itself (the host gateway's reqwest half), so an https target is
     // fetched on the host's network like any other — its resolver, its
     // certificates, its egress.
     fetchViaHost(url)

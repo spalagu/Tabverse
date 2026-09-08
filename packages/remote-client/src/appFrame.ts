@@ -1,7 +1,7 @@
 /**
  * The v3 frame plumbing an app-level join speaks: multiplexed RPC over the
  * iroh stream, plus the incoming-frame dispatch the mirrored store and the
- * clipboard/proxy owners hang off.
+ * clipboard owner hangs off.
  *
  * SEPARATION. This module knows frames and ids; it knows nothing about React,
  * the store, or what any command does. The wasm seam (`WasmSession`) gained
@@ -16,8 +16,7 @@ export type AppHostFrame =
   | { type: "rpcResult"; id: number; ok?: unknown; err?: string }
   | { type: "actionApplied"; name: string; args: unknown }
   | { type: "appSnapshot"; state: unknown }
-  | { type: "clipSync"; seq: number; text: string }
-  | { type: "proxyRes"; id: number; head: string; body?: string };
+  | { type: "clipSync"; seq: number; text: string };
 
 /** The frame families this dispatcher can be handed wholesale; non-v3
  * frames pass through untouched (the caller's v1/v2 handling stays). */
@@ -26,8 +25,7 @@ export function isAppFrame(frame: { type: string }): boolean {
     frame.type === "rpcResult" ||
     frame.type === "actionApplied" ||
     frame.type === "appSnapshot" ||
-    frame.type === "clipSync" ||
-    frame.type === "proxyRes"
+    frame.type === "clipSync"
   );
 }
 
@@ -35,7 +33,6 @@ export interface AppFrameSinks {
   onAction(name: string, args: unknown): void;
   onSnapshot(state: unknown): void;
   onClip(seq: number, text: string): void;
-  onProxy(id: number, head: string, body?: string): void;
 }
 
 /** Milliseconds before an rpc() rejects: a host that never answers must
@@ -114,8 +111,8 @@ export function createAppChannel(sendRpc: (id: number, cmd: string, args: unknow
 
 /**
  * Split one incoming frame into the sinks. The store mirror hears actions
- * and snapshots; the clipboard owner hears clipSync; the proxy owner hears
- * proxyRes. Frames neither sink claims are ignored here — the terminal
+ * and snapshots; the clipboard owner hears clipSync. Frames no sink claims
+ * are ignored here — the terminal
  * families (output/snapshot/...) belong to the tab-level renderers the page
  * already runs.
  */
@@ -131,9 +128,6 @@ export function dispatchAppFrame(frame: unknown, sinks: AppFrameSinks): boolean 
       return true;
     case "clipSync":
       sinks.onClip(Number(f.seq), String(f.text));
-      return true;
-    case "proxyRes":
-      sinks.onProxy(Number(f.id), String(f.head), f.body === undefined ? undefined : String(f.body));
       return true;
     default:
       return false;

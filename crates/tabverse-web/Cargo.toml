@@ -17,6 +17,7 @@ crate-type = ["cdylib", "rlib"]
 # default features (metrics, portmapper, apple datapath) do not build for wasm.
 iroh = { version = "1", default-features = false, features = ["tls-ring"] }
 tabverse-proto = { path = "../tabverse-proto" }
+tabverse-network = { path = "../tabverse-network" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
