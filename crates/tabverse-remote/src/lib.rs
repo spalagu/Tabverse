@@ -32,11 +32,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tabverse_network::{HostNetworkGateway, HttpRequestHead};
 use tabverse_proto::{
     announce_proto, negotiate, Access, RemoteClientMsg, RemoteHostMsg, SharedTabType, REMOTE_ALPN,
     REMOTE_PROTO_V1, REMOTE_PROTO_VERSION,
 };
-use tabverse_network::{HostNetworkGateway, HttpRequestHead};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
@@ -2791,7 +2791,9 @@ mod tests {
                 }
                 origin_requests.fetch_add(1, AtomicOrdering::SeqCst);
                 socket
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
                     .await
                     .unwrap();
                 socket.shutdown().await.unwrap();
@@ -2863,7 +2865,10 @@ mod tests {
         })
         .await
         .context("denied stream was not closed")?;
-        assert!(denied.is_err(), "a View viewer's next stream must be refused");
+        assert!(
+            denied.is_err(),
+            "a View viewer's next stream must be refused"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(
             requests.load(AtomicOrdering::SeqCst),
