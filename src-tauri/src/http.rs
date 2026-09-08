@@ -205,6 +205,27 @@ pub fn build(spec: Spec) -> reqwest::Result<reqwest::Client> {
     build_with(spec, policy())
 }
 
+/// Build the Host-side client delegated to Remote Browser contexts.
+///
+/// A Browser navigation has no whole-exchange deadline: large resources and
+/// long-lived responses are streamed by the data plane. Redirects are exposed
+/// to the remote renderer so its logical URL and history stay authoritative.
+pub fn build_remote_browser() -> reqwest::Result<reqwest::Client> {
+    let builder = base(Spec {
+        timeout: None,
+        connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
+        user_agent: None,
+    })
+    .redirect(reqwest::redirect::Policy::none());
+    match policy() {
+        DnsPolicy::System => builder.build(),
+        DnsPolicy::Doh(url) => {
+            let resolver = DohResolver::new(url)?;
+            builder.dns_resolver(Arc::new(resolver)).build()
+        }
+    }
+}
+
 /// Build a client under a named policy. The seam the DNS tests drive, and the
 /// implementation [`build`] is one line of: the policy is an argument here so
 /// that "which resolver did this client get" is answerable without a file.

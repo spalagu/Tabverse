@@ -4058,6 +4058,9 @@ pub fn run() {
         std::process::exit(code);
     }
     http::ensure_crypto_provider();
+    let remote_network = tabverse_network::HostNetworkGateway::new(
+        http::build_remote_browser().expect("build Remote Browser Host HTTP client"),
+    );
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -4134,7 +4137,7 @@ pub fn run() {
         })
         .manage(AppState {
             helper: terminal_helper::TerminalHelper::new(),
-            hub: RemoteHub::new(),
+            hub: RemoteHub::with_network_gateway(remote_network),
             bridges: Arc::new(Mutex::new(HashMap::new())),
             helper_backlog: Arc::new(Mutex::new(HashMap::new())),
             helper_generations: Arc::new(Mutex::new(HashMap::new())),

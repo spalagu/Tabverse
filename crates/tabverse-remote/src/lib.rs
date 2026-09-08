@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tabverse_network::{HostNetworkGateway, HttpRequestHead};
 use tabverse_proto::{
     announce_proto, negotiate, Access, RemoteClientMsg, RemoteHostMsg, SharedTabType, REMOTE_ALPN,
     REMOTE_PROTO_V1, REMOTE_PROTO_VERSION,
@@ -552,16 +553,37 @@ pub struct ShareOpts {
     pub access: Access,
 }
 
-#[derive(Default)]
 pub struct RemoteHub {
     endpoint: tokio::sync::Mutex<Option<Endpoint>>,
     shares: Mutex<HashMap<String, Arc<Share>>>,
     next_viewer: AtomicU64,
+    network_gateway: Option<HostNetworkGateway>,
+}
+
+impl Default for RemoteHub {
+    fn default() -> Self {
+        Self {
+            endpoint: tokio::sync::Mutex::new(None),
+            shares: Mutex::new(HashMap::new()),
+            next_viewer: AtomicU64::new(0),
+            network_gateway: None,
+        }
+    }
 }
 
 impl RemoteHub {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Build a Host hub with the concrete HTTP capability supplied by the
+    /// outer adapter. The core never constructs its own client or decides
+    /// Host DNS, proxy, TLS, redirect, or timeout policy.
+    pub fn with_network_gateway(network_gateway: HostNetworkGateway) -> Arc<Self> {
+        Arc::new(Self {
+            network_gateway: Some(network_gateway),
+            ..Self::default()
+        })
     }
 
     pub fn share(&self, id: &str) -> Option<Arc<Share>> {
@@ -736,6 +758,35 @@ impl RemoteHub {
         // viewer's sender disappears from the share (kick, stall drop, share
         // stop) with every queued frame — End included — flushed and acked.
         let mut writer = tokio::spawn(write_loop(send, rx));
+
+        // Additional streams are a capability of this already-authenticated
+        // connection. The preface is read first, then the viewer's live
+        // Host-side access is re-read for every stream before any network I/O.
+        // `context_id` remains routing state and is never consulted as proof.
+        let gateway = self.network_gateway.clone();
+        let data_fut = async {
+            let Some(gateway) = gateway else {
+                return std::future::pending::<Result<()>>().await;
+            };
+            loop {
+                let incoming = bridge::data_stream::accept_data_stream(&conn).await?;
+                let Some(access) = share.viewer_access(viewer_id) else {
+                    continue;
+                };
+                if share.tab_type != SharedTabType::App || !access.may_steer() {
+                    // Dropping the stream refuses it without touching the Host
+                    // network. A later stream is checked again, so a live
+                    // upgrade or downgrade takes effect immediately.
+                    continue;
+                }
+                let gateway = gateway.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = incoming.serve(gateway).await {
+                        eprintln!("[remote] data stream failed: {error:#}");
+                    }
+                });
+            }
+        };
 
         // Reader: viewer input. Torn down either by the viewer disconnecting
         // (read error) or by the host removing the viewer (writer completes).
@@ -980,6 +1031,7 @@ impl RemoteHub {
             };
             tokio::select! {
                 r = read_fut => r,
+                r = data_fut => r,
                 _ = &mut writer => Ok(()),
             }
         };
@@ -1149,6 +1201,7 @@ async fn refuse(send: iroh::endpoint::SendStream, conn: &iroh::endpoint::Connect
 pub struct JoinHandle {
     tx: mpsc::UnboundedSender<RemoteClientMsg>,
     endpoint: Endpoint,
+    connection: iroh::endpoint::Connection,
 }
 
 impl JoinHandle {
@@ -1171,6 +1224,16 @@ impl JoinHandle {
     /// one by accident; the caller says what it means.
     pub fn send(&self, msg: RemoteClientMsg) {
         let _ = self.tx.send(msg);
+    }
+
+    /// Open one HTTP data stream beside this viewer's authenticated control
+    /// stream. The Host still authorizes the new stream against current access.
+    pub async fn open_http_stream(
+        &self,
+        context_id: &str,
+        head: &HttpRequestHead,
+    ) -> Result<bridge::data_stream::RemoteHttpStream> {
+        bridge::data_stream::RemoteHttpStream::open(&self.connection, context_id, head).await
     }
 
     pub async fn leave(&self) {
@@ -1266,7 +1329,11 @@ pub async fn join_as(
         }
     });
 
-    Ok(JoinHandle { tx, endpoint: ep })
+    Ok(JoinHandle {
+        tx,
+        endpoint: ep,
+        connection: conn,
+    })
 }
 
 // ------------------------------------------------------------------ tests --
@@ -2676,6 +2743,146 @@ mod tests {
             saw.unwrap_or(false),
             "an app joiner must receive the app welcome and a non-empty snapshot"
         );
+        Ok(())
+    }
+
+    /// Data streams inherit authentication from the control connection, but
+    /// authorization is deliberately live and per stream: a downgrade must
+    /// stop the next request before the Host network is touched, and a later
+    /// upgrade must admit a new stream on that same connection.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn data_streams_recheck_live_access_before_host_network_io() -> Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use tokio::net::TcpListener;
+
+        struct AppSource;
+        impl ShareSource for AppSource {
+            fn kind(&self) -> SharedTabType {
+                SharedTabType::App
+            }
+            fn grid(&self) -> Option<Viewport> {
+                None
+            }
+            fn inject_input(
+                &self,
+                _viewer: ViewerId,
+                _access: Access,
+                _payload: InputPayload,
+            ) -> Result<InputOutcome> {
+                Ok(InputOutcome::Applied)
+            }
+            fn bind(&self, _binding: ShareBinding) {}
+            fn unbind(&self) {}
+        }
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let origin_requests = requests.clone();
+        let origin = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    socket.read_exact(&mut byte).await.unwrap();
+                    request.push(byte[0]);
+                }
+                origin_requests.fetch_add(1, AtomicOrdering::SeqCst);
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await
+                    .unwrap();
+                socket.shutdown().await.unwrap();
+            }
+        });
+
+        let gateway = HostNetworkGateway::new(Default::default());
+        let hub = RemoteHub::with_network_gateway(gateway);
+        let viewers: Arc<StdMutex<Vec<ViewerInfo>>> = Arc::new(StdMutex::new(Vec::new()));
+        let presence = {
+            let viewers = viewers.clone();
+            Arc::new(move |current: &[ViewerInfo]| {
+                *viewers.lock().unwrap() = current.to_vec();
+            })
+        };
+        let (share, ticket) = hub
+            .share_start(ShareOpts {
+                title: "Tabverse".into(),
+                source: Arc::new(AppSource),
+                on_presence: presence,
+                ttl: None,
+                access: Access::Steer,
+            })
+            .await?;
+        let handle = join(&ticket, "phone", Arc::new(|_| {})).await?;
+        wait_until("app viewer authenticated", || {
+            !viewers.lock().unwrap().is_empty()
+        })
+        .await;
+        let viewer_id = viewers.lock().unwrap()[0].id;
+
+        async fn fetch(handle: &JoinHandle, port: u16, path: &str) -> Result<Vec<u8>> {
+            let mut stream = handle
+                .open_http_stream(
+                    "remote-browser-context-1",
+                    &HttpRequestHead {
+                        method: "GET".into(),
+                        url: format!("http://localhost:{port}/{path}"),
+                        headers: Vec::new(),
+                    },
+                )
+                .await?;
+            stream.finish_request()?;
+            let start = stream.response_start().await?;
+            let tabverse_network::HttpResponseStart::Response { head } = start else {
+                bail!("HostNetworkGateway returned {start:?}");
+            };
+            assert_eq!(head.status, 200);
+            stream.read_response_to_end(3).await
+        }
+
+        assert_eq!(fetch(&handle, port, "before").await?, b"ok");
+        assert_eq!(requests.load(AtomicOrdering::SeqCst), 1);
+
+        hub.set_viewer_access(&share.id, viewer_id, Access::View)?;
+        let denied = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut stream = handle
+                .open_http_stream(
+                    "caller-controlled-context",
+                    &HttpRequestHead {
+                        method: "GET".into(),
+                        url: format!("http://localhost:{port}/denied"),
+                        headers: Vec::new(),
+                    },
+                )
+                .await?;
+            stream.finish_request()?;
+            stream.response_start().await
+        })
+        .await
+        .context("denied stream was not closed")?;
+        assert!(
+            denied.is_err(),
+            "a View viewer's next stream must be refused"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            requests.load(AtomicOrdering::SeqCst),
+            1,
+            "a denied stream must not touch the Host network"
+        );
+
+        hub.set_viewer_access(&share.id, viewer_id, Access::Steer)?;
+        assert_eq!(fetch(&handle, port, "after").await?, b"ok");
+        assert_eq!(requests.load(AtomicOrdering::SeqCst), 2);
+
+        origin.await?;
+        handle.leave().await;
+        hub.share_stop(&share.id);
         Ok(())
     }
 }

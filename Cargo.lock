@@ -5707,6 +5707,7 @@ dependencies = [
  "tabverse-agent",
  "tabverse-agent-tools",
  "tabverse-fs",
+ "tabverse-network",
  "tabverse-proto",
  "tabverse-remote",
  "tabverse-term",
