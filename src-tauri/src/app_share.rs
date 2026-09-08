@@ -839,7 +839,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(*clips.lock().unwrap(), vec!["hi".to_string()]);
-
     }
 
     /// The seam `set_dispatch_channel` installs: a viewer's action must

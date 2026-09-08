@@ -64,7 +64,9 @@ impl WebHttpStream {
     #[wasm_bindgen(js_name = writeRequestChunk)]
     pub async fn write_request_chunk(&mut self, bytes: Vec<u8>) -> Result<(), JsValue> {
         if self.request_finished {
-            return Err(JsValue::from_str("the HTTP request stream is already finished"));
+            return Err(JsValue::from_str(
+                "the HTTP request stream is already finished",
+            ));
         }
         self.send
             .write_all(&bytes)
