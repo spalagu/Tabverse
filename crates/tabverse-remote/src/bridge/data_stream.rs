@@ -129,7 +129,7 @@ impl RemoteHttpStream {
 mod tests {
     use super::*;
     use iroh::Endpoint;
-    use std::time::Duration;
+    use std::{net::Ipv4Addr, time::Duration};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -137,120 +137,141 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn control_and_large_http_data_streams_share_one_iroh_connection() -> Result<()> {
-        const BODY_LEN: usize = 1024 * 1024 + 196_608;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            const BODY_LEN: usize = 1024 * 1024 + 196_608;
 
-        // This standalone crate does not run the Tauri composition root. Match
-        // the Host HTTP factory's process-wide choice before reqwest builds a
-        // client; an Err means another test installed the same provider first.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+            // This standalone crate does not run the Tauri composition root. Match
+            // the Host HTTP factory's process-wide choice before reqwest builds a
+            // client; an Err means another test installed the same provider first.
+            let _ = rustls::crypto::ring::default_provider().install_default();
 
-        // The origin is reachable only from the Host side of this test. Using
-        // `localhost` below means resolution happens inside HostNetworkGateway.
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let port = listener.local_addr()?.port();
-        let origin = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut byte = [0u8; 1];
-            while !request.ends_with(b"\r\n\r\n") {
-                socket.read_exact(&mut byte).await.unwrap();
-                request.push(byte[0]);
-            }
-            assert!(String::from_utf8_lossy(&request).starts_with("GET /large HTTP/1.1"));
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {BODY_LEN}\r\nConnection: close\r\n\r\n"
-            );
-            socket.write_all(head.as_bytes()).await.unwrap();
-            let chunk = vec![0x6b; 32 * 1024];
-            let mut left = BODY_LEN;
-            while left > 0 {
-                let n = left.min(chunk.len());
-                socket.write_all(&chunk[..n]).await.unwrap();
-                left -= n;
-            }
-            socket.shutdown().await.unwrap();
-        });
+            // The origin is reachable only from the Host side of this test. Using
+            // `localhost` below means resolution happens inside HostNetworkGateway.
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let port = listener.local_addr()?.port();
+            let origin = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    socket.read_exact(&mut byte).await.unwrap();
+                    request.push(byte[0]);
+                }
+                assert!(String::from_utf8_lossy(&request).starts_with("GET /large HTTP/1.1"));
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {BODY_LEN}\r\nConnection: close\r\n\r\n"
+                );
+                socket.write_all(head.as_bytes()).await.unwrap();
+                let chunk = vec![0x6b; 32 * 1024];
+                let mut left = BODY_LEN;
+                while left > 0 {
+                    let n = left.min(chunk.len());
+                    socket.write_all(&chunk[..n]).await.unwrap();
+                    left -= n;
+                }
+                socket.shutdown().await.unwrap();
+            });
 
-        let host_ep = Endpoint::builder(iroh::endpoint::presets::N0)
-            .alpns(vec![TEST_ALPN.to_vec()])
-            .bind()
+            // This test proves QUIC stream multiplexing, not relay/discovery. Keep
+            // both endpoints on loopback so CI never depends on n0 DNS publishing,
+            // public relays, interface discovery, or their shutdown timing.
+            let host_ep = Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .alpns(vec![TEST_ALPN.to_vec()])
+                .clear_ip_transports()
+                .bind_addr((Ipv4Addr::LOCALHOST, 0))?
+                .bind()
+                .await?;
+            let client_ep = Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .clear_ip_transports()
+                .bind_addr((Ipv4Addr::LOCALHOST, 0))?
+                .bind()
+                .await?;
+
+            let host_addr = host_ep.addr();
+            let host_ep_for_accept = host_ep.clone();
+            let host_accept = tokio::spawn(async move {
+                let incoming = host_ep_for_accept
+                    .accept()
+                    .await
+                    .expect("incoming connection");
+                incoming.await.expect("host handshake")
+            });
+            let client_conn = tokio::time::timeout(
+                Duration::from_secs(20),
+                client_ep.connect(host_addr, TEST_ALPN),
+            )
+            .await
+            .context("client connect timeout")??;
+            let host_conn = host_accept.await?;
+
+            // Stream #1 represents the existing long-lived semantic control
+            // stream. Extra streams become eligible for authorization only after
+            // the caller has accepted and authenticated this one.
+            let (mut client_control_send, client_control_recv) = client_conn.open_bi().await?;
+            let (mut host_control_send, mut host_control_recv) = host_conn.accept_bi().await?;
+            client_control_send.write_all(b"control-alive").await?;
+            let mut control_marker = [0u8; 13];
+            host_control_recv.read_exact(&mut control_marker).await?;
+            assert_eq!(&control_marker, b"control-alive");
+
+            let gateway = HostNetworkGateway::new(Default::default());
+            let host_data = tokio::spawn(async move {
+                // The lifecycle gets the preface before the gateway touches the
+                // network. Production code checks the viewer's current access at
+                // exactly this point, on every accepted stream.
+                let incoming = accept_data_stream(&host_conn).await?;
+                assert_eq!(incoming.preface().kind, DataStreamKind::Http);
+                assert_eq!(incoming.preface().context_id, "remote-browser-context-1");
+                incoming.serve(gateway).await
+            });
+
+            let mut http = RemoteHttpStream::open(
+                &client_conn,
+                "remote-browser-context-1",
+                &HttpRequestHead {
+                    method: "GET".into(),
+                    url: format!("http://localhost:{port}/large"),
+                    headers: Vec::new(),
+                },
+            )
             .await?;
-        let client_ep = Endpoint::builder(iroh::endpoint::presets::N0)
-            .bind()
-            .await?;
+            http.finish_request()?;
 
-        let host_addr = host_ep.addr();
-        let host_ep_for_accept = host_ep.clone();
-        let host_accept = tokio::spawn(async move {
-            let incoming = host_ep_for_accept
-                .accept()
-                .await
-                .expect("incoming connection");
-            incoming.await.expect("host handshake")
-        });
-        let client_conn = tokio::time::timeout(
-            Duration::from_secs(20),
-            client_ep.connect(host_addr, TEST_ALPN),
-        )
+            let start = http.response_start().await?;
+            let HttpResponseStart::Response { head } = start else {
+                bail!("HostNetworkGateway returned {start:?}");
+            };
+            assert_eq!(head.status, 200);
+
+            let body = http.read_response_to_end(BODY_LEN + 1).await?;
+            assert_eq!(body.len(), BODY_LEN);
+            assert!(body.iter().all(|byte| *byte == 0x6b));
+
+            // The control stream remains a distinct live stream while the >1 MiB
+            // data response travels on its own QUIC stream.
+            client_control_send.write_all(b"!").await?;
+            let mut marker = [0u8; 1];
+            host_control_recv.read_exact(&mut marker).await?;
+            assert_eq!(&marker, b"!");
+
+            host_data.await??;
+            origin.await?;
+
+            // End the proof stream explicitly before closing the connection. This
+            // keeps endpoint teardown independent from live stream handles.
+            client_control_send.finish()?;
+            host_control_send.finish()?;
+            drop(client_control_send);
+            drop(client_control_recv);
+            drop(host_control_send);
+            drop(host_control_recv);
+
+            client_conn.close(0u32.into(), b"test complete");
+            client_ep.close().await;
+            host_ep.close().await;
+            Ok::<(), anyhow::Error>(())
+        })
         .await
-        .context("client connect timeout")??;
-        let host_conn = host_accept.await?;
-
-        // Stream #1 represents the existing long-lived semantic control
-        // stream. Extra streams become eligible for authorization only after
-        // the caller has accepted and authenticated this one.
-        let (mut client_control_send, _client_control_recv) = client_conn.open_bi().await?;
-        let (_host_control_send, mut host_control_recv) = host_conn.accept_bi().await?;
-        client_control_send.write_all(b"control-alive").await?;
-        let mut control_marker = [0u8; 13];
-        host_control_recv.read_exact(&mut control_marker).await?;
-        assert_eq!(&control_marker, b"control-alive");
-
-        let gateway = HostNetworkGateway::new(Default::default());
-        let host_data = tokio::spawn(async move {
-            // The lifecycle gets the preface before the gateway touches the
-            // network. Production code checks the viewer's current access at
-            // exactly this point, on every accepted stream.
-            let incoming = accept_data_stream(&host_conn).await?;
-            assert_eq!(incoming.preface().kind, DataStreamKind::Http);
-            assert_eq!(incoming.preface().context_id, "remote-browser-context-1");
-            incoming.serve(gateway).await
-        });
-
-        let mut http = RemoteHttpStream::open(
-            &client_conn,
-            "remote-browser-context-1",
-            &HttpRequestHead {
-                method: "GET".into(),
-                url: format!("http://localhost:{port}/large"),
-                headers: Vec::new(),
-            },
-        )
-        .await?;
-        http.finish_request()?;
-
-        let start = http.response_start().await?;
-        let HttpResponseStart::Response { head } = start else {
-            bail!("HostNetworkGateway returned {start:?}");
-        };
-        assert_eq!(head.status, 200);
-
-        let body = http.read_response_to_end(BODY_LEN + 1).await?;
-        assert_eq!(body.len(), BODY_LEN);
-        assert!(body.iter().all(|byte| *byte == 0x6b));
-
-        // The control stream remains a distinct live stream while the >1 MiB
-        // data response travels on its own QUIC stream.
-        client_control_send.write_all(b"!").await?;
-        let mut marker = [0u8; 1];
-        host_control_recv.read_exact(&mut marker).await?;
-        assert_eq!(&marker, b"!");
-
-        host_data.await??;
-        origin.await?;
-        client_conn.close(0u32.into(), b"test complete");
-        client_ep.close().await;
-        host_ep.close().await;
-        Ok(())
+        .context("iroh control/data roundtrip exceeded 30 seconds")?
     }
 }
