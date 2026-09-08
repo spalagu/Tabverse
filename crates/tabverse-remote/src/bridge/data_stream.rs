@@ -181,13 +181,11 @@ mod tests {
                 .bind_addr((Ipv4Addr::LOCALHOST, 0))?
                 .bind()
                 .await?;
-            eprintln!("iroh-stage: host endpoint bound");
             let client_ep = Endpoint::builder(iroh::endpoint::presets::Minimal)
                 .clear_ip_transports()
                 .bind_addr((Ipv4Addr::LOCALHOST, 0))?
                 .bind()
                 .await?;
-            eprintln!("iroh-stage: client endpoint bound");
 
             let host_addr = host_ep.addr();
             let host_ep_for_accept = host_ep.clone();
@@ -205,18 +203,19 @@ mod tests {
             .await
             .context("client connect timeout")??;
             let host_conn = host_accept.await?;
-            eprintln!("iroh-stage: connection established");
 
             // Stream #1 represents the existing long-lived semantic control
             // stream. Extra streams become eligible for authorization only after
             // the caller has accepted and authenticated this one.
             let (mut client_control_send, client_control_recv) = client_conn.open_bi().await?;
-            let (mut host_control_send, mut host_control_recv) = host_conn.accept_bi().await?;
+            // QUIC streams become visible to the peer only after their first
+            // bytes are sent. Write before accept_bi() to avoid both sides
+            // waiting for the other to make the control stream observable.
             client_control_send.write_all(b"control-alive").await?;
+            let (mut host_control_send, mut host_control_recv) = host_conn.accept_bi().await?;
             let mut control_marker = [0u8; 13];
             host_control_recv.read_exact(&mut control_marker).await?;
             assert_eq!(&control_marker, b"control-alive");
-            eprintln!("iroh-stage: first control marker received");
 
             let gateway = HostNetworkGateway::new(Default::default());
             let host_data = tokio::spawn(async move {
@@ -246,12 +245,10 @@ mod tests {
                 bail!("HostNetworkGateway returned {start:?}");
             };
             assert_eq!(head.status, 200);
-            eprintln!("iroh-stage: HTTP response head received");
 
             let body = http.read_response_to_end(BODY_LEN + 1).await?;
             assert_eq!(body.len(), BODY_LEN);
             assert!(body.iter().all(|byte| *byte == 0x6b));
-            eprintln!("iroh-stage: HTTP response body received");
 
             // The control stream remains a distinct live stream while the >1 MiB
             // data response travels on its own QUIC stream.
@@ -259,12 +256,9 @@ mod tests {
             let mut marker = [0u8; 1];
             host_control_recv.read_exact(&mut marker).await?;
             assert_eq!(&marker, b"!");
-            eprintln!("iroh-stage: second control marker received");
 
             host_data.await??;
-            eprintln!("iroh-stage: host data task joined");
             origin.await?;
-            eprintln!("iroh-stage: origin task joined");
 
             // End the proof stream explicitly before closing the connection. This
             // keeps endpoint teardown independent from live stream handles.
@@ -276,11 +270,8 @@ mod tests {
             drop(host_control_recv);
 
             client_conn.close(0u32.into(), b"test complete");
-            eprintln!("iroh-stage: connection close requested");
             client_ep.close().await;
-            eprintln!("iroh-stage: client endpoint closed");
             host_ep.close().await;
-            eprintln!("iroh-stage: host endpoint closed");
             Ok::<(), anyhow::Error>(())
         })
         .await
