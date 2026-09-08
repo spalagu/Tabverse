@@ -67,7 +67,6 @@ mod migrate;
 pub mod page_proxy;
 mod passwords;
 mod profiles;
-mod remote_proxy;
 mod templates;
 mod terminal_helper;
 mod transfer;
@@ -4161,7 +4160,6 @@ pub fn run() {
                 // general pasteboard — the same board the watcher walks,
                 // so every other viewer hears it in the same stroke.
                 Arc::new(|text: &str| clipboard_watch::put_string(text)),
-                Arc::new(remote_proxy::run),
             ),
         })
         // Holds whatever the system asked us to open before the interface

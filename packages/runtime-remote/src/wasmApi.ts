@@ -31,7 +31,22 @@ export interface WasmSession {
    * the watcher then echoes to every viewer. */
   sendClipPush(text: string): void;
   sendRpc(id: bigint, cmd: string, args: unknown): void;
-  sendProxyReq(id: bigint, head: string, body?: string): void;
+  openHttpStream(
+    contextId: string,
+    method: string,
+    url: string,
+    headers: Array<{ name: string; value: string }>
+  ): Promise<WasmHttpStream>;
+}
+
+export interface WasmHttpStream {
+  writeRequestChunk(bytes: Uint8Array): Promise<void>;
+  finishRequest(): void;
+  responseStart(): Promise<
+    | { type: "response"; head: { status: number; finalUrl: string; headers: Array<{ name: string; value: string }> } }
+    | { type: "error"; error: { code: string; message: string; retryable: boolean } }
+  >;
+  readResponseChunk(limit: number): Promise<Uint8Array>;
 }
 
 export interface WasmApi {

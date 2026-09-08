@@ -316,7 +316,6 @@ impl Share {
                 | RemoteHostMsg::ActionApplied { .. }
                 | RemoteHostMsg::AppSnapshot { .. }
                 | RemoteHostMsg::ClipSync { .. }
-                | RemoteHostMsg::ProxyRes { .. }
         )
     }
 
@@ -376,11 +375,6 @@ impl Share {
         err: Option<String>,
     ) {
         self.broadcast(RemoteHostMsg::RpcResult { id, ok, err });
-    }
-
-    /// Remote-proxy response head and body (v3).
-    pub fn broadcast_proxy_res(&self, id: u64, head: String, body: Option<String>) {
-        self.broadcast(RemoteHostMsg::ProxyRes { id, head, body });
     }
 
     /// Route one agent session event to every viewer.
@@ -1006,26 +1000,6 @@ impl RemoteHub {
                                 );
                             }
                         }
-                        RemoteClientMsg::ProxyReq { id, head, body } => {
-                            if share.tab_type != SharedTabType::App {
-                                continue;
-                            }
-                            let Some(access) = share.viewer_access(viewer_id) else {
-                                continue;
-                            };
-                            if !access.may_steer() {
-                                continue;
-                            }
-                            if let Err(e) = share.source.inject_input(
-                                viewer_id,
-                                access,
-                                InputPayload::ProxyReq { id, head, body },
-                            ) {
-                                eprintln!(
-                                    "[remote] proxy req from viewer {viewer_id} not applied: {e:#}"
-                                );
-                            }
-                        }
                     }
                 }
             };
@@ -1432,8 +1406,7 @@ mod tests {
                 // payload variant cannot compile-break every test below.
                 InputPayload::Rpc { .. }
                 | InputPayload::Action { .. }
-                | InputPayload::ClipPush { .. }
-                | InputPayload::ProxyReq { .. } => InputOutcome::Applied,
+                | InputPayload::ClipPush { .. } => InputOutcome::Applied,
             })
         }
         fn apply_viewport(&self, joint: Option<Viewport>) {

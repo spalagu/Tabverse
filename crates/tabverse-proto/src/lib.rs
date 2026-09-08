@@ -120,13 +120,6 @@ pub enum RemoteClientMsg {
     /// Clipboard text produced inside the join page. Requires Steer.
     #[serde(rename_all = "camelCase")]
     ClipPush { text: String },
-    /// An HTTP request for the remote proxy (browser-tab routing).
-    #[serde(rename_all = "camelCase")]
-    ProxyReq {
-        id: u64,
-        head: String,
-        body: Option<String>,
-    },
 }
 
 /// Host -> client messages for a shared terminal session.
@@ -251,13 +244,6 @@ pub enum RemoteHostMsg {
     ClipSync {
         seq: u64,
         text: String,
-    },
-    /// Remote-proxy answer: the origin's response head and body.
-    #[serde(rename_all = "camelCase")]
-    ProxyRes {
-        id: u64,
-        head: String,
-        body: Option<String>,
     },
 }
 

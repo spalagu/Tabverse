@@ -91,8 +91,7 @@ impl ShareSource for TerminalSource {
             // stance: an error the hub logs beats a silent drop).
             InputPayload::Rpc { .. }
             | InputPayload::Action { .. }
-            | InputPayload::ClipPush { .. }
-            | InputPayload::ProxyReq { .. } => {
+            | InputPayload::ClipPush { .. } => {
                 anyhow::bail!("a terminal source cannot take app-share input")
             }
         }

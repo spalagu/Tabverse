@@ -16,7 +16,9 @@ const h = vi.hoisted(() => {
   const events: Array<(json: string) => void> = [];
   const tickets: string[] = [];
   const calls: Array<{ fn: string; args: unknown[] }> = [];
-  return { termInstances, onDataHandlers, events, tickets, calls };
+  const httpStarts: Array<(value: unknown) => void> = [];
+  const httpBodies: Uint8Array[][] = [];
+  return { termInstances, onDataHandlers, events, tickets, calls, httpStarts, httpBodies };
 });
 
 vi.mock("@tabverse/runtime-remote/wasm-loader", () => ({
@@ -45,8 +47,18 @@ vi.mock("@tabverse/runtime-remote/wasm-loader", () => ({
           h.calls.push({ fn: "sendRpc", args: [id, cmd, args] }),
         sendClipPush: (text: string) =>
           h.calls.push({ fn: "sendClipPush", args: [text] }),
-        sendProxyReq: (id: bigint, head: string, body?: string) =>
-          h.calls.push({ fn: "sendProxyReq", args: [id, head, body] }),
+        openHttpStream: async (contextId: string, method: string, url: string, headers: unknown[]) => {
+          h.calls.push({ fn: "openHttpStream", args: [contextId, method, url, headers] });
+          const bodyIndex = h.httpBodies.length;
+          h.httpBodies.push([]);
+          const start = new Promise((resolve) => h.httpStarts.push(resolve));
+          return {
+            writeRequestChunk: async (bytes: Uint8Array) => { h.httpBodies[bodyIndex].push(bytes); },
+            finishRequest: () => {},
+            responseStart: () => start,
+            readResponseChunk: async () => h.httpBodies[bodyIndex].shift() ?? new Uint8Array(),
+          };
+        },
       };
     },
   }),
@@ -148,6 +160,8 @@ beforeEach(() => {
   h.events.length = 0;
   h.tickets.length = 0;
   h.calls.length = 0;
+  h.httpStarts.length = 0;
+  h.httpBodies.length = 0;
   location.hash = "#tabv-test-ticket";
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -535,7 +549,7 @@ describe("join page renderer dispatch", () => {
     expect(writeText).toHaveBeenCalledTimes(1);
   });
 
-  it("a fronting browser tab mounts the proxied pane; the document round-trips through sendProxyReq and proxyRes", async () => {
+  it("a fronting browser tab mounts the proxied pane over an independent HTTP stream", async () => {
     const send = await mountAppShare(false);
     // The host fronts a browser row carrying its address.
     await send({
@@ -551,29 +565,18 @@ describe("join page renderer dispatch", () => {
     });
     await flush();
 
-    // The pane asked the host's network: one ProxyReq, a document GET
-    // whose head names the absolute target.
-    const reqs = sent("sendProxyReq");
+    const reqs = sent("openHttpStream");
     expect(reqs).toHaveLength(1);
-    expect(
-      String(reqs[0].args[1]).startsWith(
-        "GET http://intranet.local/wiki/Home HTTP/1.1"
-      )
-    ).toBe(true);
-    expect(typeof reqs[0].args[0]).toBe("bigint");
+    expect(reqs[0].args.slice(0, 3)).toEqual([
+      "b1", "GET", "http://intranet.local/wiki/Home",
+    ]);
 
     // The host's answer lands and the mirrored document is on screen;
     // the placeholder the other tab kinds keep is gone.
-    // The frame body is base64 now (the host encodes bytes; TLS-terminated
-    // https answers ride the same shape).
-    await send({
-      type: "proxyRes",
-      id: Number(reqs[0].args[0]),
-      head: "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n",
-      body: btoa(
-        "<html><head><title>Wiki</title></head><body><h1>Intranet wiki</h1></body></html>"
-      ),
-    });
+    h.httpBodies[0].push(new TextEncoder().encode(
+      "<html><head><title>Wiki</title></head><body><h1>Intranet wiki</h1></body></html>"
+    ));
+    h.httpStarts[0]({ type: "response", head: { status: 200, finalUrl: "http://intranet.local/wiki/Home", headers: [{ name: "content-type", value: "text/html" }] } });
     await flush();
     const frame = host.querySelector(".browser-pane-frame");
     expect(frame).not.toBeNull();
@@ -583,18 +586,13 @@ describe("join page renderer dispatch", () => {
     );
     expect(host.querySelector(".app-share-content")).toBeNull();
 
-    // The host's error arm is the pane's refusal: an rpcResult with the
-    // same id — not a proxyRes — flips a re-asked pane to the link.
+    // A data-stream failure flips a re-asked pane to the link.
     await send({ type: "actionApplied", name: "activateTab", args: "t1" });
     await send({ type: "actionApplied", name: "activateTab", args: "b1" });
     await flush();
-    const second = sent("sendProxyReq")[1];
+    const second = sent("openHttpStream")[1];
     expect(second).toBeDefined();
-    await send({
-      type: "rpcResult",
-      id: Number(second.args[0]),
-      err: "the request named no forwardable host",
-    });
+    h.httpStarts[1]({ type: "error", error: { code: "denied", message: "the request named no forwardable host", retryable: false } });
     await flush();
     expect(host.querySelector(".browser-pane-unmirrored")).not.toBeNull();
     expect(host.querySelector(".browser-pane-frame")).toBeNull();

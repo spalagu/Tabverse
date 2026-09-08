@@ -4,7 +4,7 @@
 //! answers RPCs by dispatching into the app's own command surface, forwards
 //! the store's serialized state as `AppSnapshot`, replays every action the
 //! host executes as `ActionApplied` for the viewers' mirrored stores, and
-//! carries the clipboard and remote-proxy frames to their owners elsewhere
+//! carries clipboard frames to their owner elsewhere
 //! in the app. The hub keeps policy (kind floor, access checks, version
 //! withholding); this adapter is mechanism only, the same split the
 //! terminal and agent sources live by.
@@ -70,11 +70,6 @@ pub type WriteClipboard = Arc<dyn Fn(&str) + Send + Sync>;
 /// AppHandle, `app_share_start` does.
 pub type TermInputEmit = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
-/// Glue-injected: run one HTTP request through the host's network (the
-/// remote proxy; page_proxy's kernel under a fresh entry point).
-pub type ProxyFn =
-    Arc<dyn Fn(&str, Option<&str>) -> Result<(String, Option<String>), String> + Send + Sync>;
-
 pub struct AppShareSource {
     rpc: Mutex<HashMap<String, RpcEntry>>,
     /// Swappable so the real emitter can arrive late: the construction
@@ -87,7 +82,6 @@ pub struct AppShareSource {
     term_input: Mutex<TermInputEmit>,
     snapshot: SnapshotFn,
     write_clipboard: WriteClipboard,
-    proxy: ProxyFn,
     binding: Mutex<Option<ShareBinding>>,
     /// Hands the webview-ask path an AppHandle without the source holding
     /// one from construction (the app handle does not exist yet when
@@ -115,7 +109,6 @@ impl AppShareSource {
         dispatch_action: DispatchAction,
         snapshot: SnapshotFn,
         write_clipboard: WriteClipboard,
-        proxy: ProxyFn,
     ) -> Arc<Self> {
         Arc::new(Self {
             rpc: Mutex::new(HashMap::new()),
@@ -128,7 +121,6 @@ impl AppShareSource {
             agent_bound_tab: Mutex::new(None),
             snapshot,
             write_clipboard,
-            proxy,
             binding: Mutex::new(None),
             app: Mutex::new(None),
             seq: AtomicU64::new(0),
@@ -496,36 +488,6 @@ impl ShareSource for AppShareSource {
                 (self.write_clipboard)(&text);
                 Ok(InputOutcome::Applied)
             }
-            InputPayload::ProxyReq { id, head, body } => {
-                // One thread per request: a proxy fetch is seconds of
-                // network, and the callers of this seam (the hub's frame
-                // loop) must keep serving every viewer while it runs.
-                // The id is the correlation the answer rides back on,
-                // whichever frame lands first.
-                let share = self.bound();
-                let proxy = self.proxy.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("tabverse-remote-proxy".into())
-                    .spawn(move || match proxy(&head, body.as_deref()) {
-                        Ok((resp_head, resp_body)) => {
-                            if let Some(share) = share {
-                                share.broadcast_proxy_res(id, resp_head, resp_body);
-                            }
-                        }
-                        Err(text) => {
-                            if let Some(share) = share {
-                                share.broadcast_rpc_result(id, None, Some(text));
-                            }
-                        }
-                    });
-                // A thread that cannot be spawned is said out loud: the
-                // hub logs it as a frame not applied, which is exactly
-                // what happened.
-                if spawned.is_err() {
-                    anyhow::bail!("the remote proxy could not spawn its thread");
-                }
-                Ok(InputOutcome::Applied)
-            }
             InputPayload::Bytes(bytes) => {
                 // A viewer's keystrokes for the app share's terminal
                 // stream. Which terminal is active is a webview fact (it
@@ -633,22 +595,14 @@ mod tests {
     fn source(
         actions: Arc<Mutex<Vec<String>>>,
         clips: Arc<Mutex<Vec<String>>>,
-        proxied: Arc<Mutex<Vec<String>>>,
+        _legacy_proxy: Arc<Mutex<Vec<String>>>,
     ) -> Arc<AppShareSource> {
         let a = actions.clone();
         let c = clips.clone();
-        let p = proxied.clone();
         AppShareSource::new(
             Arc::new(move |name, _args| a.lock().unwrap().push(name.to_string())),
             Arc::new(|| serde_json::json!({"tabs": []})),
             Arc::new(move |text| c.lock().unwrap().push(text.to_string())),
-            Arc::new(move |head, _body| {
-                p.lock().unwrap().push(head.to_string());
-                Ok((
-                    "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n".into(),
-                    Some("hi".into()),
-                ))
-            }),
         )
     }
 
@@ -861,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn actions_dispatch_and_clips_write_and_proxies_run() {
+    fn actions_dispatch_and_clips_write() {
         let actions = Arc::new(Mutex::new(Vec::new()));
         let clips = Arc::new(Mutex::new(Vec::new()));
         let proxied = Arc::new(Mutex::new(Vec::new()));
@@ -885,36 +839,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(*clips.lock().unwrap(), vec!["hi".to_string()]);
-
-        src.inject_input(
-            1,
-            Access::Steer,
-            InputPayload::ProxyReq {
-                id: 3,
-                head: "GET http://intranet/ HTTP/1.1\r\n\r\n".into(),
-                body: None,
-            },
-        )
-        .unwrap();
-        // The proxy runs on its own thread (one per request, so seconds
-        // of network cannot park the hub's frame loop): wait for the
-        // record rather than assert against a race.
-        let waited = {
-            use std::time::{Duration, Instant};
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                let guard = proxied.lock().unwrap();
-                if !guard.is_empty() || Instant::now() > deadline {
-                    break guard[0].clone();
-                }
-                drop(guard);
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        };
-        assert!(
-            waited.starts_with("GET "),
-            "the frame's head reached the seam: {waited:?}"
-        );
     }
 
     /// The seam `set_dispatch_channel` installs: a viewer's action must

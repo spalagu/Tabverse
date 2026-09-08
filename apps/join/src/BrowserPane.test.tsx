@@ -136,7 +136,7 @@ describe("BrowserPane", () => {
       })
     );
     await flush();
-    // No up-front refusal anymore: the host terminates TLS (remote_proxy's
+    // No up-front refusal anymore: the host gateway terminates TLS (its
     // reqwest half), so the pane asks the proxy and mirrors what came back.
     expect(asked).toEqual(["https://gitlab.example/dashboard"]);
     expect(host.querySelector(".browser-pane-frame")).not.toBeNull();

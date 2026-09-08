@@ -103,8 +103,7 @@ impl ShareSource for AgentSource {
             // is a hub bug, and an error the hub logs beats a silent drop.
             InputPayload::Rpc { .. }
             | InputPayload::Action { .. }
-            | InputPayload::ClipPush { .. }
-            | InputPayload::ProxyReq { .. } => {
+            | InputPayload::ClipPush { .. } => {
                 anyhow::bail!("an agent source cannot take app-share input")
             }
         }
