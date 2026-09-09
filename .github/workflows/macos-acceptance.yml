@@ -67,7 +67,7 @@ jobs:
           mkdir -p "$output_dir"
           asset="Tabverse_${version}_${short_commit}_macos-${{ matrix.asset_arch }}.dmg"
           cp "$source" "$output_dir/$asset"
-          shasum -a 256 "$output_dir/$asset" > "$output_dir/SHA256SUMS"
+          (cd "$output_dir" && shasum -a 256 "$asset" > SHA256SUMS)
 
           mount_point="$(mktemp -d "${RUNNER_TEMP}/tabverse-acceptance.XXXXXX")"
           device=""
