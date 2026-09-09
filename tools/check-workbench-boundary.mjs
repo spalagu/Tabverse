@@ -148,6 +148,9 @@ if (/\b(?:async\s+)?fn\s+remote_(?:join|input|agent_[a-z0-9_]+|viewport|ping|lea
 if (/\b(?:async\s+)?fn\s+agent_(?:start|prompt|cancel|answer|close|detach|login_[a-z0-9_]+|logout)\s*\(/.test(tauriComposition)) {
   violations.push("src-tauri/src/lib.rs defines an Agent command; move it to agent_commands.rs");
 }
+if (/\b(?:async\s+)?fn\s+(?:pw_|migrate_)(?:authorize_[a-z0-9_]+|reveal|forget_all|export|import|import_check|import_apply)\s*\(/.test(tauriComposition)) {
+  violations.push("src-tauri/src/lib.rs defines a credential or migration command; move it to credential_commands.rs");
+}
 
 if (violations.length > 0) {
   console.error("V3 architecture boundary check failed:");

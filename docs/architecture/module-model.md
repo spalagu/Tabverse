@@ -39,6 +39,8 @@ crates/tabverse-*            可复用 Rust Core
 
 `src-tauri/src/agent_commands.rs` 持有 Agent 登录、Agent Tab IPC、Runtime Supervisor 接线和共享源注册。Agent 事件与回合语义属于 `tabverse-agent`，runtime 身份和进程生命周期属于 `tabverse-runtime`；适配器不保存恢复状态，也不伪造进程恢复。
 
+`src-tauri/src/credential_commands.rs` 持有本机用户确认、密码导入导出和整机迁移 IPC。凭据存储与加密属于 credential adapter 和 `app.db` vault；迁移包格式与备份恢复语义属于 `migrate` 模块，组合根不得直接处理明文凭据。
+
 ## 非目标
 
 - 外部插件安装、更新、签名和包管理。
