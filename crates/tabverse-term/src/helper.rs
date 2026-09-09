@@ -528,4 +528,86 @@ mod tests {
         assert!(server.runtime().list().is_empty());
         server.stop();
     }
+
+    #[test]
+    fn a_new_gui_connection_reattaches_the_same_running_terminal() {
+        let mut server = HelperServer::start(TOKEN, [8; 32], 0, Duration::from_secs(5)).unwrap();
+        let endpoint = server.endpoint().to_string();
+        let mut first_gui = connect(&endpoint);
+        first_gui.authenticate_client(TOKEN, [9; 32]).unwrap();
+        let (shell, before_command, after_command): (&str, &[u8], &[u8]) = if cfg!(windows) {
+            (
+                "powershell.exe",
+                b"Write-Output BEFORE-GUI-EXIT\r\n",
+                b"Write-Output AFTER-GUI-START\r\n",
+            )
+        } else {
+            (
+                "/bin/sh",
+                b"printf 'BEFORE-GUI-EXIT\\n'\n",
+                b"printf 'AFTER-GUI-START\\n'\n",
+            )
+        };
+        let spawn = serde_json::json!({
+            "shell": shell, "cols": 80, "rows": 24,
+            "shell_integration": false
+        });
+        first_gui
+            .send(&Frame::new(
+                Kind::Spawn,
+                SessionId::default(),
+                0,
+                serde_json::to_vec(&spawn).unwrap(),
+            ))
+            .unwrap();
+        let spawned = recv_kind(&mut first_gui, Kind::Spawn);
+        first_gui
+            .send(&Frame::new(
+                Kind::Input,
+                spawned.session_id,
+                1,
+                before_command.to_vec(),
+            ))
+            .unwrap();
+        let before = recv_kind(&mut first_gui, Kind::Output);
+        assert!(before.payload.windows(15).any(|w| w == b"BEFORE-GUI-EXIT"));
+        first_gui
+            .send(&Frame::new(Kind::Detach, spawned.session_id, 1, vec![]))
+            .unwrap();
+        assert_eq!(recv_kind(&mut first_gui, Kind::Detach).generation, 2);
+        drop(first_gui);
+
+        let mut second_gui = connect(&endpoint);
+        second_gui.authenticate_client(TOKEN, [10; 32]).unwrap();
+        second_gui
+            .send(&Frame::new(Kind::Attach, spawned.session_id, 0, vec![]))
+            .unwrap();
+        let replay = recv_kind(&mut second_gui, Kind::Snapshot);
+        assert_eq!(replay.generation, 3);
+        assert!(replay
+            .payload
+            .windows(15)
+            .any(|window| window == b"BEFORE-GUI-EXIT"));
+        second_gui
+            .send(&Frame::new(
+                Kind::Input,
+                spawned.session_id,
+                3,
+                after_command.to_vec(),
+            ))
+            .unwrap();
+        let mut after = Vec::new();
+        for _ in 0..30 {
+            after.extend(recv_kind(&mut second_gui, Kind::Output).payload);
+            if after.windows(15).any(|w| w == b"AFTER-GUI-START") {
+                break;
+            }
+        }
+        assert!(after.windows(15).any(|w| w == b"AFTER-GUI-START"));
+        second_gui
+            .send(&Frame::new(Kind::Terminate, spawned.session_id, 3, vec![]))
+            .unwrap();
+        recv_kind(&mut second_gui, Kind::Terminate);
+        server.stop();
+    }
 }
