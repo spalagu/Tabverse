@@ -31,7 +31,7 @@ flate2 = "1.1"
 plist = "1.10"
 # Bundled engine: the preview must behave identically on every platform, and
 # Windows ships no system sqlite to link against.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { workspace = true }
 # No default features: only naming (name table), glyph count, and the
 # variable-font flag are queried — the layout/glyph-name tables never are.
 skrifa = "0.46.2"

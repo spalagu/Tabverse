@@ -447,9 +447,10 @@ async fn download_open(
         // Not seen this run: consult the persisted ledger, which is how a
         // file downloaded before a restart stays openable. Exact string
         // match against recorded paths — no normalization, no prefixes.
-        let dir = state_dir(&app)?;
         let recorded = tauri::async_runtime::spawn_blocking(move || {
-            tabverse_fs::state::load(&dir, "downloads").ok().flatten()
+            app_state_store(&app)
+                .ok()
+                .and_then(|store| store.load_scope("downloads").ok().flatten())
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -540,15 +541,33 @@ fn state_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         .map_err(|e| format!("cannot resolve app data dir: {e}"))
 }
 
+fn app_state_store(app: &AppHandle) -> Result<tabverse_state::AppStateStore, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("cannot resolve app data dir: {e}"))?;
+    tabverse_state::AppStateStore::open(&app_data_dir).map_err(|e| format!("{e:#}"))
+}
+
 // The state_* commands follow the fs_* rule above: disk I/O goes through the
 // blocking pool so a slow disk never freezes the UI thread. The storage
 // logic itself (atomic write, scope-name encoding, size guard) lives in
 // tabverse_fs::state where it is unit-tested against a temp dir.
 #[tauri::command]
 async fn state_save(app: AppHandle, scope: String, json: String) -> Result<(), String> {
-    let dir = state_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        tabverse_fs::state::save(&dir, &scope, &json).map_err(|e| format!("{e:#}"))
+        app_state_store(&app)?
+            .save_scope(&scope, &json)
+            .map_err(|e| format!("{e:#}"))?;
+        // Keep the legacy export/import implementation current during the
+        // app.db transition. app.db is authoritative; a mirror failure does
+        // not roll back a committed database write.
+        if let Ok(dir) = state_dir(&app) {
+            if let Err(error) = tabverse_fs::state::save(&dir, &scope, &json) {
+                eprintln!("[state] legacy mirror save failed for {scope:?}: {error:#}");
+            }
+        }
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -556,9 +575,10 @@ async fn state_save(app: AppHandle, scope: String, json: String) -> Result<(), S
 
 #[tauri::command]
 async fn state_load(app: AppHandle, scope: String) -> Result<Option<String>, String> {
-    let dir = state_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        tabverse_fs::state::load(&dir, &scope).map_err(|e| format!("{e:#}"))
+        app_state_store(&app)?
+            .load_scope(&scope)
+            .map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -566,9 +586,16 @@ async fn state_load(app: AppHandle, scope: String) -> Result<Option<String>, Str
 
 #[tauri::command]
 async fn state_delete(app: AppHandle, scope: String) -> Result<(), String> {
-    let dir = state_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        tabverse_fs::state::delete(&dir, &scope).map_err(|e| format!("{e:#}"))
+        app_state_store(&app)?
+            .delete_scope(&scope)
+            .map_err(|e| format!("{e:#}"))?;
+        if let Ok(dir) = state_dir(&app) {
+            if let Err(error) = tabverse_fs::state::delete(&dir, &scope) {
+                eprintln!("[state] legacy mirror delete failed for {scope:?}: {error:#}");
+            }
+        }
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -576,9 +603,10 @@ async fn state_delete(app: AppHandle, scope: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn state_list(app: AppHandle) -> Result<Vec<String>, String> {
-    let dir = state_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        tabverse_fs::state::list(&dir).map_err(|e| format!("{e:#}"))
+        app_state_store(&app)?
+            .list_scopes()
+            .map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -590,20 +618,19 @@ const THEME_SCOPE: &str = "theme";
 /// unknown value — is "system": a first launch and a corrupt file both get
 /// the follow-the-OS default rather than an error.
 fn theme_preference(app: &AppHandle) -> String {
-    match state_dir(app) {
-        Ok(dir) => theme_preference_in(&dir),
-        Err(_) => "system".to_string(),
-    }
-}
-
-/// The disk half of [`theme_preference`], split on the state directory so a
-/// test can drive it against a sandbox dir without an [`AppHandle`].
-fn theme_preference_in(dir: &std::path::Path) -> String {
     let fallback = || "system".to_string();
-    let Ok(Some(json)) = tabverse_fs::state::load(dir, THEME_SCOPE) else {
+    let Ok(store) = app_state_store(app) else {
         return fallback();
     };
-    serde_json::from_str::<serde_json::Value>(&json)
+    let Ok(Some(json)) = store.load_scope(THEME_SCOPE) else {
+        return fallback();
+    };
+    theme_preference_json(&json)
+}
+
+fn theme_preference_json(json: &str) -> String {
+    let fallback = || "system".to_string();
+    serde_json::from_str::<serde_json::Value>(json)
         .ok()
         .and_then(|v| {
             v.get("preference")
@@ -612,6 +639,17 @@ fn theme_preference_in(dir: &std::path::Path) -> String {
         })
         .filter(|p| is_theme_preference(p))
         .unwrap_or_else(fallback)
+}
+
+/// The disk half of [`theme_preference`], split on the state directory so a
+/// test can drive it against a sandbox dir without an [`AppHandle`].
+#[cfg(test)]
+fn theme_preference_in(dir: &std::path::Path) -> String {
+    let fallback = || "system".to_string();
+    let Ok(Some(json)) = tabverse_fs::state::load(dir, THEME_SCOPE) else {
+        return fallback();
+    };
+    theme_preference_json(&json)
 }
 
 fn is_theme_preference(p: &str) -> bool {
@@ -651,10 +689,17 @@ async fn theme_pref_save(app: AppHandle, pref: String) -> Result<(), String> {
     if !is_theme_preference(&pref) {
         return Err(format!("unknown theme preference {pref:?}"));
     }
-    let dir = state_dir(&app)?;
     let json = serde_json::json!({ "preference": pref }).to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        tabverse_fs::state::save(&dir, THEME_SCOPE, &json).map_err(|e| format!("{e:#}"))
+        app_state_store(&app)?
+            .save_scope(THEME_SCOPE, &json)
+            .map_err(|e| format!("{e:#}"))?;
+        if let Ok(dir) = state_dir(&app) {
+            if let Err(error) = tabverse_fs::state::save(&dir, THEME_SCOPE, &json) {
+                eprintln!("[state] legacy theme mirror failed: {error:#}");
+            }
+        }
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?

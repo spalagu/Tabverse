@@ -5762,6 +5762,7 @@ dependencies = [
  "tabverse-network",
  "tabverse-proto",
  "tabverse-remote",
+ "tabverse-state",
  "tabverse-term",
  "tauri",
  "tauri-build",
@@ -5877,6 +5878,16 @@ dependencies = [
  "tabverse-proto",
  "tabverse-term",
  "tokio",
+]
+
+[[package]]
+name = "tabverse-state"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
