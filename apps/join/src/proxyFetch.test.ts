@@ -26,6 +26,7 @@ function rig(body = "hello", status = 200) {
     opened.push(record);
     let read = false;
     const stream: HttpDataStream = {
+      cancel() {},
       async writeRequestChunk(bytes) { record.requestChunks.push(bytes); },
       finishRequest() { record.finished = true; },
       async responseStart() {
@@ -62,6 +63,7 @@ describe("createProxyClient data streams", () => {
 
   it("surfaces a bounded response-start error", async () => {
     const client = createProxyClient(async () => ({
+      cancel() {},
       async writeRequestChunk() {}, finishRequest() {},
       async responseStart() { return { type: "error" as const, error: { code: "denied", message: "steer access required", retryable: false } }; },
       async readResponseChunk() { return new Uint8Array(); },
@@ -78,6 +80,7 @@ describe("createProxyClient data streams", () => {
       if (calls === 1) await blocked;
       let read = false;
       return {
+        cancel() {},
         async writeRequestChunk() {}, finishRequest() {},
         async responseStart() { return { type: "response" as const, head: { status: 200, finalUrl: url, headers: [] } }; },
         async readResponseChunk() { if (read) return new Uint8Array(); read = true; return new TextEncoder().encode("ok"); },
@@ -88,6 +91,68 @@ describe("createProxyClient data streams", () => {
     await expect(oldRequest).rejects.toThrow("connection lost");
     release();
     expect(await (await client.requestViaProxy("http://new/")).text()).toBe("ok");
+  });
+
+  it("follows a Host-resolved redirect on a fresh authorized stream", async () => {
+    const opened: string[] = [];
+    const client = createProxyClient(async (_context, _method, url) => {
+      opened.push(url);
+      const redirected = opened.length === 1;
+      let read = false;
+      return {
+        cancel() {},
+        async writeRequestChunk() {},
+        finishRequest() {},
+        async responseStart() {
+          return {
+            type: "response" as const,
+            head: {
+              status: redirected ? 302 : 200,
+              finalUrl: url,
+              headers: redirected
+                ? [{ name: "location", value: "/login" }]
+                : [{ name: "content-type", value: "text/html" }],
+            },
+          };
+        },
+        async readResponseChunk() {
+          if (read) return new Uint8Array();
+          read = true;
+          return new TextEncoder().encode("signed in");
+        },
+      };
+    });
+    const response = await client.requestViaProxy("http://intranet.local/start");
+    expect(opened).toEqual([
+      "http://intranet.local/start",
+      "http://intranet.local/login",
+    ]);
+    expect(response.redirected).toBe(true);
+    expect(response.url).toBe("http://intranet.local/login");
+    expect(await response.text()).toBe("signed in");
+  });
+
+  it("resets both stream halves when its AbortSignal fires", async () => {
+    let cancelled = false;
+    let rejectStart!: (error: Error) => void;
+    const client = createProxyClient(async () => ({
+      cancel() {
+        cancelled = true;
+        rejectStart(new DOMException("The operation was aborted", "AbortError"));
+      },
+      async writeRequestChunk() {},
+      finishRequest() {},
+      responseStart: () => new Promise((_resolve, reject) => { rejectStart = reject; }),
+      async readResponseChunk() { return new Uint8Array(); },
+    }));
+    const abort = new AbortController();
+    const pending = client.requestViaProxy("http://intranet.local/slow", {
+      signal: abort.signal,
+    });
+    await Promise.resolve();
+    abort.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(cancelled).toBe(true);
   });
 });
 

@@ -3,7 +3,7 @@ import { STR } from "./strings";
 
 /** The pane's one route to the host's network — App hands it the proxy
  * client's requestViaProxy. */
-export type HostFetch = (url: string) => Promise<Response>;
+export type HostFetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 const directUrl = (target: string): string => target;
 
@@ -67,12 +67,13 @@ export function BrowserPane({
 
   useEffect(() => {
     let alive = true;
+    const abort = new AbortController();
     setState({ kind: "loading" });
     // http AND https both ride the host's proxy now: the host terminates
     // TLS itself (the host gateway's reqwest half), so an https target is
     // fetched on the host's network like any other — its resolver, its
     // certificates, its egress.
-    fetchViaHost(url)
+    fetchViaHost(url, { signal: abort.signal })
       .then(async (res) => {
         const body = res.ok ? await res.text() : "";
         if (!alive) return;
@@ -85,7 +86,7 @@ export function BrowserPane({
         if (res.ok && html) {
           setState({
             kind: "mirrored",
-            doc: mirroredDocument(body, url, resolveProxyUrl),
+            doc: mirroredDocument(body, res.url || url, resolveProxyUrl),
           });
         } else {
           setState({ kind: "unmirrored", line: refusalOf(res), detail: null });
@@ -103,6 +104,7 @@ export function BrowserPane({
       });
     return () => {
       alive = false;
+      abort.abort();
     };
   }, [url, fetchViaHost, resolveProxyUrl]);
 

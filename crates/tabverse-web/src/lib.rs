@@ -60,6 +60,12 @@ pub struct WebHttpStream {
 
 #[wasm_bindgen]
 impl WebHttpStream {
+    /// Abort both halves of an exchange that the page no longer consumes.
+    pub fn cancel(&mut self) {
+        let _ = self.send.reset(0u32.into());
+        let _ = self.recv.stop(0u32.into());
+    }
+
     /// Send one raw request-body chunk. No JSON/base64 envelope is involved.
     #[wasm_bindgen(js_name = writeRequestChunk)]
     pub async fn write_request_chunk(&mut self, bytes: Vec<u8>) -> Result<(), JsValue> {

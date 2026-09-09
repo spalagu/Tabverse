@@ -40,6 +40,7 @@ export interface WasmSession {
 }
 
 export interface WasmHttpStream {
+  cancel(): void;
   writeRequestChunk(bytes: Uint8Array): Promise<void>;
   finishRequest(): void;
   responseStart(): Promise<

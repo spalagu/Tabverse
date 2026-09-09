@@ -56,6 +56,7 @@ export function targetFromProxyUrl(url: URL): string | null {
 
 /** One independently multiplexed HTTP stream exposed by the wasm seam. */
 export interface HttpDataStream {
+  cancel(): void;
   writeRequestChunk(bytes: Uint8Array): Promise<void>;
   finishRequest(): void;
   responseStart(): Promise<
@@ -90,12 +91,109 @@ export interface ProxyClient {
   failAll(reason: string): void;
 }
 
+export const MAX_REDIRECTS = 10;
+
 export function createProxyClient(
   open: OpenHttpDataStream,
   contextId: () => string = () => "remote-browser",
 ): ProxyClient {
   const waiting = new Set<(error: Error) => void>();
+  const active = new Set<HttpDataStream>();
   let generation = 0;
+
+  async function perform(req: Request, requestGeneration: number, redirects: number): Promise<Response> {
+    const headers: HeaderPair[] = [];
+    req.headers.forEach((value, name) => headers.push({ name, value }));
+    const redirectSource = req.body === null ? req : req.clone();
+    const stream = await open(contextId(), req.method, req.url, headers);
+    active.add(stream);
+    let bodyOwnsStream = false;
+    const abort = () => stream.cancel();
+    req.signal.addEventListener("abort", abort, { once: true });
+    try {
+      if (requestGeneration !== generation) throw new Error("the session ended");
+      if (req.signal.aborted) {
+        stream.cancel();
+        throw new DOMException("The operation was aborted", "AbortError");
+      }
+      if (req.body !== null) {
+        const reader = req.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await stream.writeRequestChunk(value);
+          if (requestGeneration !== generation) throw new Error("the session ended");
+        }
+      }
+      stream.finishRequest();
+      const start = await stream.responseStart();
+      if (requestGeneration !== generation) throw new Error("the session ended");
+      if (start.type === "error") throw new Error(start.error.message);
+      const headersOut = new Headers();
+      for (const pair of start.head.headers) headersOut.append(pair.name, pair.value);
+
+      const location = headersOut.get("location");
+      const redirect = [301, 302, 303, 307, 308].includes(start.head.status) && location !== null;
+      if (redirect && req.redirect !== "manual") {
+        stream.cancel();
+        active.delete(stream);
+        req.signal.removeEventListener("abort", abort);
+        if (req.redirect === "error") throw new TypeError("redirect mode is set to error");
+        if (redirects >= MAX_REDIRECTS) throw new TypeError(`redirected more than ${MAX_REDIRECTS} times`);
+        const target = new URL(location, start.head.finalUrl || req.url).href;
+        const switchToGet = start.head.status === 303 || ((start.head.status === 301 || start.head.status === 302) && req.method === "POST");
+        let next = switchToGet
+          ? new Request(target, { method: "GET", headers: [...req.headers].filter(([name]) => !["content-length", "content-type"].includes(name.toLowerCase())), redirect: req.redirect, signal: req.signal })
+          : new Request(target, redirectSource);
+        if (new URL(target).origin !== new URL(req.url).origin) {
+          const safe = new Headers(next.headers);
+          safe.delete("authorization");
+          safe.delete("proxy-authorization");
+          safe.delete("cookie");
+          next = new Request(next, { headers: safe });
+        }
+        return perform(next, requestGeneration, redirects + 1);
+      }
+
+      const nullBody = [204, 205, 304].includes(start.head.status);
+      const body = nullBody
+        ? null
+        : new ReadableStream<Uint8Array>({
+            async pull(controller) {
+              try {
+                if (requestGeneration !== generation) throw new Error("the session ended");
+                const chunk = await stream.readResponseChunk(64 * 1024);
+                if (chunk.length === 0) {
+                  active.delete(stream);
+                  req.signal.removeEventListener("abort", abort);
+                  controller.close();
+                } else controller.enqueue(chunk);
+              } catch (error) {
+                active.delete(stream);
+                req.signal.removeEventListener("abort", abort);
+                controller.error(error);
+              }
+            },
+            cancel() {
+              active.delete(stream);
+              req.signal.removeEventListener("abort", abort);
+              stream.cancel();
+            },
+          });
+      const response = new Response(body, { status: start.head.status, headers: headersOut });
+      Object.defineProperties(response, {
+        url: { value: start.head.finalUrl },
+        redirected: { value: redirects > 0 },
+      });
+      bodyOwnsStream = body !== null;
+      return response;
+    } finally {
+      if (!bodyOwnsStream) {
+        req.signal.removeEventListener("abort", abort);
+        active.delete(stream);
+      }
+    }
+  }
 
   function requestViaProxy(
     input: string | URL | Request,
@@ -107,40 +205,7 @@ export function createProxyClient(
       waiting.add(reject);
       void (async () => {
         try {
-          const headers: HeaderPair[] = [];
-          req.headers.forEach((value, name) => headers.push({ name, value }));
-          const stream = await open(contextId(), req.method, req.url, headers);
-          if (requestGeneration !== generation) throw new Error("the session ended");
-          if (req.body !== null) {
-            const reader = req.body.getReader();
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              await stream.writeRequestChunk(value);
-              if (requestGeneration !== generation) throw new Error("the session ended");
-            }
-          }
-          stream.finishRequest();
-          const start = await stream.responseStart();
-          if (requestGeneration !== generation) throw new Error("the session ended");
-          if (start.type === "error") throw new Error(start.error.message);
-          const headersOut = new Headers();
-          for (const pair of start.head.headers) headersOut.append(pair.name, pair.value);
-          const nullBody = [204, 205, 304].includes(start.head.status);
-          const body = nullBody
-            ? null
-            : new ReadableStream<Uint8Array>({
-                async pull(controller) {
-                  try {
-                    const chunk = await stream.readResponseChunk(64 * 1024);
-                    if (chunk.length === 0) controller.close();
-                    else controller.enqueue(chunk);
-                  } catch (error) {
-                    controller.error(error);
-                  }
-                },
-              });
-          resolve(new Response(body, { status: start.head.status, headers: headersOut }));
+          resolve(await perform(req, requestGeneration, 0));
         } catch (error) {
           reject(error instanceof Error ? error : new Error(String(error)));
         } finally {
@@ -152,6 +217,8 @@ export function createProxyClient(
 
   function failAll(reason: string): void {
     generation += 1;
+    for (const stream of active) stream.cancel();
+    active.clear();
     for (const reject of waiting) reject(new Error(reason));
     waiting.clear();
   }

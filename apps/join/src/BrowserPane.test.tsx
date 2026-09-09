@@ -208,4 +208,21 @@ describe("BrowserPane", () => {
       '<base href="/__tabverse_proxy/http/intranet.local/">'
     );
   });
+
+  it("aborts the Host data stream when the pane moves to another URL", async () => {
+    const signals: AbortSignal[] = [];
+    const pane = (url: string) =>
+      createElement(BrowserPane, {
+        url,
+        fetchViaHost: (_url, init) => {
+          signals.push(init!.signal as AbortSignal);
+          return new Promise<Response>(() => {});
+        },
+      });
+    mount(pane("http://intranet.local/one"));
+    expect(signals[0].aborted).toBe(false);
+    mount(pane("http://intranet.local/two"));
+    expect(signals[0].aborted).toBe(true);
+    expect(signals[1].aborted).toBe(false);
+  });
 });
