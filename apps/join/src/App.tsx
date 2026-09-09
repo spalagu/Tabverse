@@ -197,7 +197,7 @@ function JoinApp() {
 
   /** The pane's fetch handle — the client above, nothing more. */
   const fetchViaHost = useCallback(
-    (url: string) => proxy.requestViaProxy(url),
+    (url: string, init?: RequestInit) => proxy.requestViaProxy(url, init),
     [proxy]
   );
 

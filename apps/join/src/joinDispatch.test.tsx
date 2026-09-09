@@ -53,6 +53,7 @@ vi.mock("@tabverse/runtime-remote/wasm-loader", () => ({
           h.httpBodies.push([]);
           const start = new Promise((resolve) => h.httpStarts.push(resolve));
           return {
+            cancel: () => h.calls.push({ fn: "cancelHttpStream", args: [bodyIndex] }),
             writeRequestChunk: async (bytes: Uint8Array) => { h.httpBodies[bodyIndex].push(bytes); },
             finishRequest: () => {},
             responseStart: () => start,
