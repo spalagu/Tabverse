@@ -3952,8 +3952,11 @@ fn agent_start(
     // A tab whose state directory cannot be resolved still gets to run; it
     // simply has no memory across restarts, which beats refusing to start.
     let log_dir = state_dir(&app).ok();
+    let events: agent_bridge::AgentEventCallback = Arc::new(move |event| {
+        let _ = on_event.send(event);
+    });
     let id = registry
-        .start(session_id.clone(), cwd, log_dir, on_event)
+        .start(session_id.clone(), cwd, log_dir, events)
         .map_err(|e| format!("{e:#}"))?;
     if let Some(hooks) = registry.agent_hooks(&id) {
         state
@@ -4647,7 +4650,7 @@ mod agent_tab_close_tests {
     fn closing_a_shared_agent_tab_ends_its_viewers_with_a_reason() {
         let work = tempfile::tempdir().unwrap();
         let registry = agent_bridge::AgentRegistry::new();
-        let channel = tauri::ipc::Channel::new(|_| Ok(()));
+        let channel: agent_bridge::AgentEventCallback = Arc::new(|_| {});
         let agent_id = registry
             .start(
                 "tab-close".to_string(),

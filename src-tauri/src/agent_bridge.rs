@@ -32,7 +32,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tabverse_agent::session::Session;
 use tabverse_agent_tools::{builtin_tools, env::LocalEnv, CancelToken};
-use tauri::ipc::Channel;
+
+/// Environment-neutral event egress. The desktop adapter wraps its Tauri
+/// channel in this callback; a supervisor process can instead serialize the
+/// same events onto local IPC without pulling a webview type into the runtime.
+pub type AgentEventCallback = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 
 /// How long an approval request waits before it is treated as refused. Long
 /// enough that a user who stepped away can come back to it, short enough that a
@@ -293,7 +297,7 @@ impl AgentRegistry {
         session_id: String,
         cwd: String,
         log_dir: Option<std::path::PathBuf>,
-        events: Channel<SessionEvent>,
+        events: AgentEventCallback,
     ) -> Result<String> {
         let id = self.next_id();
         let log_path = log_dir.as_ref().map(|dir| log_path_for(dir, &session_id));
@@ -305,7 +309,7 @@ impl AgentRegistry {
                 // Replay to the screen first: the tab should look the way it did
                 // before it was closed, not empty until the next turn.
                 for event in &replay.events {
-                    let _ = events.send(event.clone());
+                    events(event.clone());
                 }
                 history = replay.messages;
             }
@@ -382,7 +386,7 @@ impl AgentRegistry {
                         .with_cancel(thread_cancel.clone());
                 let mut sink = TeeSink {
                     forward: Box::new(move |event| {
-                        let _ = events.send(event);
+                        events(event);
                     }),
                     log: thread_log.and_then(|p| SessionLog::open(p).ok()),
                     share: thread_share,
@@ -690,10 +694,9 @@ mod tests {
 
     // ── the registry, end to end ──────────────────────────────────────────
     //
-    // `Channel` turns out to be constructible without a webview: `Channel::new`
-    // takes the callback itself. That closes most of the gap between the unit
-    // tests above and the desktop app — a real registry, a real session thread,
-    // real tools on a real directory, and the same events the webview would get.
+    // The callback closes most of the gap between the unit tests above and the
+    // desktop app — a real registry, a real session thread, real tools on a
+    // real directory, and the same events the webview would get.
     // What it still does not prove is that the tab on screen renders them; that
     // stays on the queue as its own item.
 
@@ -705,24 +708,19 @@ mod tests {
     }
 
     impl Recorder {
-        fn new() -> (Self, Channel<SessionEvent>) {
+        fn new() -> (Self, AgentEventCallback) {
             let events = Arc::new(Mutex::new(Vec::new()));
             let alive = Arc::new(());
             let sink_events = Arc::clone(&events);
-            // Moved into the channel's callback, which the session thread owns
+            // Moved into the callback, which the session thread owns
             // through its sink. When the count falls back to one, the thread has
             // dropped everything it held.
             let sink_alive = Arc::clone(&alive);
-            let channel = Channel::new(move |body| {
+            let callback = Arc::new(move |event| {
                 let _keepalive = &sink_alive;
-                if let tauri::ipc::InvokeResponseBody::Json(text) = body {
-                    if let Ok(event) = serde_json::from_str::<SessionEvent>(&text) {
-                        sink_events.lock().unwrap().push(event);
-                    }
-                }
-                Ok(())
+                sink_events.lock().unwrap().push(event);
             });
-            (Self { events, alive }, channel)
+            (Self { events, alive }, callback)
         }
 
         /// Wait for the session to reach some state. Polling rather than a
