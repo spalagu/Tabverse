@@ -43,6 +43,8 @@ crates/tabverse-*            可复用 Rust Core
 
 `src-tauri/src/appearance_commands.rs` 持有窗口全屏、macOS traffic lights、主题背景、主题偏好和 webview 日志 IPC。平台调用只存在于带 target 条件的适配器分支，主题偏好仍写入 `app.db` scope。
 
+`src-tauri/src/browser_commands.rs` 是官方 Tauri/Wry Browser adapter，持有 webview 创建、导航、查找、快照、页面代理和 Browser IPC 接线。密码、cookie、userscript、网络和 Remote Browser 的产品语义仍分别属于现有专用模块与 Rust Core；Browser adapter 不引入 CEF 或自定义 Tauri runtime。
+
 ## 非目标
 
 - 外部插件安装、更新、签名和包管理。
