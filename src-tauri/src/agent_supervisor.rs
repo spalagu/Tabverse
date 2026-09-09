@@ -411,7 +411,7 @@ mod tests {
         let logs = tempfile::tempdir().unwrap();
         let runtime = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
-        let token = AuthToken::new([0x62; 32]);
+        let token = AuthToken::new(rand::random());
         let store = RuntimeStore::open(runtime.path(), "test-supervisor").unwrap();
         let supervisor = AgentSupervisor::start_persistent(
             token,
@@ -422,7 +422,7 @@ mod tests {
         .unwrap();
         let mut client =
             AgentIpcStream::connect(supervisor.endpoint(), Duration::from_secs(2)).unwrap();
-        client.authenticate_client(token, [0x72; 32]).unwrap();
+        client.authenticate_client(token, rand::random()).unwrap();
         client
             .send(
                 &Frame::json(

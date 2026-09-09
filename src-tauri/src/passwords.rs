@@ -305,26 +305,28 @@ mod tests {
     #[test]
     fn pending_credentials_are_bound_to_tab_host_and_account() {
         *PENDING.lock().unwrap() = None;
+        let password_a = format!("a-{:016x}", rand::random::<u64>());
+        let password_b = format!("b-{:016x}", rand::random::<u64>());
         pending_insert(
             "tab-a".into(),
             "example.test".into(),
             "alice".into(),
-            "alice-from-a".into(),
+            password_a.clone(),
         );
         pending_insert(
             "tab-b".into(),
             "example.test".into(),
             "alice".into(),
-            "alice-from-b".into(),
+            password_b.clone(),
         );
         assert!(pending_take("tab-a", "example.test", "bob").is_none());
         assert_eq!(
             pending_take("tab-a", "example.test", "alice").as_deref(),
-            Some("alice-from-a")
+            Some(password_a.as_str())
         );
         assert_eq!(
             pending_take("tab-b", "example.test", "alice").as_deref(),
-            Some("alice-from-b")
+            Some(password_b.as_str())
         );
     }
 

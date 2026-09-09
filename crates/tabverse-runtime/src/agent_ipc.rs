@@ -385,10 +385,10 @@ mod tests {
         let endpoint = endpoint();
         let name = endpoint.as_str().to_ns_name::<GenericNamespaced>().unwrap();
         let listener = ListenerOptions::new().name(name).create_sync().unwrap();
-        let token = AuthToken::new([0x5a; 32]);
+        let token = AuthToken::new(rand::random());
         let server = std::thread::spawn(move || {
             let mut stream = AgentIpcStream::new(listener.accept().unwrap());
-            stream.authenticate_server(token, [0x33; 32]).unwrap();
+            stream.authenticate_server(token, rand::random()).unwrap();
             let request = stream.recv().unwrap();
             assert_eq!(
                 request,
@@ -400,7 +400,7 @@ mod tests {
         });
 
         let mut client = AgentIpcStream::connect(&endpoint, Duration::from_secs(2)).unwrap();
-        client.authenticate_client(token, [0x44; 32]).unwrap();
+        client.authenticate_client(token, rand::random()).unwrap();
         client
             .send(&Frame::new(
                 Kind::Prompt,
@@ -418,7 +418,7 @@ mod tests {
     fn a_callback_sender_can_emit_while_the_request_reader_is_blocked() {
         let endpoint = endpoint();
         let listener = AgentIpcListener::bind(&endpoint).unwrap();
-        let token = AuthToken::new([0x31; 32]);
+        let token = AuthToken::new(rand::random());
         let server = std::thread::spawn(move || {
             let mut stream = loop {
                 match listener.accept() {
@@ -430,7 +430,7 @@ mod tests {
                 }
             };
             stream.set_nonblocking(false).unwrap();
-            stream.authenticate_server(token, [0x41; 32]).unwrap();
+            stream.authenticate_server(token, rand::random()).unwrap();
             let sender = stream.sender().unwrap();
             std::thread::spawn(move || {
                 sender
@@ -443,7 +443,7 @@ mod tests {
         });
 
         let mut client = AgentIpcStream::connect(&endpoint, Duration::from_secs(2)).unwrap();
-        client.authenticate_client(token, [0x51; 32]).unwrap();
+        client.authenticate_client(token, rand::random()).unwrap();
         assert_eq!(client.recv().unwrap().payload, b"async");
         client.send(&Frame::new(Kind::Ack, Vec::new())).unwrap();
         server.join().unwrap();
@@ -454,17 +454,24 @@ mod tests {
         let endpoint = endpoint();
         let name = endpoint.as_str().to_ns_name::<GenericNamespaced>().unwrap();
         let listener = ListenerOptions::new().name(name).create_sync().unwrap();
+        let server_token = AuthToken::new(rand::random());
+        let client_token = loop {
+            let candidate = AuthToken::new(rand::random());
+            if candidate.0 != server_token.0 {
+                break candidate;
+            }
+        };
         let server = std::thread::spawn(move || {
             let mut stream = AgentIpcStream::new(listener.accept().unwrap());
             assert!(matches!(
-                stream.authenticate_server(AuthToken::new([1; 32]), [2; 32]),
+                stream.authenticate_server(server_token, rand::random()),
                 Err(TransportError::Protocol(ProtocolError::Unauthorized))
             ));
         });
 
         let mut client = AgentIpcStream::connect(&endpoint, Duration::from_secs(2)).unwrap();
         assert!(matches!(
-            client.authenticate_client(AuthToken::new([9; 32]), [3; 32]),
+            client.authenticate_client(client_token, rand::random()),
             Err(TransportError::Protocol(ProtocolError::Unauthorized))
         ));
         server.join().unwrap();
@@ -481,8 +488,8 @@ mod tests {
 
     #[test]
     fn the_authentication_token_never_appears_on_the_wire() {
-        let bytes = [0xa7; TOKEN_BYTES];
-        let hello = AuthToken::new(bytes).hello([0x18; NONCE_BYTES]);
+        let bytes = rand::random();
+        let hello = AuthToken::new(bytes).hello(rand::random());
         assert!(!hello.windows(TOKEN_BYTES).any(|window| window == bytes));
     }
 }

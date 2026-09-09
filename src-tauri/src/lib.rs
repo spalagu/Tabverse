@@ -807,6 +807,7 @@ pub fn run() {
             cookies::init(app.handle());
             Ok(())
         })
+        // The macro emits command-name strings; none is cryptographic material. lgtm[rust/hard-coded-cryptographic-value]
         .invoke_handler(tauri::generate_handler![
             agent_commands::agent_start,
             agent_commands::agent_prompt,

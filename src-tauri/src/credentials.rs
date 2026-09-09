@@ -747,7 +747,7 @@ mod key_bundle_tests {
             .or_default()
             .insert(account("example.test", "me").unwrap(), "secret".into());
         let plain = serde_json::to_vec(&original).unwrap();
-        let sealed = vault::seal(&[0x22; KEY_BYTES], &plain).unwrap();
+        let sealed = vault::seal(&key_bundle().unwrap().login_vault, &plain).unwrap();
         let legacy = dir.join("state/logins.v2.vault");
         std::fs::write(&legacy, &sealed).unwrap();
 
@@ -765,39 +765,38 @@ mod key_bundle_tests {
     fn browser_credentials_support_multiple_accounts_update_and_delete() {
         let preferred = tempfile::tempdir().unwrap();
         let _guard = test_vault_guard(preferred.path().to_path_buf());
-        save_web("example.test", "alice", "alice-first-secret").unwrap();
-        save_web("example.test", "bob", "bob-secret").unwrap();
-        save_web("other.test", "alice", "other-secret").unwrap();
+        let alice_first = format!("alice-first-{:016x}", rand::random::<u64>());
+        let alice_updated = format!("alice-updated-{:016x}", rand::random::<u64>());
+        let bob = format!("bob-{:016x}", rand::random::<u64>());
+        let other = format!("other-{:016x}", rand::random::<u64>());
+        save_web("example.test", "alice", &alice_first).unwrap();
+        save_web("example.test", "bob", &bob).unwrap();
+        save_web("other.test", "alice", &other).unwrap();
 
         let accounts = find_web("example.test").unwrap();
         assert_eq!(accounts.len(), 2);
         assert_eq!(accounts[0].username, "alice");
         assert_eq!(accounts[1].username, "bob");
 
-        save_web("example.test", "alice", "alice-updated-secret").unwrap();
+        save_web("example.test", "alice", &alice_updated).unwrap();
         let updated = find_web("example.test")
             .unwrap()
             .into_iter()
             .find(|credential| credential.username == "alice")
             .unwrap();
-        assert_eq!(updated.password, "alice-updated-secret");
+        assert_eq!(updated.password, alice_updated);
 
         delete_web("example.test", "bob").unwrap();
         assert_eq!(find_web("example.test").unwrap().len(), 1);
         assert_eq!(find_web("other.test").unwrap().len(), 1);
 
         let database = std::fs::read(APP_DATA_DIR.get().unwrap().join("app.db")).unwrap();
-        for secret in [
-            "alice-first-secret",
-            "alice-updated-secret",
-            "bob-secret",
-            "other-secret",
-        ] {
+        for secret in [&alice_first, &alice_updated, &bob, &other] {
             assert!(
                 !database
                     .windows(secret.len())
                     .any(|bytes| bytes == secret.as_bytes()),
-                "app.db exposed {secret} as plaintext"
+                "app.db exposed a credential as plaintext"
             );
         }
     }
