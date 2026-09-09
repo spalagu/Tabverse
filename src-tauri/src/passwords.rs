@@ -4,18 +4,24 @@ use std::sync::Mutex;
 use base64::Engine as _;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-/// Captured-but-not-yet-saved logins, keyed by host. Values live here and
-/// nowhere else until the user decides.
-static PENDING: Mutex<Option<HashMap<String, (String, String)>>> = Mutex::new(None);
+/// Captured-but-not-yet-saved logins. The prompt's owning tab and displayed
+/// account are part of the key, so concurrent submissions on one host cannot
+/// make a prompt save another tab's password.
+type PendingKey = (String, String, String);
+static PENDING: Mutex<Option<HashMap<PendingKey, String>>> = Mutex::new(None);
 
-fn pending_insert(host: String, username: String, password: String) {
+fn pending_insert(tab_id: String, host: String, username: String, password: String) {
     let mut p = PENDING.lock().unwrap();
     p.get_or_insert_with(HashMap::new)
-        .insert(host, (username, password));
+        .insert((tab_id, host, username), password);
 }
 
-fn pending_take(host: &str) -> Option<(String, String)> {
-    PENDING.lock().unwrap().as_mut()?.remove(host)
+fn pending_take(tab_id: &str, host: &str, username: &str) -> Option<String> {
+    PENDING.lock().unwrap().as_mut()?.remove(&(
+        tab_id.to_string(),
+        host.to_string(),
+        username.to_string(),
+    ))
 }
 
 const NEVER_SCOPE: &str = "password-never";
@@ -72,7 +78,12 @@ pub fn handle_capture(app: &AppHandle, tab_id: &str, data_b64: &str) {
         }
     }
     eprintln!("[passwords] captured a login for {}", cap.host);
-    pending_insert(cap.host.clone(), cap.username.clone(), cap.password);
+    pending_insert(
+        tab_id.to_string(),
+        cap.host.clone(),
+        cap.username.clone(),
+        cap.password,
+    );
     // Which tab captured it (2026-08-12 review). The offer used to be
     // claimed by whichever browser view happened to be in front, which is the
     // same guess that put one tab's favicon on every tab of its host: a page's
@@ -193,18 +204,24 @@ pub fn capture_script() -> String {
 }
 
 #[tauri::command]
-pub fn pw_offer_save(host: String) -> Result<(), String> {
-    let Some((user, pass)) = pending_take(&host) else {
-        return Err("nothing pending for that host".into());
+pub fn pw_offer_save(tab_id: String, host: String, username: String) -> Result<(), String> {
+    let Some(pass) = pending_take(&tab_id, &host, &username) else {
+        return Err("no matching pending credential".into());
     };
-    crate::credentials::save_web(&host, &user, &pass)?;
+    crate::credentials::save_web(&host, &username, &pass)?;
     eprintln!("[passwords] saved a login for {host}");
     Ok(())
 }
 
 #[tauri::command]
-pub fn pw_offer_dismiss(app: AppHandle, host: String, never: bool) -> Result<(), String> {
-    let _ = pending_take(&host);
+pub fn pw_offer_dismiss(
+    app: AppHandle,
+    tab_id: String,
+    host: String,
+    username: String,
+    never: bool,
+) -> Result<(), String> {
+    let _ = pending_take(&tab_id, &host, &username);
     if never {
         never_add(&app, &host);
         eprintln!("[passwords] never offering for {host}");
@@ -275,4 +292,35 @@ pub fn pw_fill(
 }})();"#
     );
     wv.eval(&script).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_credentials_are_bound_to_tab_host_and_account() {
+        *PENDING.lock().unwrap() = None;
+        pending_insert(
+            "tab-a".into(),
+            "example.test".into(),
+            "alice".into(),
+            "alice-from-a".into(),
+        );
+        pending_insert(
+            "tab-b".into(),
+            "example.test".into(),
+            "alice".into(),
+            "alice-from-b".into(),
+        );
+        assert!(pending_take("tab-a", "example.test", "bob").is_none());
+        assert_eq!(
+            pending_take("tab-a", "example.test", "alice").as_deref(),
+            Some("alice-from-a")
+        );
+        assert_eq!(
+            pending_take("tab-b", "example.test", "alice").as_deref(),
+            Some("alice-from-b")
+        );
+    }
 }
