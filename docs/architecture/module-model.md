@@ -35,6 +35,8 @@ crates/tabverse-*            可复用 Rust Core
 
 `src-tauri/src/terminal_commands.rs` 持有 Terminal IPC、helper 事件缓冲、GUI channel 适配和共享源接线。终端进程与协议语义仍由 `tabverse-term` 实现，远程会话排序与权限语义仍由 `tabverse-remote` 实现。新增 Terminal 命令不得重新写回组合根。
 
+`src-tauri/src/remote_commands.rs` 持有 Remote Join IPC 和 GUI channel 适配。连接、加密传输、控制/数据流以及 Host 端授权仍由 `tabverse-remote` 实现；`context_id` 不在该适配器中参与授权判断。
+
 ## 非目标
 
 - 外部插件安装、更新、签名和包管理。

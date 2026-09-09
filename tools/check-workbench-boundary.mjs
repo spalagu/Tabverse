@@ -142,6 +142,9 @@ if (/\b(?:async\s+)?fn\s+(?:state|config)_(?:save|load|delete|list|get|set|reset
 if (/\b(?:async\s+)?fn\s+term_[a-z0-9_]+\s*\(/.test(tauriComposition)) {
   violations.push("src-tauri/src/lib.rs defines a Terminal command; move it to terminal_commands.rs");
 }
+if (/\b(?:async\s+)?fn\s+remote_(?:join|input|agent_[a-z0-9_]+|viewport|ping|leave)\s*\(/.test(tauriComposition)) {
+  violations.push("src-tauri/src/lib.rs defines a Remote Join command; move it to remote_commands.rs");
+}
 
 if (violations.length > 0) {
   console.error("V3 architecture boundary check failed:");
