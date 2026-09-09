@@ -32,6 +32,7 @@ mod share_commands;
 mod snapshot;
 #[cfg(target_os = "windows")]
 mod snapshot_win;
+mod state_commands;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod system_open;
 mod trusted_hosts;
@@ -97,6 +98,8 @@ use tabverse_term::{
 #[cfg(target_os = "macos")]
 use tauri::menu::SubmenuBuilder;
 use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State, Window};
+
+pub(crate) use state_commands::{app_state_store, state_dir, AppDatabase};
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
@@ -209,103 +212,6 @@ struct AppState {
     /// `app_share_start`. The source's glue seams (snapshot from the
     /// webview, clipboard, proxy) are wired there, once.
     app_source: Arc<app_share::AppShareSource>,
-}
-
-struct AppDatabase(Arc<tabverse_state::AppStateStore>);
-
-#[tauri::command]
-async fn config_get(db: State<'_, AppDatabase>) -> Result<config::ConfigSnapshot, String> {
-    let store = db.0.clone();
-    tauri::async_runtime::spawn_blocking(move || config::snapshot_with_store(&store))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn config_set(
-    db: State<'_, AppDatabase>,
-    key: String,
-    value: serde_json::Value,
-) -> Result<(), String> {
-    let store = db.0.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        config::set_with_store(&store, &key, &value)?;
-        config::project_network_setting(&key, Some(&value))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn config_reset(db: State<'_, AppDatabase>, key: String) -> Result<(), String> {
-    let store = db.0.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        config::reset_with_store(&store, &key)?;
-        config::project_network_setting(&key, None)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-fn state_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    app.path()
-        .app_data_dir()
-        .map(|d| d.join("state"))
-        .map_err(|e| format!("cannot resolve app data dir: {e}"))
-}
-
-fn app_state_store(app: &AppHandle) -> Result<tabverse_state::AppStateStore, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("cannot resolve app data dir: {e}"))?;
-    tabverse_state::AppStateStore::open(&app_data_dir).map_err(|e| format!("{e:#}"))
-}
-
-// The state_* commands keep SQLite ownership in the desktop application
-// service. Workbench sees scoped JSON but never a database handle.
-#[tauri::command]
-async fn state_save(app: AppHandle, scope: String, json: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        app_state_store(&app)?
-            .save_scope(&scope, &json)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn state_load(app: AppHandle, scope: String) -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        app_state_store(&app)?
-            .load_scope(&scope)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn state_delete(app: AppHandle, scope: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        app_state_store(&app)?
-            .delete_scope(&scope)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn state_list(app: AppHandle) -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        app_state_store(&app)?
-            .list_scopes()
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }
 
 const THEME_SCOPE: &str = "theme";
@@ -4092,10 +3998,10 @@ pub fn run() {
             fs_commands::fs_watch_start,
             fs_commands::fs_watch_stop,
             file_clipboard::clipboard_write_files,
-            state_save,
-            state_load,
-            state_delete,
-            state_list,
+            state_commands::state_save,
+            state_commands::state_load,
+            state_commands::state_delete,
+            state_commands::state_list,
             set_theme,
             theme_pref_save,
             theme_pref_load,
@@ -4155,9 +4061,9 @@ pub fn run() {
             completions::completions_update,
             default_apps::default_apps_status,
             default_apps::default_apps_set,
-            config_get,
-            config_set,
-            config_reset,
+            state_commands::config_get,
+            state_commands::config_set,
+            state_commands::config_reset,
             config::config_schema,
             config::config_key_set,
             config::config_key_reset,

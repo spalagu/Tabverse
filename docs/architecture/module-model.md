@@ -31,6 +31,8 @@ crates/tabverse-*            可复用 Rust Core
 
 `src-tauri/src/lib.rs` 是进程启动、共享状态组装、插件注册和命令清单的组合根；尚未迁出的适配器按功能继续拆分。Files 命令适配器位于 `src-tauri/src/fs_commands.rs`：阻塞池选择、IPC 参数和 watch 事件属于适配器，目录读取、搜索、替换、归档和检查语义仍由 `tabverse-fs` 实现。新增 Files 行为不得重新写回组合根。
 
+`src-tauri/src/state_commands.rs` 持有 `AppDatabase`、数据库路径解析以及 state/config IPC 适配器。其他 Desktop 适配器只能通过该模块公开的窄入口取得 `AppStateStore`；Workbench 和 Rust Core 不接触数据库句柄。
+
 ## 非目标
 
 - 外部插件安装、更新、签名和包管理。
