@@ -1,6 +1,7 @@
 mod agent_bridge;
 mod agent_http;
 mod agent_login;
+mod agent_supervisor;
 mod basic_auth;
 #[cfg(target_os = "windows")]
 mod basic_auth_win;

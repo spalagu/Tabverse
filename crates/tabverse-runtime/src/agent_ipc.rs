@@ -7,12 +7,15 @@
 use std::{
     collections::VecDeque,
     io::{self, Read, Write},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use hmac::{Hmac, Mac};
-use interprocess::local_socket::{prelude::*, ConnectOptions, GenericNamespaced};
-use interprocess::ConnectWaitMode;
+use interprocess::local_socket::{
+    prelude::*, ConnectOptions, GenericNamespaced, ListenerNonblockingMode, ListenerOptions,
+};
+use interprocess::{ConnectWaitMode, TryClone};
 use sha2::Sha256;
 
 const VERSION: u8 = 1;
@@ -66,6 +69,14 @@ pub struct Frame {
 impl Frame {
     pub fn new(kind: Kind, payload: Vec<u8>) -> Self {
         Self { kind, payload }
+    }
+
+    pub fn json(kind: Kind, value: &impl serde::Serialize) -> Result<Self, serde_json::Error> {
+        Ok(Self::new(kind, serde_json::to_vec(value)?))
+    }
+
+    pub fn decode_json<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
+        serde_json::from_slice(&self.payload)
     }
 
     fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
@@ -182,6 +193,16 @@ impl AgentIpcStream {
         self.stream.set_recv_timeout(timeout)
     }
 
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.stream.set_nonblocking(nonblocking)
+    }
+
+    pub fn sender(&self) -> io::Result<AgentIpcSender> {
+        Ok(AgentIpcSender {
+            stream: Arc::new(Mutex::new(self.stream.try_clone()?)),
+        })
+    }
+
     pub fn send(&mut self, frame: &Frame) -> Result<(), TransportError> {
         self.stream.write_all(&frame.encode()?)?;
         self.stream.flush()?;
@@ -277,6 +298,42 @@ impl AgentIpcStream {
     }
 }
 
+#[derive(Clone)]
+pub struct AgentIpcSender {
+    stream: Arc<Mutex<LocalSocketStream>>,
+}
+
+impl AgentIpcSender {
+    pub fn send(&self, frame: &Frame) -> Result<(), TransportError> {
+        let encoded = frame.encode()?;
+        let mut stream = self.stream.lock().unwrap();
+        stream.write_all(&encoded)?;
+        stream.flush()?;
+        Ok(())
+    }
+}
+
+/// Cross-platform Agent Supervisor listener: Unix domain socket on macOS and
+/// Linux, named pipe on Windows.
+pub struct AgentIpcListener {
+    listener: LocalSocketListener,
+}
+
+impl AgentIpcListener {
+    pub fn bind(endpoint: &str) -> io::Result<Self> {
+        let name = endpoint.to_ns_name::<GenericNamespaced>()?;
+        let listener = ListenerOptions::new()
+            .name(name)
+            .nonblocking(ListenerNonblockingMode::Both)
+            .create_sync()?;
+        Ok(Self { listener })
+    }
+
+    pub fn accept(&self) -> io::Result<AgentIpcStream> {
+        self.listener.accept().map(AgentIpcStream::new)
+    }
+}
+
 #[derive(Debug)]
 pub enum TransportError {
     Io(io::Error),
@@ -352,6 +409,40 @@ mod tests {
             client.recv().unwrap(),
             Frame::new(Kind::Event, br#"{"type":"done"}"#.to_vec())
         );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_callback_sender_can_emit_while_the_request_reader_is_blocked() {
+        let endpoint = endpoint();
+        let listener = AgentIpcListener::bind(&endpoint).unwrap();
+        let token = AuthToken::new([0x31; 32]);
+        let server = std::thread::spawn(move || {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok(stream) => break stream,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("accept failed: {error}"),
+                }
+            };
+            stream.authenticate_server(token, [0x41; 32]).unwrap();
+            let sender = stream.sender().unwrap();
+            std::thread::spawn(move || {
+                sender
+                    .send(&Frame::new(Kind::Event, b"async".to_vec()))
+                    .unwrap();
+            })
+            .join()
+            .unwrap();
+            assert_eq!(stream.recv().unwrap().kind, Kind::Ack);
+        });
+
+        let mut client = AgentIpcStream::connect(&endpoint, Duration::from_secs(2)).unwrap();
+        client.authenticate_client(token, [0x51; 32]).unwrap();
+        assert_eq!(client.recv().unwrap().payload, b"async");
+        client.send(&Frame::new(Kind::Ack, Vec::new())).unwrap();
         server.join().unwrap();
     }
 

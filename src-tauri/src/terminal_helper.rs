@@ -30,6 +30,8 @@ struct EndpointRecord {
     version: u8,
     pid: u32,
     name: String,
+    #[serde(default)]
+    agent_name: Option<String>,
 }
 
 pub struct TerminalHelper {
@@ -169,33 +171,48 @@ pub fn from_args(mut args: impl Iterator<Item = String>) -> Option<i32> {
         Err(_) => return Some(3),
     };
     let token = AuthToken::new(*token_bytes);
-    Some(run_helper(&state, token, DEFAULT_IDLE).unwrap_or(4))
+    crate::credentials::set_app_data_dir(state.parent().unwrap_or(&state).to_path_buf());
+    crate::http::ensure_crypto_provider();
+    let agent_token = tabverse_runtime::agent_ipc::AuthToken::new(*token_bytes);
+    Some(run_helper(&state, token, agent_token, DEFAULT_IDLE).unwrap_or(4))
 }
 
-fn run_helper(state: &Path, token: AuthToken, idle: Duration) -> io::Result<i32> {
+fn run_helper(
+    state: &Path,
+    token: AuthToken,
+    agent_token: tabverse_runtime::agent_ipc::AuthToken,
+    idle: Duration,
+) -> io::Result<i32> {
     fs::create_dir_all(state)?;
     let host_instance = format!("{}-{:016x}", std::process::id(), rand::random::<u64>());
     let runtime_dir = state.parent().unwrap_or(state);
     let store = tabverse_runtime::RuntimeStore::open(runtime_dir, &host_instance)
         .map_err(io::Error::other)?;
     let heartbeat_store = store.clone();
-    let server = HelperServer::start_persistent(
+    let agent =
+        crate::agent_supervisor::AgentSupervisor::start(agent_token, Some(state.to_path_buf()))?;
+    let server = HelperServer::start_persistent_guarded(
         token,
         rand::random(),
         CAPABILITIES,
         idle,
         store,
         host_instance,
+        agent.keep_alive(),
     )?;
     let record = EndpointRecord {
         version: tabverse_term::protocol::VERSION,
         pid: std::process::id(),
         name: server.endpoint().to_string(),
+        agent_name: Some(agent.endpoint().to_string()),
     };
     write_endpoint(state, &record)?;
     let mut last_heartbeat = Instant::now();
     while server.is_alive() {
         thread::sleep(Duration::from_millis(25));
+        if !agent.is_alive() {
+            return Err(io::Error::other("Agent Supervisor listener stopped"));
+        }
         if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
             heartbeat_store.heartbeat().map_err(io::Error::other)?;
             last_heartbeat = Instant::now();
@@ -273,7 +290,8 @@ mod tests {
             .split("fn run_helper")
             .next()
             .unwrap();
-        assert!(!helper_mode.contains("credentials::"));
+        assert!(!helper_mode.contains(&credential_read));
+        assert!(helper_mode.contains("credentials::set_app_data_dir"));
         assert!(helper_mode.contains("read_helper_token(io::stdin().lock())"));
     }
 
@@ -282,9 +300,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().to_path_buf();
         let token = AuthToken::new([0x77; 32]);
+        let agent_token = tabverse_runtime::agent_ipc::AuthToken::new([0x77; 32]);
         let helper_state = state.clone();
-        let helper =
-            thread::spawn(move || run_helper(&helper_state, token, Duration::from_millis(80)));
+        let helper = thread::spawn(move || {
+            run_helper(&helper_state, token, agent_token, Duration::from_millis(80))
+        });
         let endpoint = state.join(ENDPOINT_FILE);
         let deadline = Instant::now() + Duration::from_secs(2);
         while !endpoint.exists() && Instant::now() < deadline {

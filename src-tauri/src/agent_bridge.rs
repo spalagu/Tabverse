@@ -267,6 +267,9 @@ struct SessionHandle {
     /// Where this session's events are written, which is also where a viewer's
     /// catch-up is read from.
     log_path: Option<std::path::PathBuf>,
+    /// Current GUI/Supervisor-client event destination. Replaced on reattach
+    /// without restarting the LiveProcess session.
+    event_target: Arc<Mutex<AgentEventCallback>>,
 }
 
 #[derive(Default)]
@@ -318,12 +321,14 @@ impl AgentRegistry {
         let gate = Arc::new(UiGate::new());
         let cancel = CancelToken::new();
         let share_slot: ShareSlot = Arc::new(Mutex::new(None));
+        let event_target = Arc::new(Mutex::new(events));
 
         let cache_session_id = session_id.clone();
         let thread_gate = Arc::clone(&gate);
         let thread_share = Arc::clone(&share_slot);
         let thread_cancel = cancel.clone();
         let thread_log = log_path.clone();
+        let thread_target = Arc::clone(&event_target);
         std::thread::Builder::new()
             .name(format!("tabverse-{id}"))
             .spawn(move || {
@@ -386,7 +391,8 @@ impl AgentRegistry {
                         .with_cancel(thread_cancel.clone());
                 let mut sink = TeeSink {
                     forward: Box::new(move |event| {
-                        events(event);
+                        let target = thread_target.lock().unwrap().clone();
+                        target(event);
                     }),
                     log: thread_log.and_then(|p| SessionLog::open(p).ok()),
                     share: thread_share,
@@ -404,9 +410,36 @@ impl AgentRegistry {
                 gate,
                 share: share_slot,
                 log_path,
+                event_target,
             },
         );
         Ok(id)
+    }
+
+    /// Attach a new event consumer to an existing LiveProcess and replay its
+    /// durable history. The session thread and provider are not recreated.
+    pub fn attach(&self, session_id: &str, events: AgentEventCallback) -> Option<String> {
+        let sessions = self.sessions.lock().unwrap();
+        let (id, handle) = sessions
+            .iter()
+            .find(|(_, handle)| handle.session_id == session_id)?;
+        *handle.event_target.lock().unwrap() = Arc::clone(&events);
+        let replay = handle
+            .log_path
+            .as_ref()
+            .and_then(|path| SessionLog::replay(path).ok())
+            .map(|replay| replay.events)
+            .unwrap_or_default();
+        let id = id.clone();
+        drop(sessions);
+        for event in replay {
+            events(event);
+        }
+        Some(id)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sessions.lock().unwrap().is_empty()
     }
 
     pub fn prompt(&self, id: &str, text: String) -> Result<()> {
@@ -882,6 +915,44 @@ mod tests {
             replayed.len(),
             before.len()
         );
+    }
+
+    #[test]
+    fn reattaching_replaces_event_egress_without_restarting_the_session() {
+        let work = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let registry = AgentRegistry::new();
+        let (first, callback) = Recorder::new();
+        let id = registry
+            .start(
+                "tab-live".into(),
+                work.path().display().to_string(),
+                Some(logs.path().to_path_buf()),
+                callback,
+            )
+            .unwrap();
+        registry.prompt(&id, "first".into()).unwrap();
+        first.wait_for("the first prompt", |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::UserPrompt { text } if text == "first"))
+        });
+
+        let (second, callback) = Recorder::new();
+        assert_eq!(registry.attach("tab-live", callback), Some(id.clone()));
+        second.wait_for("the replay on the replacement callback", |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::UserPrompt { text } if text == "first"))
+        });
+        registry.cancel(&id).unwrap();
+        registry.prompt(&id, "second".into()).unwrap();
+        second.wait_for("a live event after reattach", |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::UserPrompt { text } if text == "second"))
+        });
+        registry.close(&id);
     }
 
     #[test]

@@ -114,6 +114,7 @@ impl HelperServer {
             capabilities,
             idle_timeout,
             Arc::new(HelperRuntime::new()),
+            Arc::new(|| false),
         )
     }
 
@@ -131,6 +132,26 @@ impl HelperServer {
             capabilities,
             idle_timeout,
             Arc::new(HelperRuntime::persistent(store, host_instance)),
+            Arc::new(|| false),
+        )
+    }
+
+    pub fn start_persistent_guarded(
+        token: AuthToken,
+        helper_nonce: [u8; 32],
+        capabilities: u64,
+        idle_timeout: Duration,
+        store: RuntimeStore,
+        host_instance: String,
+        keep_alive: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> io::Result<Self> {
+        Self::start_runtime(
+            token,
+            helper_nonce,
+            capabilities,
+            idle_timeout,
+            Arc::new(HelperRuntime::persistent(store, host_instance)),
+            keep_alive,
         )
     }
 
@@ -140,6 +161,7 @@ impl HelperServer {
         capabilities: u64,
         idle_timeout: Duration,
         runtime: Arc<HelperRuntime>,
+        keep_alive: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> io::Result<Self> {
         let endpoint = format!("tabverse-terminal-{}", uuid::Uuid::new_v4());
         let name = endpoint.as_str().to_ns_name::<GenericNamespaced>()?;
@@ -189,6 +211,7 @@ impl HelperServer {
                     }
                     let idle = thread_clients.load(Ordering::Acquire) == 0
                         && thread_runtime.list().is_empty()
+                        && !keep_alive()
                         && thread_activity.lock().unwrap().elapsed() >= idle_timeout;
                     if idle {
                         break;
@@ -474,6 +497,40 @@ mod tests {
         assert!(
             !server.is_alive(),
             "an empty helper must not become a daemon"
+        );
+        server.stop();
+    }
+
+    #[test]
+    fn another_runtime_driver_keeps_the_shared_supervisor_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RuntimeStore::open(dir.path(), "shared-helper").unwrap();
+        let agent_live = Arc::new(AtomicBool::new(true));
+        let guard = Arc::clone(&agent_live);
+        let mut server = HelperServer::start_persistent_guarded(
+            TOKEN,
+            [0x14; 32],
+            0,
+            Duration::from_millis(40),
+            store,
+            "shared-helper".into(),
+            Arc::new(move || guard.load(Ordering::Acquire)),
+        )
+        .unwrap();
+
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            server.is_alive(),
+            "the Agent driver still needs the process"
+        );
+        agent_live.store(false, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.is_alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !server.is_alive(),
+            "the final idle driver releases the process"
         );
         server.stop();
     }
