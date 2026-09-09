@@ -33,6 +33,8 @@ crates/tabverse-*            可复用 Rust Core
 
 `src-tauri/src/state_commands.rs` 持有 `AppDatabase`、数据库路径解析以及 state/config IPC 适配器。其他 Desktop 适配器只能通过该模块公开的窄入口取得 `AppStateStore`；Workbench 和 Rust Core 不接触数据库句柄。
 
+`src-tauri/src/terminal_commands.rs` 持有 Terminal IPC、helper 事件缓冲、GUI channel 适配和共享源接线。终端进程与协议语义仍由 `tabverse-term` 实现，远程会话排序与权限语义仍由 `tabverse-remote` 实现。新增 Terminal 命令不得重新写回组合根。
+
 ## 非目标
 
 - 外部插件安装、更新、签名和包管理。
