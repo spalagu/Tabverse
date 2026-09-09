@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
+const HOST_STALE_AFTER_SECONDS: i64 = 5;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeRecord {
     pub id: String,
@@ -15,18 +17,34 @@ pub struct RuntimeRecord {
 
 /// The Runtime Supervisor is the only writer of runtime.db. A GUI may ask the
 /// supervisor for records over IPC, but it never receives a database handle.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RuntimeStore {
     path: PathBuf,
+    host_instance: String,
 }
 
 impl RuntimeStore {
     pub fn open(runtime_dir: &Path, host_instance: &str) -> Result<Self> {
+        Self::open_at(
+            runtime_dir,
+            host_instance,
+            unix_time(),
+            HOST_STALE_AFTER_SECONDS,
+        )
+    }
+
+    fn open_at(
+        runtime_dir: &Path,
+        host_instance: &str,
+        now: i64,
+        stale_after: i64,
+    ) -> Result<Self> {
         std::fs::create_dir_all(runtime_dir).with_context(|| {
             format!("cannot create runtime directory {}", runtime_dir.display())
         })?;
         let store = Self {
             path: runtime_dir.join("runtime.db"),
+            host_instance: host_instance.to_owned(),
         };
         let connection = store.connection()?;
         connection.execute_batch(
@@ -42,10 +60,34 @@ impl RuntimeStore {
                id INTEGER PRIMARY KEY AUTOINCREMENT, runtime_id TEXT NOT NULL, generation INTEGER NOT NULL,\
                reason TEXT NOT NULL, occurred_at INTEGER NOT NULL\
              );\
-             INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, unixepoch());",
+             CREATE TABLE IF NOT EXISTS runtime_hosts (\
+               instance TEXT PRIMARY KEY, heartbeat_at INTEGER NOT NULL, stopped_at INTEGER\
+             );\
+             INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, unixepoch());\
+             INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, unixepoch());",
         )?;
-        mark_stale_hosts(&connection, host_instance)?;
+        claim_host(&connection, host_instance, now, stale_after)?;
         Ok(store)
+    }
+
+    /// Renew this supervisor's ownership lease. The helper calls this even
+    /// while no runtime is producing output, so health is independent of load.
+    pub fn heartbeat(&self) -> Result<()> {
+        let changed = self.connection()?.execute(
+            "UPDATE runtime_hosts SET heartbeat_at=?2 WHERE instance=?1 AND stopped_at IS NULL",
+            params![self.host_instance, unix_time()],
+        )?;
+        anyhow::ensure!(changed == 1, "runtime host lease is no longer owned");
+        Ok(())
+    }
+
+    /// Release the lease on a clean supervisor shutdown.
+    pub fn release(&self) -> Result<()> {
+        self.connection()?.execute(
+            "UPDATE runtime_hosts SET stopped_at=?2 WHERE instance=?1 AND stopped_at IS NULL",
+            params![self.host_instance, unix_time()],
+        )?;
+        Ok(())
     }
 
     pub fn put(&self, record: &RuntimeRecord) -> Result<()> {
@@ -140,8 +182,34 @@ fn generation_from_row(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Resul
     })
 }
 
-fn mark_stale_hosts(connection: &Connection, current_host: &str) -> Result<()> {
+fn unix_time() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn claim_host(
+    connection: &Connection,
+    current_host: &str,
+    now: i64,
+    stale_after: i64,
+) -> Result<()> {
     let transaction = connection.unchecked_transaction()?;
+    let cutoff = now.saturating_sub(stale_after);
+    let live_host: Option<String> = transaction
+        .query_row(
+            "SELECT instance FROM runtime_hosts WHERE instance<>?1 AND stopped_at IS NULL \
+             AND heartbeat_at>?2 ORDER BY heartbeat_at DESC LIMIT 1",
+            params![current_host, cutoff],
+            |row| row.get(0),
+        )
+        .optional()?;
+    anyhow::ensure!(
+        live_host.is_none(),
+        "runtime supervisor {} still owns runtime.db",
+        live_host.unwrap_or_default()
+    );
     transaction.execute(
         "INSERT INTO runtime_interruptions(runtime_id, generation, reason, occurred_at) \
          SELECT id, generation, 'runtime-host-stale', unixepoch() FROM runtimes \
@@ -152,6 +220,15 @@ fn mark_stale_hosts(connection: &Connection, current_host: &str) -> Result<()> {
         "UPDATE runtimes SET state='interrupted', updated_at=unixepoch() \
          WHERE host_instance<>?1 AND state NOT IN ('stopped', 'exited', 'interrupted')",
         [current_host],
+    )?;
+    transaction.execute(
+        "UPDATE runtime_hosts SET stopped_at=?2 WHERE instance<>?1 AND stopped_at IS NULL AND heartbeat_at<=?3",
+        params![current_host, now, cutoff],
+    )?;
+    transaction.execute(
+        "INSERT INTO runtime_hosts(instance, heartbeat_at, stopped_at) VALUES (?1, ?2, NULL) \
+         ON CONFLICT(instance) DO UPDATE SET heartbeat_at=excluded.heartbeat_at, stopped_at=NULL",
+        params![current_host, now],
     )?;
     transaction.commit()?;
     Ok(())
@@ -185,33 +262,59 @@ mod tests {
     }
 
     #[test]
-    fn a_new_host_marks_live_records_interrupted_without_fake_recovery() {
+    fn a_new_host_marks_expired_records_interrupted_without_fake_recovery() {
         let temp = tempfile::tempdir().unwrap();
-        RuntimeStore::open(temp.path(), "host-a")
+        RuntimeStore::open_at(temp.path(), "host-a", 0, 5)
             .unwrap()
             .put(&record("host-a"))
             .unwrap();
 
-        let next_host = RuntimeStore::open(temp.path(), "host-b").unwrap();
+        let next_host = RuntimeStore::open_at(temp.path(), "host-b", 10, 5).unwrap();
         let stale = next_host.get("terminal-1").unwrap().unwrap();
         assert_eq!(stale.state, "interrupted");
         assert_eq!(stale.generation, 1);
         assert_eq!(next_host.interruption_count("terminal-1").unwrap(), 1);
 
-        drop(next_host);
-        let reopened = RuntimeStore::open(temp.path(), "host-c").unwrap();
+        next_host.release().unwrap();
+        let reopened = RuntimeStore::open_at(temp.path(), "host-c", 11, 5).unwrap();
         assert_eq!(reopened.interruption_count("terminal-1").unwrap(), 1);
     }
 
     #[test]
     fn stopped_runtime_is_not_reported_as_interrupted() {
         let temp = tempfile::tempdir().unwrap();
-        let first = RuntimeStore::open(temp.path(), "host-a").unwrap();
+        let first = RuntimeStore::open_at(temp.path(), "host-a", 0, 5).unwrap();
         let mut stopped = record("host-a");
         stopped.state = "stopped".into();
         first.put(&stopped).unwrap();
-        let second = RuntimeStore::open(temp.path(), "host-b").unwrap();
+        first.release().unwrap();
+        let second = RuntimeStore::open_at(temp.path(), "host-b", 1, 5).unwrap();
         assert_eq!(second.get("terminal-1").unwrap().unwrap().state, "stopped");
         assert_eq!(second.interruption_count("terminal-1").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_live_host_excludes_a_second_runtime_database_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = RuntimeStore::open_at(temp.path(), "host-a", 100, 5).unwrap();
+        first.put(&record("host-a")).unwrap();
+
+        let error = RuntimeStore::open_at(temp.path(), "host-b", 104, 5).unwrap_err();
+        assert!(error.to_string().contains("host-a still owns runtime.db"));
+        assert_eq!(first.get("terminal-1").unwrap().unwrap().state, "attached");
+    }
+
+    #[test]
+    fn an_expired_host_is_interrupted_once_and_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = RuntimeStore::open_at(temp.path(), "host-a", 100, 5).unwrap();
+        first.put(&record("host-a")).unwrap();
+
+        let second = RuntimeStore::open_at(temp.path(), "host-b", 106, 5).unwrap();
+        assert_eq!(
+            second.get("terminal-1").unwrap().unwrap().state,
+            "interrupted"
+        );
+        assert_eq!(second.interruption_count("terminal-1").unwrap(), 1);
     }
 }

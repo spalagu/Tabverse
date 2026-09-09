@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 const ENDPOINT_FILE: &str = "terminal-helper.json";
 const CONNECT_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_IDLE: Duration = Duration::from_secs(30);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const CAPABILITIES: u64 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -177,6 +178,7 @@ fn run_helper(state: &Path, token: AuthToken, idle: Duration) -> io::Result<i32>
     let runtime_dir = state.parent().unwrap_or(state);
     let store = tabverse_runtime::RuntimeStore::open(runtime_dir, &host_instance)
         .map_err(io::Error::other)?;
+    let heartbeat_store = store.clone();
     let server = HelperServer::start_persistent(
         token,
         rand::random(),
@@ -191,9 +193,15 @@ fn run_helper(state: &Path, token: AuthToken, idle: Duration) -> io::Result<i32>
         name: server.endpoint().to_string(),
     };
     write_endpoint(state, &record)?;
+    let mut last_heartbeat = Instant::now();
     while server.is_alive() {
         thread::sleep(Duration::from_millis(25));
+        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+            heartbeat_store.heartbeat().map_err(io::Error::other)?;
+            last_heartbeat = Instant::now();
+        }
     }
+    heartbeat_store.release().map_err(io::Error::other)?;
     remove_own_endpoint(state, record.pid);
     Ok(0)
 }

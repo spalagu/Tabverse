@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-# build.rs reads tauri.conf.json to bake the claimed file types into the
+# build.rs reads the content catalog to bake claimed file types into the
 # binary — the runtime config does not carry them (see build.rs).
 serde_json = { workspace = true }
 
