@@ -68,6 +68,12 @@ notify = "6"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Freedesktop Secret Service is implemented by GNOME Keyring and KWallet.
+# Only the machine master-key bundle lives there; credential records remain
+# encrypted in app.db like the macOS and Windows implementations.
+secret-service = { version = "5.2.0", default-features = false, features = ["rt-tokio-crypto-rust"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
 security-framework-sys = "2"

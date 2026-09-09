@@ -17,14 +17,14 @@ const SEP: char = '\u{1}';
 const WEB_SERVICE: &str = "Tabverse Web Passwords";
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 const AUTH_SERVICE: &str = "Tabverse HTTP Auth";
-#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(test))]
 const KEY_BUNDLE_SERVICE: &str = "Tabverse Key Bundle";
-#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(test))]
 const KEY_BUNDLE_ACCOUNT: &str = "key-bundle-v1";
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(any(test, unix, target_os = "windows"))]
 const KEY_BUNDLE_MAGIC: &[u8] = b"TABVERSEKEYBUNDLE1";
 const KEY_BYTES: usize = 32;
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(any(test, unix, target_os = "windows"))]
 const KEY_BUNDLE_BYTES: usize = KEY_BUNDLE_MAGIC.len() + KEY_BYTES * 3;
 
 /// The only secret stored in the platform credential store.
@@ -39,7 +39,7 @@ struct KeyBundle {
     cookie_snapshot: [u8; KEY_BYTES],
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(any(test, unix, target_os = "windows"))]
 impl KeyBundle {
     fn generate() -> Self {
         Self {
@@ -129,13 +129,15 @@ pub fn set_app_data_dir(dir: std::path::PathBuf) {
 /// Hold the returned guard for the whole test.
 #[cfg(test)]
 pub(crate) fn test_vault_guard(
-    preferred: std::path::PathBuf,
+    _preferred: std::path::PathBuf,
 ) -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     // A test that panicked while holding this poisoned it; the next test still
     // wants a clean directory, so take it anyway.
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = APP_DATA_DIR.set(preferred);
+    let stable =
+        std::env::temp_dir().join(format!("tabverse-credential-tests-{}", std::process::id()));
+    let _ = APP_DATA_DIR.set(stable);
     if let Some(dir) = APP_DATA_DIR.get() {
         let _ = std::fs::create_dir_all(dir);
         let _ = std::fs::remove_file(dir.join("app.db"));
@@ -424,7 +426,7 @@ fn key_bundle() -> Result<KeyBundle, String> {
 /// Apply the platform-independent read/create policy around a credential
 /// store. `None` is the only state allowed to create; read errors and corrupt
 /// bytes return without invoking `write`.
-#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+#[cfg(any(test, unix, target_os = "windows"))]
 fn load_or_create_key_bundle(
     read: impl FnOnce() -> Result<Option<Vec<u8>>, String>,
     write: impl FnOnce(&mut [u8]) -> Result<(), String>,
@@ -527,9 +529,62 @@ fn load_key_bundle_from_system() -> Result<KeyBundle, String> {
 /// Deliberately an error rather than a file with the key next to the
 /// ciphertext: that arrangement encrypts nothing, and pretending otherwise
 /// is worse than saying the feature is not available here.
-#[cfg(all(not(test), not(any(target_os = "macos", target_os = "windows"))))]
+#[cfg(all(not(test), unix, not(target_os = "macos")))]
 fn load_key_bundle_from_system() -> Result<KeyBundle, String> {
-    Err("this system has no credential store this app can keep a key bundle in".into())
+    use secret_service::blocking::SecretService;
+    use secret_service::EncryptionType;
+    use std::collections::HashMap;
+
+    fn attributes() -> HashMap<&'static str, &'static str> {
+        HashMap::from([
+            ("application", "app.tabverse"),
+            ("account", KEY_BUNDLE_ACCOUNT),
+        ])
+    }
+
+    load_or_create_key_bundle(
+        || {
+            let service = SecretService::connect(EncryptionType::Dh)
+                .map_err(|e| format!("connect to Secret Service: {e}"))?;
+            let collection = service
+                .get_default_collection()
+                .map_err(|e| format!("open default Secret Service collection: {e}"))?;
+            collection
+                .ensure_unlocked()
+                .map_err(|e| format!("unlock Secret Service collection: {e}"))?;
+            let items = collection
+                .search_items(attributes())
+                .map_err(|e| format!("search Secret Service: {e}"))?;
+            let Some(item) = items.first() else {
+                return Ok(None);
+            };
+            item.ensure_unlocked()
+                .map_err(|e| format!("unlock Tabverse key bundle: {e}"))?;
+            item.get_secret()
+                .map(Some)
+                .map_err(|e| format!("read Tabverse key bundle: {e}"))
+        },
+        |bytes| {
+            let service = SecretService::connect(EncryptionType::Dh)
+                .map_err(|e| format!("connect to Secret Service: {e}"))?;
+            let collection = service
+                .get_default_collection()
+                .map_err(|e| format!("open default Secret Service collection: {e}"))?;
+            collection
+                .ensure_unlocked()
+                .map_err(|e| format!("unlock Secret Service collection: {e}"))?;
+            collection
+                .create_item(
+                    KEY_BUNDLE_SERVICE,
+                    attributes(),
+                    bytes,
+                    true,
+                    "application/octet-stream",
+                )
+                .map(|_| ())
+                .map_err(|e| format!("create Tabverse key bundle: {e}"))
+        },
+    )
 }
 
 #[cfg(test)]
