@@ -247,7 +247,10 @@ impl RemoteHttpStream {
 mod tests {
     use super::*;
     use iroh::Endpoint;
-    use std::{net::Ipv4Addr, time::Duration};
+    use std::{
+        net::Ipv4Addr,
+        time::{Duration, Instant},
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -334,6 +337,8 @@ mod tests {
             let mut control_marker = [0u8; 13];
             host_control_recv.read_exact(&mut control_marker).await?;
             assert_eq!(&control_marker, b"control-alive");
+            let before = client_conn.stats();
+            let started = Instant::now();
 
             let gateway = HostNetworkGateway::new(Default::default());
             let host_data = tokio::spawn(async move {
@@ -374,6 +379,22 @@ mod tests {
             let mut marker = [0u8; 1];
             host_control_recv.read_exact(&mut marker).await?;
             assert_eq!(&marker, b"!");
+
+            // Transport-level baseline: count encrypted QUIC datagrams, not
+            // just application bytes. A normal page fetch may pay framing and
+            // ACK overhead, but must remain proportional to its body instead
+            // of silently starting a continuous pixel stream.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let after = client_conn.stats();
+            let host_to_remote = after.udp_rx.bytes.saturating_sub(before.udp_rx.bytes);
+            let remote_to_host = after.udp_tx.bytes.saturating_sub(before.udp_tx.bytes);
+            assert!(host_to_remote >= BODY_LEN as u64);
+            assert!(host_to_remote < (BODY_LEN as u64) * 2);
+            assert!(remote_to_host < 256 * 1024);
+            eprintln!(
+                "remote_baseline body_bytes={BODY_LEN} host_to_remote_bytes={host_to_remote} remote_to_host_bytes={remote_to_host} elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
 
             host_data.await??;
             origin.await?;
