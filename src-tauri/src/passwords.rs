@@ -18,15 +18,13 @@ fn pending_take(host: &str) -> Option<(String, String)> {
     PENDING.lock().unwrap().as_mut()?.remove(host)
 }
 
-const NEVER_FILE: &str = "password-never.json";
+const NEVER_SCOPE: &str = "password-never";
 
 fn never_list(app: &AppHandle) -> Vec<String> {
-    let Ok(dir) = crate::state_dir(app) else {
-        return Vec::new();
-    };
-    std::fs::read(dir.join(NEVER_FILE))
+    crate::app_state_store(app)
         .ok()
-        .and_then(|d| serde_json::from_slice(&d).ok())
+        .and_then(|store| store.load_scope(NEVER_SCOPE).ok().flatten())
+        .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default()
 }
 
@@ -36,11 +34,8 @@ fn never_add(app: &AppHandle, host: &str) {
         return;
     }
     list.push(host.to_string());
-    if let Ok(dir) = crate::state_dir(app) {
-        let _ = std::fs::create_dir_all(&dir);
-        if let Ok(json) = serde_json::to_vec(&list) {
-            let _ = std::fs::write(dir.join(NEVER_FILE), json);
-        }
+    if let (Ok(store), Ok(json)) = (crate::app_state_store(app), serde_json::to_string(&list)) {
+        let _ = store.save_scope(NEVER_SCOPE, &json);
     }
 }
 
