@@ -760,4 +760,45 @@ mod key_bundle_tests {
             .unwrap();
         assert_eq!(imported, sealed);
     }
+
+    #[test]
+    fn browser_credentials_support_multiple_accounts_update_and_delete() {
+        let preferred = tempfile::tempdir().unwrap();
+        let _guard = test_vault_guard(preferred.path().to_path_buf());
+        save_web("example.test", "alice", "alice-first-secret").unwrap();
+        save_web("example.test", "bob", "bob-secret").unwrap();
+        save_web("other.test", "alice", "other-secret").unwrap();
+
+        let accounts = find_web("example.test").unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].username, "alice");
+        assert_eq!(accounts[1].username, "bob");
+
+        save_web("example.test", "alice", "alice-updated-secret").unwrap();
+        let updated = find_web("example.test")
+            .unwrap()
+            .into_iter()
+            .find(|credential| credential.username == "alice")
+            .unwrap();
+        assert_eq!(updated.password, "alice-updated-secret");
+
+        delete_web("example.test", "bob").unwrap();
+        assert_eq!(find_web("example.test").unwrap().len(), 1);
+        assert_eq!(find_web("other.test").unwrap().len(), 1);
+
+        let database = std::fs::read(APP_DATA_DIR.get().unwrap().join("app.db")).unwrap();
+        for secret in [
+            "alice-first-secret",
+            "alice-updated-secret",
+            "bob-secret",
+            "other-secret",
+        ] {
+            assert!(
+                !database
+                    .windows(secret.len())
+                    .any(|bytes| bytes == secret.as_bytes()),
+                "app.db exposed {secret} as plaintext"
+            );
+        }
+    }
 }
