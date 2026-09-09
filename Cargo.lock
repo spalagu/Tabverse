@@ -5881,6 +5881,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tabverse-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "tempfile",
+]
+
+[[package]]
 name = "tabverse-state"
 version = "0.1.0"
 dependencies = [
