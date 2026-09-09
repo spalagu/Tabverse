@@ -7,6 +7,24 @@ pub const MAX_STATE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SCOPE_LEN: usize = 120;
 const SCHEMA_VERSION: i64 = 1;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceRecord {
+    pub id: String,
+    pub title: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub tabs: Vec<TabRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TabRecord {
+    pub id: String,
+    pub kind: String,
+    pub state_version: u32,
+    pub state_json: String,
+    pub position: i64,
+}
+
 /// The desktop-owned durable store. Workbench talks to this through narrow
 /// state commands and never opens SQLite itself.
 pub struct AppStateStore {
@@ -70,6 +88,87 @@ impl AppStateStore {
             .map_err(Into::into)
     }
 
+    /// Replace one workspace and its ordered tabs atomically. Tab state stays
+    /// opaque: only the owning Feature Module may decode or migrate it.
+    pub fn save_workspace(&self, workspace: &WorkspaceRecord) -> Result<()> {
+        validate_identifier("workspace", &workspace.id)?;
+        if workspace.title.trim().is_empty() {
+            return Err(anyhow!("workspace title must not be empty"));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO workspaces(id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)\
+             ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at",
+            params![
+                workspace.id,
+                workspace.title,
+                workspace.created_at,
+                workspace.updated_at
+            ],
+        )?;
+        transaction.execute("DELETE FROM tabs WHERE workspace_id=?1", [&workspace.id])?;
+        for (index, tab) in workspace.tabs.iter().enumerate() {
+            validate_identifier("tab", &tab.id)?;
+            validate_identifier("tab kind", &tab.kind)?;
+            validate_json(&tab.state_json).with_context(|| format!("tab {:?}", tab.id))?;
+            let position = i64::try_from(index).context("too many tabs in workspace")?;
+            transaction.execute(
+                "INSERT INTO tabs(id, workspace_id, kind, state_version, state_json, position)\
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    tab.id,
+                    workspace.id,
+                    tab.kind,
+                    tab.state_version,
+                    tab.state_json,
+                    position
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn load_workspace(&self, workspace_id: &str) -> Result<Option<WorkspaceRecord>> {
+        validate_identifier("workspace", workspace_id)?;
+        let connection = self.connection()?;
+        let workspace = connection
+            .query_row(
+                "SELECT id, title, created_at, updated_at FROM workspaces WHERE id=?1",
+                [workspace_id],
+                |row| {
+                    Ok(WorkspaceRecord {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        created_at: row.get(2)?,
+                        updated_at: row.get(3)?,
+                        tabs: Vec::new(),
+                    })
+                },
+            )
+            .optional()?;
+        let Some(mut workspace) = workspace else {
+            return Ok(None);
+        };
+        let mut statement = connection.prepare(
+            "SELECT id, kind, state_version, state_json, position FROM tabs \
+             WHERE workspace_id=?1 ORDER BY position, id",
+        )?;
+        workspace.tabs = statement
+            .query_map([workspace_id], |row| {
+                Ok(TabRecord {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    state_version: row.get(2)?,
+                    state_json: row.get(3)?,
+                    position: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some(workspace))
+    }
+
     fn connection(&self) -> Result<Connection> {
         let connection = Connection::open(&self.path)
             .with_context(|| format!("cannot open {}", self.path.display()))?;
@@ -129,6 +228,13 @@ fn validate_scope(scope: &str) -> Result<()> {
         .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-')))
     {
         return Err(anyhow!("invalid state scope {scope:?}"));
+    }
+    Ok(())
+}
+
+fn validate_identifier(label: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() || value.len() > 255 {
+        return Err(anyhow!("{label} identifier must be 1..=255 characters"));
     }
     Ok(())
 }
@@ -245,5 +351,47 @@ mod tests {
             store.load_scope("session").unwrap().as_deref(),
             Some("not json")
         );
+    }
+
+    #[test]
+    fn workspace_and_versioned_opaque_tabs_replace_atomically() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AppStateStore::open(temp.path()).unwrap();
+        let mut workspace = WorkspaceRecord {
+            id: "main".into(),
+            title: "Workspace".into(),
+            created_at: 10,
+            updated_at: 20,
+            tabs: vec![
+                TabRecord {
+                    id: "second".into(),
+                    kind: "browser".into(),
+                    state_version: 7,
+                    state_json: r#"{"url":"https://example.com"}"#.into(),
+                    position: 99,
+                },
+                TabRecord {
+                    id: "first".into(),
+                    kind: "future-module".into(),
+                    state_version: 42,
+                    state_json: r#"{"unknown":true}"#.into(),
+                    position: 0,
+                },
+            ],
+        };
+        store.save_workspace(&workspace).unwrap();
+        let loaded = store.load_workspace("main").unwrap().unwrap();
+        assert_eq!(loaded.tabs[0].position, 0);
+        assert_eq!(loaded.tabs[1].position, 1);
+        assert_eq!(loaded.tabs[1].kind, "future-module");
+        assert_eq!(loaded.tabs[1].state_version, 42);
+
+        workspace.tabs.remove(0);
+        workspace.updated_at = 30;
+        store.save_workspace(&workspace).unwrap();
+        let replaced = store.load_workspace("main").unwrap().unwrap();
+        assert_eq!(replaced.updated_at, 30);
+        assert_eq!(replaced.tabs.len(), 1);
+        assert_eq!(replaced.tabs[0].id, "first");
     }
 }
