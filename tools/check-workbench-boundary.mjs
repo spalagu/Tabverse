@@ -6,7 +6,7 @@ const WORKBENCH = join(ROOT, "packages", "workbench", "src");
 const RUNTIME_CONTRACTS = join(ROOT, "packages", "runtime-contracts", "src");
 const RUNTIME_DESKTOP = join(ROOT, "packages", "runtime-desktop", "src");
 const JOIN_APP = join(ROOT, "apps", "join", "src");
-const SOURCE_FILE = /\.(?:ts|tsx)$/;
+const SOURCE_FILE = /\.(?:rs|ts|tsx)$/;
 const TEST_FILE = /\.test\.(?:ts|tsx)$/;
 const IMPORT_SPECIFIER = /(?:from\s*|import\s*)["']([^"']+)["']/g;
 
@@ -149,6 +149,28 @@ for (const manifestPath of ["Cargo.toml", "src-tauri/Cargo.toml"]) {
   const manifest = readFileSync(path, "utf8");
   if (manifest.includes("github.com/spalagu/tauri") || /runtime-cef|\bcef\b/i.test(manifest)) {
     violations.push(`${manifestPath} reintroduces the abandoned CEF/custom-Tauri runtime path`);
+  }
+}
+
+for (const legacyPath of [
+  "crates/runtime-cef",
+  "crates/plugin-kernel",
+  "crates/resident-runtime",
+  "src-tauri/src/cef",
+]) {
+  if (existsSync(join(ROOT, legacyPath))) {
+    violations.push(`${legacyPath} resurrects an architecture explicitly dropped by V3`);
+  }
+}
+
+for (const sourceRoot of ["apps", "packages", "src", "src-tauri/src", "crates"]) {
+  const root = join(ROOT, sourceRoot);
+  if (!existsSync(root)) continue;
+  for (const path of sourceFiles(root)) {
+    const source = readFileSync(path, "utf8");
+    if (/\bProxy(?:Req|Res)\b/.test(source)) {
+      violations.push(`${relative(ROOT, path)} reintroduces legacy ProxyReq/ProxyRes control frames`);
+    }
   }
 }
 
