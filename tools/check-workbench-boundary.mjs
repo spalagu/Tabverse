@@ -130,6 +130,13 @@ for (const manifestPath of ["Cargo.toml", "src-tauri/Cargo.toml"]) {
   }
 }
 
+// Thin Tauri: Files IPC belongs to its adapter, never back in the composition
+// root. The qualified handler list is allowed; function definitions are not.
+const tauriComposition = readFileSync(join(ROOT, "src-tauri/src/lib.rs"), "utf8");
+if (/\b(?:async\s+)?fn\s+fs_[a-z0-9_]+\s*\(/.test(tauriComposition)) {
+  violations.push("src-tauri/src/lib.rs defines a Files command; move it to fs_commands.rs");
+}
+
 if (violations.length > 0) {
   console.error("V3 architecture boundary check failed:");
   for (const violation of violations) console.error(`- ${violation}`);

@@ -62,6 +62,7 @@ mod config;
 mod credentials;
 mod favicon;
 mod file_clipboard;
+mod fs_commands;
 mod fs_watch;
 mod http;
 mod keys;
@@ -82,7 +83,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
-use tabverse_fs::{FileMeta, FsBackend, Inspection, Listing};
+use tabverse_fs::FsBackend;
 use tabverse_proto::{RemoteHostMsg, TermEvent};
 use tabverse_remote::source::agent::AgentSource;
 use tabverse_remote::source::terminal::TerminalSource;
@@ -244,287 +245,6 @@ async fn config_reset(db: State<'_, AppDatabase>, key: String) -> Result<(), Str
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-// Filesystem commands run on the blocking pool: a `git status` over a large
-// repo, or a slow disk, must never freeze the UI thread that every terminal
-// tab paints on. (Sync Tauri commands execute on the main thread.)
-#[tauri::command]
-async fn fs_list(state: State<'_, AppState>, dir: String) -> Result<Listing, String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || fs.list_dir(&dir).map_err(|e| format!("{e:#}")))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn fs_read(state: State<'_, AppState>, path: String) -> Result<FileMeta, String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || fs.read_file(&path).map_err(|e| format!("{e:#}")))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn fs_write(state: State<'_, AppState>, path: String, content: String) -> Result<(), String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        fs.write_text(&path, &content).map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn fs_transfer(
-    state: State<'_, AppState>,
-    from: String,
-    into_dir: String,
-    cut: bool,
-    overwrite: Option<bool>,
-) -> Result<String, String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        if cut {
-            fs.move_into(&from, &into_dir, overwrite.unwrap_or(false))
-        } else {
-            fs.copy_into(&from, &into_dir, overwrite.unwrap_or(false))
-        }
-        .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-fn walk_rules() -> tabverse_fs::WalkRules {
-    match crate::config::load() {
-        Ok(loaded) => tabverse_fs::WalkRules {
-            exclude: loaded.config.files.exclude,
-            respect_gitignore: loaded.config.files.respect_gitignore,
-        },
-        Err(_) => tabverse_fs::WalkRules::default(),
-    }
-}
-
-#[tauri::command]
-async fn fs_grep(
-    root: String,
-    query: String,
-    options: tabverse_fs::search::GrepOptions,
-    max_hits: usize,
-) -> Result<tabverse_fs::search::GrepResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let rules = walk_rules();
-        tabverse_fs::search::grep(&root, &query, options, max_hits, &rules)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn fs_replace(
-    root: String,
-    query: String,
-    replacement: String,
-    options: tabverse_fs::search::GrepOptions,
-    only: Option<Vec<String>>,
-    plan: Option<tabverse_fs::search::ReplacePlan>,
-) -> Result<tabverse_fs::search::ReplaceResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let rules = walk_rules();
-        tabverse_fs::search::replace_all(&root, &query, &replacement, options, only, plan, &rules)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn fs_replace_preview(
-    root: String,
-    query: String,
-    replacement: String,
-    options: tabverse_fs::search::GrepOptions,
-    only: Option<Vec<String>>,
-) -> Result<tabverse_fs::search::ReplacePreview, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let rules = walk_rules();
-        tabverse_fs::search::replace_preview(&root, &query, &replacement, options, only, &rules)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn fs_changes(
-    state: State<'_, AppState>,
-    root: String,
-) -> Result<tabverse_fs::ChangeList, String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || fs.changes(&root))
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn fs_walk(
-    dir: String,
-    include_hidden: bool,
-    name: Option<String>,
-) -> Result<tabverse_fs::WalkResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let rules = walk_rules();
-        tabverse_fs::walk(&dir, 5000, include_hidden, name.as_deref(), &rules)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn fs_create(state: State<'_, AppState>, path: String, dir: bool) -> Result<(), String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        if dir {
-            fs.create_dir(&path).map_err(|e| format!("{e:#}"))
-        } else {
-            fs.create_file(&path).map_err(|e| format!("{e:#}"))
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn fs_rename(state: State<'_, AppState>, from: String, to: String) -> Result<(), String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        fs.rename(&from, &to).map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Moves to the system trash — recoverable, never a hard delete.
-#[tauri::command]
-async fn fs_trash(state: State<'_, AppState>, path: String) -> Result<(), String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || fs.trash(&path).map_err(|e| format!("{e:#}")))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-/// Metadata inspection (certificates / archives / plists) — read-only, never
-/// executes anything, and never returns private key material (tabverse_fs rules).
-#[tauri::command]
-async fn fs_inspect(state: State<'_, AppState>, path: String) -> Result<Inspection, String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || fs.inspect(&path).map_err(|e| format!("{e:#}")))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn fs_archive_create(
-    state: State<'_, AppState>,
-    entries: Vec<String>,
-    dest: String,
-    format: String,
-) -> Result<String, String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        fs.archive_create(&entries, &dest, &format)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn fs_archive_extract(
-    state: State<'_, AppState>,
-    archive: String,
-    dest_dir: String,
-) -> Result<tabverse_fs::ExtractOutcome, String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        fs.archive_extract(&archive, &dest_dir)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-fn fs_reveal(path: String) -> Result<(), String> {
-    let p = tabverse_fs::expand_path(&path);
-    #[cfg(target_os = "macos")]
-    let res = std::process::Command::new("open").arg("-R").arg(&p).spawn();
-    #[cfg(target_os = "windows")]
-    let res = std::process::Command::new("explorer")
-        .arg(format!("/select,{}", p.display()))
-        .spawn();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let res = std::process::Command::new("xdg-open")
-        .arg(p.parent().unwrap_or(&p))
-        .spawn();
-    res.map(|_| ()).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn fs_read_range(
-    state: State<'_, AppState>,
-    path: String,
-    offset: u64,
-    len: u32,
-) -> Result<tabverse_fs::ReadRange, String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        fs.read_range(&path, offset, len)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn fs_sqlite_rows(
-    state: State<'_, AppState>,
-    path: String,
-    table: String,
-    limit: u32,
-    offset: u32,
-) -> Result<tabverse_fs::SqliteRows, String> {
-    let fs = state.fs.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        fs.sqlite_rows(&path, &table, limit, offset)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-fn fs_watch_start(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    tab_id: String,
-    root: String,
-) -> Result<(), String> {
-    if root.is_empty() {
-        // An empty root is the pre-restore state, not a directory to watch.
-        state.watches.stop(&tab_id);
-        return Ok(());
-    }
-    let rules = walk_rules();
-    state.watches.start(&app, &tab_id, &root, &rules)
-}
-
-#[tauri::command]
-fn fs_watch_stop(state: State<'_, AppState>, tab_id: String) {
-    state.watches.stop(&tab_id);
 }
 
 fn state_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -4351,26 +4071,26 @@ pub fn run() {
             remote_viewport,
             remote_ping,
             remote_leave,
-            fs_list,
-            fs_read,
-            fs_write,
-            fs_reveal,
-            fs_walk,
-            fs_transfer,
-            fs_grep,
-            fs_replace,
-            fs_replace_preview,
-            fs_changes,
-            fs_create,
-            fs_rename,
-            fs_trash,
-            fs_inspect,
-            fs_sqlite_rows,
-            fs_archive_create,
-            fs_archive_extract,
-            fs_read_range,
-            fs_watch_start,
-            fs_watch_stop,
+            fs_commands::fs_list,
+            fs_commands::fs_read,
+            fs_commands::fs_write,
+            fs_commands::fs_reveal,
+            fs_commands::fs_walk,
+            fs_commands::fs_transfer,
+            fs_commands::fs_grep,
+            fs_commands::fs_replace,
+            fs_commands::fs_replace_preview,
+            fs_commands::fs_changes,
+            fs_commands::fs_create,
+            fs_commands::fs_rename,
+            fs_commands::fs_trash,
+            fs_commands::fs_inspect,
+            fs_commands::fs_sqlite_rows,
+            fs_commands::fs_archive_create,
+            fs_commands::fs_archive_extract,
+            fs_commands::fs_read_range,
+            fs_commands::fs_watch_start,
+            fs_commands::fs_watch_stop,
             file_clipboard::clipboard_write_files,
             state_save,
             state_load,

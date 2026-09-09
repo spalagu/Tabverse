@@ -4325,7 +4325,7 @@ archive_after = "24h"          # 12h | 24h | 7d | off
 
     #[test]
     fn the_walk_commands_read_the_files_config_from_the_real_file() {
-        use crate::{fs_grep, fs_walk};
+        use crate::fs_commands::{fs_grep, fs_walk};
         let _guard = ENV_LOCK.lock().expect("env lock");
         let dir = tempfile::tempdir().expect("tempdir");
         let tree = dir.path().join("tree");

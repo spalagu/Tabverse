@@ -27,6 +27,10 @@ crates/tabverse-*            可复用 Rust Core
 
 `tools/check-workbench-boundary.mjs` 在 `npm run check:architecture` 中自动执行以上边界。
 
+## Desktop 组合根
+
+`src-tauri/src/lib.rs` 是进程启动、共享状态组装、插件注册和命令清单的组合根；尚未迁出的适配器按功能继续拆分。Files 命令适配器位于 `src-tauri/src/fs_commands.rs`：阻塞池选择、IPC 参数和 watch 事件属于适配器，目录读取、搜索、替换、归档和检查语义仍由 `tabverse-fs` 实现。新增 Files 行为不得重新写回组合根。
+
 ## 非目标
 
 - 外部插件安装、更新、签名和包管理。
