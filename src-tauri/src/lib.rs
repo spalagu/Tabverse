@@ -103,9 +103,11 @@ use tabverse_remote::join;
 #[cfg(test)]
 use tabverse_remote::source::agent::AgentSource;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) use browser_commands::handle_page_report;
 pub(crate) use browser_commands::{
-    browser_label, cmd_token, dirs_next_download, handle_page_report, webview_label,
-    AppCommandEvent, PageProxySlot, BROWSER_UA, CMD_SCHEME,
+    browser_label, cmd_token, dirs_next_download, webview_label, AppCommandEvent, PageProxySlot,
+    BROWSER_UA, CMD_SCHEME,
 };
 pub(crate) use state_commands::{app_state_store, state_dir, AppDatabase};
 

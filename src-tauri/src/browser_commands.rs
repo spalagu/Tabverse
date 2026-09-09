@@ -479,6 +479,7 @@ pub(crate) fn shortcut_script_for(bindings: &keys::Bindings) -> String {
 /// The transport is deliberately not this function's business — it used to
 /// be a cancelled navigation, it is now a script message, and the parsing
 /// and the token check are the same either way.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) fn handle_page_report(app: &AppHandle, tab_id: &str, payload: &str) -> bool {
     handle_command(app, tab_id, payload)
 }
