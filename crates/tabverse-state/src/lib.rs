@@ -137,6 +137,77 @@ impl AppStateStore {
         Ok(())
     }
 
+    pub fn load_setting(&self, key: &str) -> Result<Option<String>> {
+        validate_identifier("setting", key)?;
+        self.connection()?
+            .query_row(
+                "SELECT value_json FROM settings WHERE key=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn save_setting(&self, key: &str, value_json: &str) -> Result<()> {
+        validate_identifier("setting", key)?;
+        validate_json(value_json)?;
+        self.connection()?.execute(
+            "INSERT INTO settings(key, value_json, updated_at) VALUES (?1, ?2, unixepoch())\
+             ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
+            params![key, value_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        validate_identifier("setting", key)?;
+        self.connection()?
+            .execute("DELETE FROM settings WHERE key=?1", [key])?;
+        Ok(())
+    }
+
+    pub fn load_settings(&self) -> Result<Vec<(String, String)>> {
+        let connection = self.connection()?;
+        let mut statement =
+            connection.prepare("SELECT key, value_json FROM settings ORDER BY key")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    pub fn load_content_preference(&self, content_type: &str) -> Result<Option<String>> {
+        validate_identifier("content type", content_type)?;
+        self.connection()?
+            .query_row(
+                "SELECT handler_id FROM content_preferences WHERE content_type=?1",
+                [content_type],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn save_content_preference(&self, content_type: &str, handler_id: &str) -> Result<()> {
+        validate_identifier("content type", content_type)?;
+        validate_identifier("content handler", handler_id)?;
+        self.connection()?.execute(
+            "INSERT INTO content_preferences(content_type, handler_id, updated_at) VALUES (?1, ?2, unixepoch())\
+             ON CONFLICT(content_type) DO UPDATE SET handler_id=excluded.handler_id, updated_at=excluded.updated_at",
+            params![content_type, handler_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_content_preference(&self, content_type: &str) -> Result<()> {
+        validate_identifier("content type", content_type)?;
+        self.connection()?.execute(
+            "DELETE FROM content_preferences WHERE content_type=?1",
+            [content_type],
+        )?;
+        Ok(())
+    }
+
     /// Replace all compatibility scopes from a validated migration payload.
     /// The database changes as one transaction; malformed session JSON stays
     /// available to recovery but cannot leave half of a workspace projected.
@@ -663,6 +734,47 @@ mod tests {
         assert!(store
             .save_credential_vault("browser-logins-v2", b"")
             .is_err());
+    }
+
+    #[test]
+    fn settings_are_validated_and_owned_by_app_db() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AppStateStore::open(temp.path()).unwrap();
+
+        store.save_setting("appearance.theme", r#""dark""#).unwrap();
+        store.save_setting("terminal.font_size", "14").unwrap();
+        assert_eq!(
+            store.load_settings().unwrap(),
+            [
+                ("appearance.theme".to_string(), r#""dark""#.to_string()),
+                ("terminal.font_size".to_string(), "14".to_string()),
+            ]
+        );
+        assert!(store.save_setting("broken", "not-json").is_err());
+        store.delete_setting("appearance.theme").unwrap();
+        assert!(store.load_setting("appearance.theme").unwrap().is_none());
+    }
+
+    #[test]
+    fn content_preferences_round_trip_by_content_type() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AppStateStore::open(temp.path()).unwrap();
+
+        store
+            .save_content_preference("text/markdown", "markdown-preview")
+            .unwrap();
+        assert_eq!(
+            store
+                .load_content_preference("text/markdown")
+                .unwrap()
+                .as_deref(),
+            Some("markdown-preview")
+        );
+        store.delete_content_preference("text/markdown").unwrap();
+        assert!(store
+            .load_content_preference("text/markdown")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
