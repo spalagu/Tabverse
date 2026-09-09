@@ -7,7 +7,9 @@
 //! No base64, whole-body buffering, or arbitrary response-size ceiling lives
 //! in this layer.
 
-use anyhow::{anyhow, bail, Context, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::Context;
+use anyhow::{anyhow, bail, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -39,6 +41,7 @@ pub const MAX_HEAD_FRAME: u32 = 512 * 1024;
 #[serde(rename_all = "camelCase")]
 pub enum DataStreamKind {
     Http,
+    FileRead,
 }
 
 /// First frame on every extra Remote data stream.
@@ -61,6 +64,40 @@ impl DataStreamPreface {
             context_id: context_id.into(),
         }
     }
+
+    pub fn file_read(context_id: impl Into<String>) -> Self {
+        Self {
+            version: DATA_STREAM_VERSION,
+            kind: DataStreamKind::FileRead,
+            context_id: context_id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileReadRequest {
+    pub path: String,
+    pub offset: u64,
+    pub length: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileReadHead {
+    pub path: String,
+    pub name: String,
+    pub mime: String,
+    pub total: u64,
+    pub offset: u64,
+    pub length: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum FileReadStart {
+    File { head: FileReadHead },
+    Error { code: String, message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,17 +181,22 @@ pub struct HostNetworkGateway {
     cache: Arc<Mutex<HttpCache>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
 const CACHE_MAX_ENTRY_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
 const CACHE_MAX_ENTRIES: usize = 256;
 
 #[derive(Default)]
+#[cfg(not(target_arch = "wasm32"))]
 struct HttpCache {
     entries: VecDeque<CacheEntry>,
     bytes: usize,
 }
 
 #[derive(Clone)]
+#[cfg(not(target_arch = "wasm32"))]
 struct CacheEntry {
     context_id: String,
     url: String,
@@ -701,6 +743,30 @@ pub async fn read_http_response_start<R: AsyncRead + Unpin>(
     read_json_frame(reader).await
 }
 
+pub async fn write_file_read_request<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    request: &FileReadRequest,
+) -> Result<()> {
+    write_json_frame(writer, request).await
+}
+
+pub async fn read_file_read_request<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> Result<FileReadRequest> {
+    read_json_frame(reader).await
+}
+
+pub async fn write_file_read_start<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    start: &FileReadStart,
+) -> Result<()> {
+    write_json_frame(writer, start).await
+}
+
+pub async fn read_file_read_start<R: AsyncRead + Unpin>(reader: &mut R) -> Result<FileReadStart> {
+    read_json_frame(reader).await
+}
+
 async fn write_json_frame<W: AsyncWrite + Unpin, T: Serialize>(
     writer: &mut W,
     value: &T,
@@ -732,6 +798,43 @@ async fn read_json_frame<R: AsyncRead + Unpin, T: DeserializeOwned>(reader: &mut
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn file_stream_metadata_round_trips_without_touching_body_bytes() {
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        let task = tokio::spawn(async move {
+            write_data_stream_preface(&mut writer, &DataStreamPreface::file_read("files-tab"))
+                .await
+                .unwrap();
+            write_file_read_request(
+                &mut writer,
+                &FileReadRequest {
+                    path: "/tmp/raw.bin".into(),
+                    offset: 7,
+                    length: Some(11),
+                },
+            )
+            .await
+            .unwrap();
+            writer.write_all(&[0, 1, 2, 255]).await.unwrap();
+        });
+        assert_eq!(
+            read_data_stream_preface(&mut reader).await.unwrap(),
+            DataStreamPreface::file_read("files-tab")
+        );
+        assert_eq!(
+            read_file_read_request(&mut reader).await.unwrap(),
+            FileReadRequest {
+                path: "/tmp/raw.bin".into(),
+                offset: 7,
+                length: Some(11),
+            }
+        );
+        let mut raw = [0; 4];
+        reader.read_exact(&mut raw).await.unwrap();
+        assert_eq!(raw, [0, 1, 2, 255]);
+        task.await.unwrap();
+    }
 
     async fn exchange_full(
         gateway: HostNetworkGateway,

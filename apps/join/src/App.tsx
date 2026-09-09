@@ -21,6 +21,7 @@ import {
 } from "@tabverse/workbench/strings/errors";
 import { STR, plural } from "@tabverse/workbench/strings";
 import type { TermSink } from "@tabverse/workbench/terminal/viewer";
+import type { ReadMeta, RemoteFileReader } from "@tabverse/workbench/files-pane";
 import { transformRemoteResponse } from "@tabverse/workbench/remote-browser-document";
 import { Toolbar } from "./Toolbar";
 import { TOOLBAR_BYTES, applyStickyCtrl, type ToolbarKey } from "./toolbarKeys";
@@ -214,6 +215,62 @@ function JoinApp() {
     [proxy]
   );
 
+  const readFileViaHost = useCallback<RemoteFileReader>(async (path, signal) => {
+    const session = inst.session;
+    if (session === null) throw new Error("the session is not connected");
+    const contextId = useRemoteMirrorStore.getState().activeTabId ?? "remote-files";
+    const previewLimit = 4n * 1024n * 1024n;
+    const stream = await session.openFileStream(contextId, path, 0n, previewLimit);
+    const cancel = () => stream.cancel();
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      if (signal.aborted) throw new DOMException("file read aborted", "AbortError");
+      const start = await stream.responseStart();
+      if (start.type === "error") throw new Error(start.message);
+      const total = Number(start.head.total);
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      while (received < Number(previewLimit)) {
+        const chunk = await stream.readResponseChunk(64 * 1024);
+        if (chunk.byteLength === 0) break;
+        chunks.push(chunk);
+        received += chunk.byteLength;
+      }
+      const bytes = new Uint8Array(received);
+      let cursor = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, cursor);
+        cursor += chunk.byteLength;
+      }
+      const textKind = start.head.mime.startsWith("text/") ||
+        ["application/json", "application/xml", "application/javascript"].includes(start.head.mime);
+      let text: string | null = null;
+      let readOnlyReason: string | null = null;
+      if (textKind) {
+        try {
+          text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        } catch {
+          text = new TextDecoder().decode(bytes);
+          readOnlyReason = "This file is not valid UTF-8, so saving could damage it.";
+        }
+      }
+      const truncated = total > received;
+      if (truncated && readOnlyReason === null) {
+        readOnlyReason = "Only the first 4 MB are loaded, so saving would discard the rest.";
+      }
+      return {
+        name: start.head.name,
+        size: total,
+        text,
+        truncated,
+        read_only_reason: readOnlyReason,
+      } satisfies ReadMeta;
+    } finally {
+      signal.removeEventListener("abort", cancel);
+      if (signal.aborted) stream.cancel();
+    }
+  }, [inst]);
+
   /** The selected host row. Workbench owns dispatch from its type to a View. */
   const activeMirrorTab = useMemo(
     () => mirrorTabs.find((tab) => tab.id === mirrorActiveId) ?? null,
@@ -241,7 +298,8 @@ function JoinApp() {
   /** The active tab when it is a files row: the pane mounts with the file
    * the host fronts (the snapshot overlay's filesOpenPath), read over the
    * app channel's fs_read rpc. Subscribed, not getState-read: the host
-   * opening another file must re-render the pane. */
+   * opening another file must re-render the pane. Its body is read through
+   * the independent FileRead stream, not the app RPC channel. */
   const filesOpenPath = useRemoteMirrorStore((s) => s.filesOpenPath);
   const activeFilesPath = useMemo(() => {
     return activeMirrorTab?.type === "files"
@@ -776,6 +834,7 @@ function JoinApp() {
       dir: activeFilesDir,
       rpc: appChannel.rpc,
       readOnly,
+      readFile: readFileViaHost,
     },
     settings: { rpc: appChannel.rpc, readOnly },
     browser: {

@@ -9,8 +9,9 @@
 use iroh::{endpoint::presets, Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
 use tabverse_network::{
-    read_http_response_start, write_data_stream_preface, write_http_request_head,
-    DataStreamPreface, HeaderPair, HttpRequestHead,
+    read_file_read_start, read_http_response_start, write_data_stream_preface,
+    write_file_read_request, write_http_request_head, DataStreamPreface, FileReadRequest,
+    HeaderPair, HttpRequestHead,
 };
 use tabverse_proto::{announce_proto, RemoteClientMsg, RemoteHostMsg, REMOTE_ALPN};
 use wasm_bindgen::prelude::*;
@@ -56,6 +57,39 @@ pub struct WebHttpStream {
     send: iroh::endpoint::SendStream,
     recv: iroh::endpoint::RecvStream,
     request_finished: bool,
+}
+
+#[wasm_bindgen]
+pub struct WebFileStream {
+    recv: iroh::endpoint::RecvStream,
+}
+
+#[wasm_bindgen]
+impl WebFileStream {
+    pub fn cancel(&mut self) {
+        let _ = self.recv.stop(0u32.into());
+    }
+
+    #[wasm_bindgen(js_name = responseStart)]
+    pub async fn response_start(&mut self) -> Result<JsValue, JsValue> {
+        let start = read_file_read_start(&mut self.recv)
+            .await
+            .map_err(|error| JsValue::from_str(&format!("read file response head: {error:#}")))?;
+        serde_wasm_bindgen::to_value(&start)
+            .map_err(|error| JsValue::from_str(&format!("encode file response head: {error}")))
+    }
+
+    #[wasm_bindgen(js_name = readResponseChunk)]
+    pub async fn read_response_chunk(&mut self, limit: u32) -> Result<Vec<u8>, JsValue> {
+        let mut bytes = vec![0; limit.clamp(1, 1024 * 1024) as usize];
+        let read = self
+            .recv
+            .read(&mut bytes)
+            .await
+            .map_err(|error| JsValue::from_str(&format!("read file bytes: {error}")))?;
+        bytes.truncate(read.unwrap_or(0));
+        Ok(bytes)
+    }
 }
 
 #[wasm_bindgen]
@@ -227,6 +261,39 @@ impl WebJoin {
             recv,
             request_finished: false,
         })
+    }
+
+    /// Read local file bytes beside the control stream. The Host accepts this
+    /// for a current App-share viewer and rechecks access for every stream.
+    #[wasm_bindgen(js_name = openFileStream)]
+    pub async fn open_file_stream(
+        &self,
+        context_id: String,
+        path: String,
+        offset: u64,
+        length: Option<u64>,
+    ) -> Result<WebFileStream, JsValue> {
+        let (mut send, recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|error| JsValue::from_str(&format!("open file data stream: {error}")))?;
+        write_data_stream_preface(&mut send, &DataStreamPreface::file_read(context_id))
+            .await
+            .map_err(|error| JsValue::from_str(&format!("write file preface: {error:#}")))?;
+        write_file_read_request(
+            &mut send,
+            &FileReadRequest {
+                path,
+                offset,
+                length,
+            },
+        )
+        .await
+        .map_err(|error| JsValue::from_str(&format!("write file request: {error:#}")))?;
+        send.finish()
+            .map_err(|error| JsValue::from_str(&format!("finish file request: {error}")))?;
+        Ok(WebFileStream { recv })
     }
 
     /// Close the connection. The close handshake is best-effort: the page may

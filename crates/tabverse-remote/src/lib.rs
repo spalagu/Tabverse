@@ -32,7 +32,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tabverse_network::{HostNetworkGateway, HttpRequestHead};
+use tabverse_network::DataStreamKind;
+use tabverse_network::{FileReadRequest, HostNetworkGateway, HttpRequestHead};
 use tabverse_proto::{
     announce_proto, negotiate, Access, RemoteClientMsg, RemoteHostMsg, SharedTabType, REMOTE_ALPN,
     REMOTE_PROTO_V1, REMOTE_PROTO_VERSION,
@@ -552,6 +553,7 @@ pub struct RemoteHub {
     shares: Mutex<HashMap<String, Arc<Share>>>,
     next_viewer: AtomicU64,
     network_gateway: Option<HostNetworkGateway>,
+    file_source: Option<Arc<dyn bridge::data_stream::RemoteFileSource>>,
 }
 
 impl Default for RemoteHub {
@@ -561,6 +563,7 @@ impl Default for RemoteHub {
             shares: Mutex::new(HashMap::new()),
             next_viewer: AtomicU64::new(0),
             network_gateway: None,
+            file_source: None,
         }
     }
 }
@@ -576,6 +579,17 @@ impl RemoteHub {
     pub fn with_network_gateway(network_gateway: HostNetworkGateway) -> Arc<Self> {
         Arc::new(Self {
             network_gateway: Some(network_gateway),
+            ..Self::default()
+        })
+    }
+
+    pub fn with_data_sources(
+        network_gateway: HostNetworkGateway,
+        file_source: Arc<dyn bridge::data_stream::RemoteFileSource>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            network_gateway: Some(network_gateway),
+            file_source: Some(file_source),
             ..Self::default()
         })
     }
@@ -758,27 +772,45 @@ impl RemoteHub {
         // Host-side access is re-read for every stream before any network I/O.
         // `context_id` remains routing state and is never consulted as proof.
         let gateway = self.network_gateway.clone();
+        let file_source = self.file_source.clone();
         let data_fut = async {
-            let Some(gateway) = gateway.map(|gateway| gateway.isolated()) else {
+            if gateway.is_none() && file_source.is_none() {
                 return std::future::pending::<Result<()>>().await;
-            };
+            }
+            let gateway = gateway.map(|gateway| gateway.isolated());
             loop {
                 let incoming = bridge::data_stream::accept_data_stream(&conn).await?;
                 let Some(access) = share.viewer_access(viewer_id) else {
                     continue;
                 };
-                if share.tab_type != SharedTabType::App || !access.may_steer() {
+                if share.tab_type != SharedTabType::App {
                     // Dropping the stream refuses it without touching the Host
-                    // network. A later stream is checked again, so a live
-                    // upgrade or downgrade takes effect immediately.
+                    // capability. A later stream is checked again.
                     continue;
                 }
-                let gateway = gateway.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = incoming.serve(gateway).await {
-                        eprintln!("[remote] data stream failed: {error:#}");
+                match incoming.preface().kind {
+                    DataStreamKind::Http if access.may_steer() => {
+                        let Some(gateway) = gateway.clone() else {
+                            continue;
+                        };
+                        tokio::spawn(async move {
+                            if let Err(error) = incoming.serve(gateway).await {
+                                eprintln!("[remote] HTTP data stream failed: {error:#}");
+                            }
+                        });
                     }
-                });
+                    DataStreamKind::FileRead => {
+                        let Some(source) = file_source.clone() else {
+                            continue;
+                        };
+                        tokio::spawn(async move {
+                            if let Err(error) = incoming.serve_file(source).await {
+                                eprintln!("[remote] file data stream failed: {error:#}");
+                            }
+                        });
+                    }
+                    _ => {}
+                }
             }
         };
 
@@ -1208,6 +1240,14 @@ impl JoinHandle {
         head: &HttpRequestHead,
     ) -> Result<bridge::data_stream::RemoteHttpStream> {
         bridge::data_stream::RemoteHttpStream::open(&self.connection, context_id, head).await
+    }
+
+    pub async fn open_file_stream(
+        &self,
+        context_id: &str,
+        request: &FileReadRequest,
+    ) -> Result<bridge::data_stream::RemoteFileStream> {
+        bridge::data_stream::RemoteFileStream::open(&self.connection, context_id, request).await
     }
 
     pub async fn leave(&self) {
@@ -2748,6 +2788,35 @@ mod tests {
             fn unbind(&self) {}
         }
 
+        struct TestFileSource(std::path::PathBuf);
+        impl bridge::data_stream::RemoteFileSource for TestFileSource {
+            fn open(
+                &self,
+                request: &FileReadRequest,
+            ) -> Result<bridge::data_stream::OpenedRemoteFile> {
+                use std::io::{Seek, SeekFrom};
+                let mut file = std::fs::File::open(&self.0)?;
+                let total = file.metadata()?.len();
+                let offset = request.offset.min(total);
+                let length = request
+                    .length
+                    .unwrap_or_else(|| total.saturating_sub(offset))
+                    .min(total.saturating_sub(offset));
+                file.seek(SeekFrom::Start(offset))?;
+                Ok(bridge::data_stream::OpenedRemoteFile {
+                    file,
+                    head: tabverse_network::FileReadHead {
+                        path: request.path.clone(),
+                        name: "large.txt".into(),
+                        mime: "text/plain".into(),
+                        total,
+                        offset,
+                        length,
+                    },
+                })
+            }
+        }
+
         let _ = rustls::crypto::ring::default_provider().install_default();
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -2773,8 +2842,15 @@ mod tests {
             }
         });
 
+        let file_path = std::env::temp_dir().join(format!(
+            "tabverse-remote-file-stream-{}",
+            std::process::id()
+        ));
+        let file_body = vec![0x72; 1024 * 1024 + 17];
+        std::fs::write(&file_path, &file_body)?;
         let gateway = HostNetworkGateway::new(Default::default());
-        let hub = RemoteHub::with_network_gateway(gateway);
+        let hub =
+            RemoteHub::with_data_sources(gateway, Arc::new(TestFileSource(file_path.clone())));
         let viewers: Arc<StdMutex<Vec<ViewerInfo>>> = Arc::new(StdMutex::new(Vec::new()));
         let presence = {
             let viewers = viewers.clone();
@@ -2822,6 +2898,32 @@ mod tests {
         assert_eq!(requests.load(AtomicOrdering::SeqCst), 1);
 
         hub.set_viewer_access(&share.id, viewer_id, Access::View)?;
+        let mut file_stream = handle
+            .open_file_stream(
+                "caller-controlled-file-context",
+                &FileReadRequest {
+                    path: "/requested/large.txt".into(),
+                    offset: 9,
+                    length: None,
+                },
+            )
+            .await?;
+        let tabverse_network::FileReadStart::File { head } = file_stream.response_start().await?
+        else {
+            bail!("Host file source refused a View reader");
+        };
+        assert_eq!(head.offset, 9);
+        assert_eq!(head.length, file_body.len() as u64 - 9);
+        let mut received = Vec::new();
+        loop {
+            let chunk = file_stream.read_chunk(64 * 1024).await?;
+            if chunk.is_empty() {
+                break;
+            }
+            received.extend_from_slice(&chunk);
+        }
+        assert_eq!(received, file_body[9..]);
+
         let denied = tokio::time::timeout(Duration::from_secs(5), async {
             let mut stream = handle
                 .open_http_stream(
@@ -2856,6 +2958,7 @@ mod tests {
         origin.await?;
         handle.leave().await;
         hub.share_stop(&share.id);
+        std::fs::remove_file(file_path).ok();
         Ok(())
     }
 }

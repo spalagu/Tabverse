@@ -136,6 +136,30 @@ struct AppState {
     app_source: Arc<app_share::AppShareSource>,
 }
 
+struct RemoteFsSource(Arc<FsBackend>);
+
+impl tabverse_remote::bridge::data_stream::RemoteFileSource for RemoteFsSource {
+    fn open(
+        &self,
+        request: &tabverse_network::FileReadRequest,
+    ) -> anyhow::Result<tabverse_remote::bridge::data_stream::OpenedRemoteFile> {
+        let opened = self
+            .0
+            .open_stream(&request.path, request.offset, request.length)?;
+        Ok(tabverse_remote::bridge::data_stream::OpenedRemoteFile {
+            file: opened.file,
+            head: tabverse_network::FileReadHead {
+                path: opened.path,
+                name: opened.name,
+                mime: opened.mime,
+                total: opened.total,
+                offset: opened.offset,
+                length: opened.length,
+            },
+        })
+    }
+}
+
 /// Post an OS notification (long-running command finished while you were away).
 #[tauri::command]
 fn notify(app: AppHandle, title: String, body: String) -> Result<(), String> {
@@ -578,6 +602,8 @@ pub fn run() {
     let remote_network = tabverse_network::HostNetworkGateway::new(
         http::build_remote_browser().expect("build Remote Browser Host HTTP client"),
     );
+    let fs = Arc::new(FsBackend::new());
+    let hub = RemoteHub::with_data_sources(remote_network, Arc::new(RemoteFsSource(fs.clone())));
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -658,14 +684,14 @@ pub fn run() {
         })
         .manage(AppState {
             helper: terminal_helper::TerminalHelper::new(),
-            hub: RemoteHub::with_network_gateway(remote_network),
+            hub,
             bridges: Arc::new(Mutex::new(HashMap::new())),
             helper_backlog: Arc::new(Mutex::new(HashMap::new())),
             helper_generations: Arc::new(Mutex::new(HashMap::new())),
             sources: Arc::new(SourceRegistry::default()),
             share_glue: Arc::new(share_commands::ShareGlue::default()),
             joins: Mutex::new(HashMap::new()),
-            fs: Arc::new(FsBackend::new()),
+            fs,
             browsers: Mutex::new(HashMap::new()),
             downloads: Mutex::new(HashSet::new()),
             watches: fs_watch::WatchState::new(),

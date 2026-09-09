@@ -358,6 +358,19 @@ pub struct ReadRange {
     pub total: u64,
 }
 
+/// A validated regular file prepared for raw Remote streaming. Path
+/// expansion, symlink handling and file-kind checks stay owned by this crate;
+/// the transport only receives an already-open handle and public metadata.
+pub struct StreamFile {
+    pub file: std::fs::File,
+    pub path: String,
+    pub name: String,
+    pub mime: String,
+    pub total: u64,
+    pub offset: u64,
+    pub length: u64,
+}
+
 pub fn kind_for(path: &Path, head: &[u8]) -> (FileKind, String) {
     let ext = path
         .extension()
@@ -439,6 +452,42 @@ pub fn kind_for(path: &Path, head: &[u8]) -> (FileKind, String) {
 }
 
 impl FsBackend {
+    pub fn open_stream(&self, path: &str, offset: u64, length: Option<u64>) -> Result<StreamFile> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+
+        let raw = expand_path(path);
+        let p = match (raw.parent(), raw.file_name()) {
+            (Some(parent), Some(name)) => canonical_dir(parent).join(name),
+            _ => raw,
+        };
+        let meta = std::fs::metadata(&p).with_context(|| format!("cannot stat {}", p.display()))?;
+        if !meta.is_file() {
+            return Err(anyhow!("{} is not a regular file", p.display()));
+        }
+        let total = meta.len();
+        let offset = offset.min(total);
+        let length = length
+            .unwrap_or_else(|| total.saturating_sub(offset))
+            .min(total.saturating_sub(offset));
+        let mut file = std::fs::File::open(&p)?;
+        let mut head = [0u8; 4096];
+        let read = file.read(&mut head)?;
+        let (_, mime) = kind_for(&p, &head[..read]);
+        file.seek(SeekFrom::Start(offset))?;
+        Ok(StreamFile {
+            file,
+            path: ui_path(&p),
+            name: p
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            mime,
+            total,
+            offset,
+            length,
+        })
+    }
+
     /// Metadata plus content for text files, ready for the editor pane.
     pub fn read_file(&self, path: &str) -> Result<FileMeta> {
         let raw = expand_path(path);
@@ -1516,6 +1565,19 @@ mod tests {
         let big = tmp.join("big.bin");
         std::fs::write(&big, &data).unwrap();
         let path = big.to_str().unwrap();
+
+        let mut stream = fs.open_stream(path, 17, Some(2 * 1024 * 1024)).unwrap();
+        let mut streamed = Vec::new();
+        use std::io::Read as _;
+        stream
+            .file
+            .by_ref()
+            .take(stream.length)
+            .read_to_end(&mut streamed)
+            .unwrap();
+        assert_eq!(stream.offset, 17);
+        assert_eq!(stream.total, size as u64);
+        assert_eq!(streamed, data[17..17 + 2 * 1024 * 1024]);
 
         let decode = |r: &ReadRange| {
             base64::engine::general_purpose::STANDARD

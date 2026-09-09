@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { HostRpc } from "./hostRpc";
 import { BrowserPane, type HostFetch } from "./BrowserPane";
-import { FilesPane } from "./FilesPane";
+import { FilesPane, type RemoteFileReader } from "./FilesPane";
 import { SettingsPane } from "./SettingsPane";
 import {
   RemoteAgentPane,
@@ -32,6 +32,7 @@ export interface RemoteWorkbenchTabViewContext {
     readonly dir: string | null;
     readonly rpc: HostRpc;
     readonly readOnly: boolean;
+    readonly readFile?: RemoteFileReader;
   };
   readonly settings: {
     readonly rpc: HostRpc;
