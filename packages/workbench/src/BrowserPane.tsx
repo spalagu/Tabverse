@@ -31,6 +31,7 @@ export function BrowserPane({
   contextId,
   fetchViaHost,
   resolveProxyUrl = directUrl,
+  networkProxyRoot,
 }: {
   /** The host browser tab's address. */
   url: string;
@@ -39,6 +40,8 @@ export function BrowserPane({
   fetchViaHost: HostFetch;
   /** Maps a host URL to the runtime's same-origin proxy endpoint. */
   resolveProxyUrl?: ProxyUrlResolver;
+  /** Absolute same-origin root reserved for Host-network requests. */
+  networkProxyRoot?: string;
 }) {
   const [state, setState] = useState<PaneState>({ kind: "loading" });
 
@@ -63,7 +66,13 @@ export function BrowserPane({
         if (res.ok && html) {
           setState({
             kind: "mirrored",
-            doc: rewriteRemoteHtml(body, res.url || url, resolveProxyUrl, contextId),
+            doc: rewriteRemoteHtml(
+              body,
+              res.url || url,
+              resolveProxyUrl,
+              contextId,
+              networkProxyRoot,
+            ),
           });
         } else {
           setState({ kind: "unmirrored", line: refusalOf(res), detail: null });
@@ -83,7 +92,7 @@ export function BrowserPane({
       alive = false;
       abort.abort();
     };
-  }, [url, contextId, fetchViaHost, resolveProxyUrl]);
+  }, [url, contextId, fetchViaHost, resolveProxyUrl, networkProxyRoot]);
 
   if (state.kind === "loading") {
     return (
@@ -115,14 +124,13 @@ export function BrowserPane({
   }
   return (
     <div className="browser-pane browser-pane-mirrored">
-      {/* allow-same-origin, no allow-scripts: the document's relative
-          URLs load against this origin (no CORS wall on top of the
-          endpoint 404s), while nothing it carries can execute — the
-          sandbox omits script permission entirely. */}
+      {/* Scripts run in an opaque sandbox origin. The injected CSP and
+          bootstrap restrict their network access to this tab's Host proxy;
+          no same-origin grant exposes the Join application or ticket. */}
       <iframe
         className="browser-pane-frame"
         title={STR.remote.web.browserPane.frameTitle({ url })}
-        sandbox="allow-forms allow-same-origin"
+        sandbox={networkProxyRoot === undefined ? "allow-forms" : "allow-forms allow-scripts"}
         srcDoc={state.doc}
       />
       <span className="browser-pane-chip">

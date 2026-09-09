@@ -40,6 +40,7 @@ export interface RemoteWorkbenchTabViewContext {
   readonly browser: {
     readonly fetchViaHost: HostFetch;
     readonly resolveProxyUrl: (target: string, contextId?: string) => string;
+    readonly networkProxyRoot: string;
   };
 }
 
@@ -60,6 +61,7 @@ const REMOTE_TAB_RENDERERS = defineTabViewRenderers<
         contextId={tab.id}
         fetchViaHost={context.browser.fetchViaHost}
         resolveProxyUrl={context.browser.resolveProxyUrl}
+        networkProxyRoot={context.browser.networkProxyRoot}
       />
     ) : (
       unavailable(STR.remote.web.appShareLive)

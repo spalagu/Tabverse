@@ -82,11 +82,56 @@ function documentBase(url: string): string {
   return `${parsed.protocol}//${parsed.host}${dir}`;
 }
 
+function scopedProxyRoot(proxyRoot: string, contextId?: string): string {
+  const root = new URL(proxyRoot);
+  if (root.protocol !== "http:" && root.protocol !== "https:") {
+    throw new Error("the Remote Browser proxy root must use http or https");
+  }
+  if (!root.pathname.endsWith("/")) root.pathname += "/";
+  return contextId === undefined
+    ? root.href
+    : new URL(`${encodeURIComponent(contextId)}/`, root).href;
+}
+
+function browserBootstrap(targetBase: string, proxyRoot: string): string {
+  return `(() => {
+    const targetBase = ${JSON.stringify(targetBase)};
+    const proxyRoot = ${JSON.stringify(proxyRoot)};
+    const route = (value) => {
+      const target = new URL(value, targetBase);
+      if (target.protocol !== "http:" && target.protocol !== "https:") return target.href;
+      return proxyRoot + target.protocol.slice(0, -1) + "/" + target.host + target.pathname + target.search + target.hash;
+    };
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => input instanceof Request
+      ? nativeFetch(new Request(route(input.url), input), init)
+      : nativeFetch(route(String(input)), init);
+    const nativeOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+      return nativeOpen.call(this, method, route(String(url)), ...rest);
+    };
+    if (typeof EventSource === "function") {
+      const NativeEventSource = EventSource;
+      const RoutedEventSource = function(url, init) {
+        return new NativeEventSource(route(String(url)), init);
+      };
+      RoutedEventSource.prototype = NativeEventSource.prototype;
+      Object.defineProperties(RoutedEventSource, {
+        CONNECTING: { value: NativeEventSource.CONNECTING },
+        OPEN: { value: NativeEventSource.OPEN },
+        CLOSED: { value: NativeEventSource.CLOSED }
+      });
+      window.EventSource = RoutedEventSource;
+    }
+  })();`;
+}
+
 export function rewriteRemoteHtml(
   html: string,
   url: string,
   resolveProxyUrl: ProxyUrlResolver,
   contextId?: string,
+  networkProxyRoot?: string,
 ): string {
   const doc = new DOMParser().parseFromString(html, "text/html");
   for (const selector of URL_ATTRIBUTES) {
@@ -113,9 +158,36 @@ export function rewriteRemoteHtml(
     );
   }
   for (const oldBase of doc.querySelectorAll("base")) oldBase.remove();
+  for (const oldPolicy of doc.querySelectorAll('meta[http-equiv="Content-Security-Policy" i]')) {
+    oldPolicy.remove();
+  }
   const base = doc.createElement("base");
   base.href = resolveProxyUrl(documentBase(url), contextId);
-  doc.head.prepend(base);
+  if (networkProxyRoot === undefined) {
+    doc.head.prepend(base);
+  } else {
+    const scopedRoot = scopedProxyRoot(networkProxyRoot, contextId);
+    const policy = doc.createElement("meta");
+    policy.httpEquiv = "Content-Security-Policy";
+    policy.content = [
+      "default-src 'none'",
+      `base-uri ${scopedRoot}`,
+      `form-action ${scopedRoot}`,
+      `script-src 'unsafe-inline' ${scopedRoot}`,
+      `style-src 'unsafe-inline' ${scopedRoot}`,
+      `img-src data: blob: ${scopedRoot}`,
+      `font-src data: ${scopedRoot}`,
+      `media-src data: blob: ${scopedRoot}`,
+      `connect-src ${scopedRoot}`,
+      `frame-src ${scopedRoot}`,
+      "object-src 'none'",
+      "worker-src 'none'",
+    ].join("; ");
+    const bootstrap = doc.createElement("script");
+    bootstrap.setAttribute("data-tabverse-browser-bootstrap", "");
+    bootstrap.textContent = browserBootstrap(url, scopedRoot);
+    doc.head.prepend(policy, base, bootstrap);
+  }
   return `<!doctype html>${doc.documentElement.outerHTML}`;
 }
 
@@ -124,12 +196,19 @@ export async function transformRemoteResponse(
   requestUrl: string,
   resolveProxyUrl: ProxyUrlResolver,
   contextId?: string,
+  networkProxyRoot?: string,
 ): Promise<Response> {
   const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
   const finalUrl = response.url || requestUrl;
   let body: string;
   if (contentType.includes("text/html")) {
-    body = rewriteRemoteHtml(await response.text(), finalUrl, resolveProxyUrl, contextId);
+    body = rewriteRemoteHtml(
+      await response.text(),
+      finalUrl,
+      resolveProxyUrl,
+      contextId,
+      networkProxyRoot,
+    );
   } else if (contentType.includes("text/css")) {
     body = rewriteRemoteCss(await response.text(), finalUrl, resolveProxyUrl, contextId);
   } else {

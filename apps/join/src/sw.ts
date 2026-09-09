@@ -102,6 +102,11 @@ async function proxyViaPage(request: Request): Promise<Response> {
         | { type: "error"; message: string };
       if (d.type === "start" && !settled) {
         settled = true;
+        const headers = new Headers(d.headers);
+        // Mirrored pages deliberately have an opaque sandbox origin. Their
+        // scripts/fonts may consume only this virtual endpoint, so the
+        // endpoint must opt into reads from that isolated origin.
+        headers.set("access-control-allow-origin", "*");
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
             body = controller;
@@ -114,7 +119,7 @@ async function proxyViaPage(request: Request): Promise<Response> {
         resolve(new Response(stream, {
           status: d.status,
           statusText: d.statusText,
-          headers: d.headers,
+          headers,
         }));
       } else if (d.type === "chunk" && body !== null) {
         body.enqueue(new Uint8Array(d.bytes));

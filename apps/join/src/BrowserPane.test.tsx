@@ -93,15 +93,17 @@ describe("BrowserPane", () => {
         url: "http://intranet.local/wiki/Home",
         fetchViaHost: okHtml,
         resolveProxyUrl: proxyUrlFor,
+        networkProxyRoot: "https://join.example/__tabverse_proxy/",
       })
     );
     await flush();
 
     const frame = host.querySelector<HTMLIFrameElement>(".browser-pane-frame");
     expect(frame).not.toBeNull();
-    // Scripts may not run; same origin is kept so relative URLs load
-    // against the join origin rather than dying on a CORS wall.
-    expect(frame!.getAttribute("sandbox")).toBe("allow-forms allow-same-origin");
+    // Scripts run, but the sandbox keeps a unique opaque origin: the page
+    // cannot read the Join application or its ticket.
+    expect(frame!.getAttribute("sandbox")).toBe("allow-forms allow-scripts");
+    expect(frame!.getAttribute("sandbox")).not.toContain("allow-same-origin");
     // The document's directory, mirrored onto the endpoint path the
     // page's fetch patch (and, later, the SW arm) answers.
     expect(frame!.getAttribute("srcdoc")).toContain(

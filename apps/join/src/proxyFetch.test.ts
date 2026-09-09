@@ -3,6 +3,7 @@ import {
   createProxyClient,
   installProxyFetchPatch,
   PROXY_PATH_PREFIX,
+  proxyPathRoot,
   proxyRouteFromUrl,
   proxyUrlFor,
   targetFromProxyUrl,
@@ -165,6 +166,13 @@ describe("createProxyClient data streams", () => {
 });
 
 describe("the endpoint path", () => {
+  it("builds one stable virtual-network root for root and Pages deployments", () => {
+    expect(proxyPathRoot()).toBe("/__tabverse_proxy/");
+    expect(proxyPathRoot("/Tabverse/join/")).toBe(
+      "/Tabverse/join/__tabverse_proxy/",
+    );
+  });
+
   it("mirrors a target URL after the scheme segment, query included", () => {
     expect(proxyUrlFor("http://intranet.example/dir/page?q=1")).toBe(
       `${PROXY_PATH_PREFIX}http/intranet.example/dir/page?q=1`

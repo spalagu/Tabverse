@@ -14,6 +14,12 @@
 export const PROXY_PATH_PREFIX = "/__tabverse_proxy/";
 const PROXY_PATH_SEGMENT = "__tabverse_proxy/";
 
+/** Same-origin root beneath which every virtual Browser URL lives. */
+export function proxyPathRoot(basePath = "/"): string {
+  const scopedBase = `/${basePath.replace(/^\/+|\/+$/g, "")}`.replace(/^\/$/, "");
+  return `${scopedBase}/${PROXY_PATH_SEGMENT}`;
+}
+
 /**
  * The endpoint path standing for one host-side URL, origin-relative so
  * it is valid as a fetch input, an anchor href or a <base href> on any
@@ -40,9 +46,8 @@ export function proxyUrlFor(
   if (scheme !== "http" && scheme !== "https") {
     throw new Error(`the proxy carries http requests only, not ${u.protocol}`);
   }
-  const scopedBase = `/${basePath.replace(/^\/+|\/+$/g, "")}`.replace(/^\/$/, "");
   const context = contextId === undefined ? "" : `${encodeURIComponent(contextId)}/`;
-  return `${scopedBase}/${PROXY_PATH_SEGMENT}${context}${scheme}/${u.host}${u.pathname}${u.search}`;
+  return `${proxyPathRoot(basePath)}${context}${scheme}/${u.host}${u.pathname}${u.search}`;
 }
 
 export interface ProxyRoute {

@@ -57,6 +57,34 @@ describe("Remote Browser document transformation", () => {
     );
   });
 
+  it("isolates scripts and routes dynamic HTTP APIs through this Browser context", () => {
+    const html = rewriteRemoteHtml(
+      '<meta http-equiv="Content-Security-Policy" content="default-src *">' +
+        '<script>window.remotePageRan = true</script>',
+      "https://intranet.local/app/page",
+      resolve,
+      "browser/a",
+      "https://join.example/Tabverse/join/__tabverse_proxy/",
+    );
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const policy = doc.querySelector<HTMLMetaElement>(
+      'meta[http-equiv="Content-Security-Policy"]',
+    );
+    const bootstrap = doc.querySelector<HTMLScriptElement>(
+      "script[data-tabverse-browser-bootstrap]",
+    );
+
+    expect(policy?.content).toContain(
+      "connect-src https://join.example/Tabverse/join/__tabverse_proxy/browser%2Fa/",
+    );
+    expect(policy?.content).toContain("default-src 'none'");
+    expect(doc.querySelectorAll('meta[http-equiv="Content-Security-Policy"]')).toHaveLength(1);
+    expect(bootstrap?.textContent).toContain("window.fetch =");
+    expect(bootstrap?.textContent).toContain("XMLHttpRequest.prototype.open");
+    expect(bootstrap?.textContent).toContain("window.EventSource =");
+    expect(html).toContain("window.remotePageRan = true");
+  });
+
   it("transforms only HTML/CSS responses and removes stale body metadata", async () => {
     const transformed = await transformRemoteResponse(
       new Response('<img src="/logo.png">', {
@@ -70,6 +98,7 @@ describe("Remote Browser document transformation", () => {
       "https://host.local/page",
       resolve,
       "browser-b",
+      "https://join.example/Tabverse/join/__tabverse_proxy/",
     );
 
     expect(await transformed.text()).toContain(

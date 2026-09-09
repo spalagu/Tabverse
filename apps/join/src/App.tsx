@@ -60,6 +60,7 @@ import {
 import {
   createProxyClient,
   installProxyFetchPatch,
+  proxyPathRoot,
   proxyUrlFor,
   proxyRouteFromUrl,
   type ProxyClient,
@@ -192,6 +193,10 @@ function JoinApp() {
       proxyUrlFor(target, import.meta.env.BASE_URL, contextId),
     [],
   );
+  const networkProxyRoot = useMemo(
+    () => new URL(proxyPathRoot(import.meta.env.BASE_URL), location.href).href,
+    [],
+  );
 
   const appSinks = useMemo<AppFrameSinks>(() => mirrorSinks(), []);
 
@@ -274,6 +279,7 @@ function JoinApp() {
                     requestUrl,
                     resolveProxyUrl,
                     route.contextId ?? undefined,
+                    networkProxyRoot,
                   ),
                 ),
             {
@@ -294,7 +300,7 @@ function JoinApp() {
     };
     navigator.serviceWorker.addEventListener("message", onMessage);
     return () => navigator.serviceWorker.removeEventListener("message", onMessage);
-  }, [proxy]);
+  }, [networkProxyRoot, proxy, resolveProxyUrl]);
 
   useEffect(() => {
     if (!connected) return;
@@ -775,6 +781,7 @@ function JoinApp() {
     browser: {
       fetchViaHost,
       resolveProxyUrl,
+      networkProxyRoot,
     },
   };
 
