@@ -72,6 +72,28 @@ function checkImports(dir, rules, description, violations) {
 
 const violations = [];
 
+for (const adr of [
+  "0001-v3-baseline.md",
+  "0002-remote-capability-placement.md",
+  "0003-built-in-feature-modules.md",
+  "0004-host-network-gateway.md",
+  "0005-remote-data-streams.md",
+  "0006-wry-only-browser.md",
+  "0007-sqlite-durable-state.md",
+  "0008-on-demand-runtime-sidecar.md",
+  "0009-runtime-local-ipc.md",
+  "0010-runtime-identity.md",
+  "0011-semantic-remote.md",
+  "0012-remote-browser-context.md",
+  "0013-browser-credentials.md",
+  "0014-content-and-associations.md",
+  "0015-platform-adapters-and-completeness.md",
+]) {
+  if (!existsSync(join(ROOT, "docs", "adr", adr))) {
+    violations.push(`docs/adr/${adr} is required by the V3 architecture record`);
+  }
+}
+
 // Runtime V3 local IPC must not regress to a localhost TCP service. The
 // helper protocol is local-socket bytes (UDS on Unix, Named Pipe on Windows).
 for (const sourcePath of [
