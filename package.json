@@ -56,6 +56,9 @@
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zustand": "^5.0.0"
   },
+  "overrides": {
+    "@xmldom/xmldom": "0.8.15"
+  },
   "devDependencies": {
     "@playwright/test": "1.62.1",
     "@tauri-apps/cli": "^2",
@@ -66,6 +69,6 @@
     "typescript": "^5.6.2",
     "vite": "^6.0.0",
     "vite-plugin-singlefile": "^2.3.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }
