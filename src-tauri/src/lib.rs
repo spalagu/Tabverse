@@ -2717,7 +2717,12 @@ async fn migrate_import_apply(
 ) -> Result<migrate::ImportResult, String> {
     let dir = state_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        migrate::import_bundle(&dir, std::path::Path::new(&path), &passphrase, &stamp)
+        let result =
+            migrate::import_bundle(&dir, std::path::Path::new(&path), &passphrase, &stamp)?;
+        app_state_store(&app)?
+            .replace_scopes_from_legacy(&dir)
+            .map_err(|error| format!("updating app.db after import: {error:#}"))?;
+        Ok(result)
     })
     .await
     .map_err(|e| e.to_string())?

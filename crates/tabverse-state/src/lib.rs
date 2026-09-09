@@ -102,6 +102,29 @@ impl AppStateStore {
             .map_err(Into::into)
     }
 
+    /// Replace all compatibility scopes from a validated migration payload.
+    /// The database changes as one transaction; malformed session JSON stays
+    /// available to recovery but cannot leave half of a workspace projected.
+    pub fn replace_scopes_from_legacy(&self, legacy_dir: &Path) -> Result<()> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM state_scopes", [])?;
+        transaction.execute("DELETE FROM workspaces", [])?;
+        import_legacy_scopes(&transaction, legacy_dir)?;
+        let session: Option<String> = transaction
+            .query_row(
+                "SELECT json FROM state_scopes WHERE scope='session'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(session) = session {
+            project_session(&transaction, &session)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Replace one workspace and its ordered tabs atomically. Tab state stays
     /// opaque: only the owning Feature Module may decode or migrate it.
     pub fn save_workspace(&self, workspace: &WorkspaceRecord) -> Result<()> {
@@ -547,6 +570,33 @@ mod tests {
         let store = AppStateStore::open(temp.path()).unwrap();
         let workspace = store.load_workspace(DEFAULT_WORKSPACE_ID).unwrap().unwrap();
         assert_eq!(workspace.tabs[0].id, "old");
+        assert_eq!(workspace.tabs[0].kind, "files");
+    }
+
+    #[test]
+    fn migration_payload_replaces_scopes_and_workspace_atomically() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AppStateStore::open(temp.path()).unwrap();
+        store
+            .save_scope(
+                "session",
+                r#"{"version":1,"tabs":[{"id":"before","type":"browser"}]}"#,
+            )
+            .unwrap();
+        store.save_scope("downloads", r#"{"entries":[]}"#).unwrap();
+
+        let imported = temp.path().join("imported");
+        std::fs::create_dir(&imported).unwrap();
+        std::fs::write(
+            imported.join("session.json"),
+            r#"{"version":1,"tabs":[{"id":"after","type":"files"}]}"#,
+        )
+        .unwrap();
+        store.replace_scopes_from_legacy(&imported).unwrap();
+
+        assert_eq!(store.list_scopes().unwrap(), ["session"]);
+        let workspace = store.load_workspace(DEFAULT_WORKSPACE_ID).unwrap().unwrap();
+        assert_eq!(workspace.tabs[0].id, "after");
         assert_eq!(workspace.tabs[0].kind, "files");
     }
 }
