@@ -549,25 +549,14 @@ fn app_state_store(app: &AppHandle) -> Result<tabverse_state::AppStateStore, Str
     tabverse_state::AppStateStore::open(&app_data_dir).map_err(|e| format!("{e:#}"))
 }
 
-// The state_* commands follow the fs_* rule above: disk I/O goes through the
-// blocking pool so a slow disk never freezes the UI thread. The storage
-// logic itself (atomic write, scope-name encoding, size guard) lives in
-// tabverse_fs::state where it is unit-tested against a temp dir.
+// The state_* commands keep SQLite ownership in the desktop application
+// service. Workbench sees scoped JSON but never a database handle.
 #[tauri::command]
 async fn state_save(app: AppHandle, scope: String, json: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         app_state_store(&app)?
             .save_scope(&scope, &json)
-            .map_err(|e| format!("{e:#}"))?;
-        // Keep the legacy export/import implementation current during the
-        // app.db transition. app.db is authoritative; a mirror failure does
-        // not roll back a committed database write.
-        if let Ok(dir) = state_dir(&app) {
-            if let Err(error) = tabverse_fs::state::save(&dir, &scope, &json) {
-                eprintln!("[state] legacy mirror save failed for {scope:?}: {error:#}");
-            }
-        }
-        Ok(())
+            .map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -589,13 +578,7 @@ async fn state_delete(app: AppHandle, scope: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         app_state_store(&app)?
             .delete_scope(&scope)
-            .map_err(|e| format!("{e:#}"))?;
-        if let Ok(dir) = state_dir(&app) {
-            if let Err(error) = tabverse_fs::state::delete(&dir, &scope) {
-                eprintln!("[state] legacy mirror delete failed for {scope:?}: {error:#}");
-            }
-        }
-        Ok(())
+            .map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -682,8 +665,8 @@ fn set_theme(window: tauri::Window, theme: String) -> Result<(), String> {
     }
 }
 
-// The two theme_pref_* commands follow the state_* rule above: disk I/O in
-// the blocking pool, atomic write via tabverse_fs::state (temp + rename).
+// Theme preference is also an app.db scope; the synchronous startup reader
+// and asynchronous settings writer share one source of truth.
 #[tauri::command]
 async fn theme_pref_save(app: AppHandle, pref: String) -> Result<(), String> {
     if !is_theme_preference(&pref) {
@@ -693,13 +676,7 @@ async fn theme_pref_save(app: AppHandle, pref: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         app_state_store(&app)?
             .save_scope(THEME_SCOPE, &json)
-            .map_err(|e| format!("{e:#}"))?;
-        if let Ok(dir) = state_dir(&app) {
-            if let Err(error) = tabverse_fs::state::save(&dir, THEME_SCOPE, &json) {
-                eprintln!("[state] legacy theme mirror failed: {error:#}");
-            }
-        }
-        Ok(())
+            .map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2682,7 +2659,10 @@ async fn migrate_export(
     }
     let dir = state_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        migrate::export_to_path(&dir, std::path::Path::new(&path), &passphrase)
+        let scopes = app_state_store(&app)?
+            .dump_scopes()
+            .map_err(|error| format!("reading app.db for export: {error:#}"))?;
+        migrate::export_to_path(&dir, &scopes, std::path::Path::new(&path), &passphrase)
     })
     .await
     .map_err(|e| e.to_string())?

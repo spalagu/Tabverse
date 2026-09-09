@@ -85,6 +85,13 @@ fn scope_file(base: &Path, scope: &str) -> PathBuf {
     base.join(format!("{}{FILE_EXT}", encode_scope(scope)))
 }
 
+/// Migration archives retain the established `<encoded-scope>.json` wire
+/// names even though live state now resides in app.db.
+pub fn scope_file_name(scope: &str) -> Result<String> {
+    validate_scope(scope)?;
+    Ok(format!("{}{FILE_EXT}", encode_scope(scope)))
+}
+
 fn tmp_file(base: &Path, scope: &str) -> PathBuf {
     // The scratch name carries this process id. Without it two processes
     // saving the same scope truncate and write over one scratch file, and

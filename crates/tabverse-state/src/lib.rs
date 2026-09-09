@@ -102,6 +102,15 @@ impl AppStateStore {
             .map_err(Into::into)
     }
 
+    pub fn dump_scopes(&self) -> Result<Vec<(String, String)>> {
+        let connection = self.connection()?;
+        let mut statement =
+            connection.prepare("SELECT scope, json FROM state_scopes ORDER BY scope")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
     /// Replace all compatibility scopes from a validated migration payload.
     /// The database changes as one transaction; malformed session JSON stays
     /// available to recovery but cannot leave half of a workspace projected.
@@ -435,6 +444,10 @@ mod tests {
             Some(r#"{"v":1}"#)
         );
         assert_eq!(store.list_scopes().unwrap(), ["files:abc"]);
+        assert_eq!(
+            store.dump_scopes().unwrap(),
+            [("files:abc".to_string(), r#"{"v":1}"#.to_string())]
+        );
         store.delete_scope("files:abc").unwrap();
         assert!(store.load_scope("files:abc").unwrap().is_none());
     }
