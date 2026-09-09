@@ -759,7 +759,7 @@ impl RemoteHub {
         // `context_id` remains routing state and is never consulted as proof.
         let gateway = self.network_gateway.clone();
         let data_fut = async {
-            let Some(gateway) = gateway else {
+            let Some(gateway) = gateway.map(|gateway| gateway.isolated()) else {
                 return std::future::pending::<Result<()>>().await;
             };
             loop {

@@ -16,6 +16,13 @@ use futures_util::StreamExt;
 #[cfg(not(target_arch = "wasm32"))]
 use http::header::{HeaderName, HeaderValue};
 #[cfg(not(target_arch = "wasm32"))]
+use reqwest::cookie::CookieStore;
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_util::io::ReaderStream;
 
 /// Data-stream protocol version. This is intentionally independent from the
@@ -132,6 +139,7 @@ pub enum HttpResponseStart {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct HostNetworkGateway {
     client: reqwest::Client,
+    cookie_jars: Arc<Mutex<HashMap<String, Arc<reqwest::cookie::Jar>>>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -143,14 +151,29 @@ impl HostNetworkGateway {
     /// navigation expects redirects to be surfaced rather than followed so the
     /// remote renderer can keep its own logical history coherent.
     pub fn new(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            cookie_jars: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Start one authenticated Remote connection's Browser state namespace.
+    /// The returned gateway shares Host network policy but no cookies with
+    /// this gateway or any other connection.
+    pub fn isolated(&self) -> Self {
+        Self::new(self.client.clone())
     }
 
     /// Serve one HTTP exchange over an already-authenticated bidirectional
     /// data stream. `recv` contains a framed request head followed immediately
     /// by raw request-body bytes until EOF. `send` receives a framed response
     /// start followed by raw response-body bytes until EOF.
-    pub async fn serve_http_exchange<R, W>(&self, mut recv: R, mut send: W) -> Result<()>
+    pub async fn serve_http_exchange<R, W>(
+        &self,
+        context_id: &str,
+        mut recv: R,
+        mut send: W,
+    ) -> Result<()>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin,
@@ -197,7 +220,13 @@ impl HostNetworkGateway {
             }
         };
 
-        let mut request = self.client.request(method, url);
+        let cookie_jar = {
+            let mut jars = self.cookie_jars.lock().unwrap_or_else(|e| e.into_inner());
+            jars.entry(context_id.to_string())
+                .or_insert_with(|| Arc::new(reqwest::cookie::Jar::default()))
+                .clone()
+        };
+        let mut request = self.client.request(method, url.clone());
         for pair in head.headers {
             let Ok(name) = HeaderName::from_bytes(pair.name.as_bytes()) else {
                 write_failure(
@@ -213,6 +242,7 @@ impl HostNetworkGateway {
             if is_hop_by_hop(&name)
                 || name == http::header::HOST
                 || name == http::header::CONTENT_LENGTH
+                || name == http::header::COOKIE
             {
                 continue;
             }
@@ -229,6 +259,9 @@ impl HostNetworkGateway {
             };
             request = request.header(name, value);
         }
+        if let Some(cookies) = cookie_jar.cookies(&url) {
+            request = request.header(http::header::COOKIE, cookies);
+        }
 
         // ReaderStream is the critical streaming boundary: reqwest consumes
         // request bytes as the remote side produces them rather than waiting
@@ -244,13 +277,19 @@ impl HostNetworkGateway {
             }
         };
 
+        for value in response.headers().get_all(http::header::SET_COOKIE) {
+            if let Ok(cookie) = value.to_str() {
+                cookie_jar.add_cookie_str(cookie, response.url());
+            }
+        }
+
         let response_head = HttpResponseHead {
             status: response.status().as_u16(),
             final_url: response.url().to_string(),
             headers: response
                 .headers()
                 .iter()
-                .filter(|(name, _)| !is_hop_by_hop(name))
+                .filter(|(name, _)| !is_hop_by_hop(name) && *name != http::header::SET_COOKIE)
                 .map(|(name, value)| HeaderPair {
                     name: name.as_str().to_string(),
                     value: String::from_utf8_lossy(value.as_bytes()).into_owned(),
@@ -358,6 +397,42 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
 
+    async fn exchange(
+        gateway: HostNetworkGateway,
+        context_id: &str,
+        url: String,
+    ) -> HttpResponseHead {
+        let (client_side, host_side) = tokio::io::duplex(64 * 1024);
+        let (mut client_recv, mut client_send) = tokio::io::split(client_side);
+        let (host_recv, host_send) = tokio::io::split(host_side);
+        let context_id = context_id.to_string();
+        let serve = tokio::spawn(async move {
+            gateway
+                .serve_http_exchange(&context_id, host_recv, host_send)
+                .await
+                .unwrap();
+        });
+        write_http_request_head(
+            &mut client_send,
+            &HttpRequestHead {
+                method: "GET".into(),
+                url,
+                headers: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        client_send.shutdown().await.unwrap();
+        let start = read_http_response_start(&mut client_recv).await.unwrap();
+        let HttpResponseStart::Response { head } = start else {
+            panic!("host gateway returned {start:?}");
+        };
+        let mut body = Vec::new();
+        client_recv.read_to_end(&mut body).await.unwrap();
+        serve.await.unwrap();
+        head
+    }
+
     #[tokio::test]
     async fn metadata_frames_round_trip_without_touching_body_encoding() {
         let (mut a, mut b) = tokio::io::duplex(4096);
@@ -412,7 +487,7 @@ mod tests {
 
         let serve = tokio::spawn(async move {
             gateway
-                .serve_http_exchange(host_recv, host_send)
+                .serve_http_exchange("test-browser", host_recv, host_send)
                 .await
                 .unwrap();
         });
@@ -445,5 +520,49 @@ mod tests {
 
         serve.await.unwrap();
         origin.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_cookies_stay_host_side_and_are_isolated_by_context_and_connection() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let origin = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    socket.read_exact(&mut byte).await.unwrap();
+                    request.push(byte[0]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                let cookie = if index == 0 {
+                    "Set-Cookie: remote_session=alpha; HttpOnly; Path=/\r\n"
+                } else {
+                    ""
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n{cookie}Content-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+            requests
+        });
+
+        let gateway = HostNetworkGateway::new(Default::default());
+        let url = |path: &str| format!("http://localhost:{port}/{path}");
+        let set = exchange(gateway.clone(), "browser-a", url("set")).await;
+        exchange(gateway.clone(), "browser-a", url("same-context")).await;
+        exchange(gateway.clone(), "browser-b", url("other-context")).await;
+        exchange(gateway.isolated(), "browser-a", url("other-connection")).await;
+
+        assert!(set.headers.iter().all(|header| header.name != "set-cookie"));
+        let requests = origin.await.unwrap();
+        assert!(requests[1].contains("cookie: remote_session=alpha"));
+        assert!(!requests[2].contains("remote_session=alpha"));
+        assert!(!requests[3].contains("remote_session=alpha"));
     }
 }

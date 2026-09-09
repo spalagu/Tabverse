@@ -56,7 +56,7 @@ impl IncomingDataStream {
                         result.context("wait for remote HTTP response consumer")?;
                         Ok(())
                     }
-                    result = gateway.serve_http_exchange(recv, send) => match result {
+                    result = gateway.serve_http_exchange(&preface.context_id, recv, send) => match result {
                         // AsyncWrite erases noq's WriteError into io::Error. If
                         // STOP_SENDING raced the failed write, the transport's
                         // own stopped future is the authoritative distinction
