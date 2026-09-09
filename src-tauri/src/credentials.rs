@@ -108,18 +108,18 @@ impl KeyBundleCache {
 #[cfg(not(test))]
 static KEY_BUNDLE: KeyBundleCache = KeyBundleCache::new();
 
-/// Where the encrypted login store lives. Set once at startup, because
+/// Where app.db and the legacy encrypted login store live. Set once at startup, because
 /// resolving it needs the app handle and this module deliberately has no
 /// idea what a Tauri app is.
-static VAULT_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+static APP_DATA_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-pub fn set_vault_dir(dir: std::path::PathBuf) {
-    let _ = VAULT_DIR.set(dir);
+pub fn set_app_data_dir(dir: std::path::PathBuf) {
+    let _ = APP_DATA_DIR.set(dir);
 }
 
 /// Serialises the tests that use the vault, and hands each one an empty one.
 ///
-/// `VAULT_DIR` is a `OnceLock`, so only the first `set_vault_dir` of a test
+/// `APP_DATA_DIR` is a `OnceLock`, so only the first setup of a test
 /// binary takes effect and every later test silently shares that first
 /// directory. Sharing it is survivable; sharing it *concurrently* is not —
 /// one test storing an agent token is enough to send another test's session
@@ -135,13 +135,13 @@ pub(crate) fn test_vault_guard(
     // A test that panicked while holding this poisoned it; the next test still
     // wants a clean directory, so take it anyway.
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = VAULT_DIR.set(preferred);
-    if let Some(dir) = VAULT_DIR.get() {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
+    let _ = APP_DATA_DIR.set(preferred);
+    if let Some(dir) = APP_DATA_DIR.get() {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::remove_file(dir.join("app.db"));
+        let _ = std::fs::remove_file(dir.join("app.db-wal"));
+        let _ = std::fs::remove_file(dir.join("app.db-shm"));
+        let _ = std::fs::remove_dir_all(dir.join("state"));
     }
     guard
 }
@@ -176,23 +176,31 @@ mod vault {
 
     const MAGIC: &[u8] = b"TABVERSEVAULT2";
     const FILE: &str = "logins.v2.vault";
+    const ID: &str = "browser-logins-v2";
 
     /// service -> "host\u{1}username" -> password
     pub type Store = BTreeMap<String, BTreeMap<String, String>>;
 
-    fn path() -> Result<std::path::PathBuf, String> {
-        let dir = VAULT_DIR
+    fn app_data_dir() -> Result<&'static std::path::Path, String> {
+        APP_DATA_DIR
             .get()
-            .ok_or_else(|| "the login store has no directory yet".to_string())?;
-        std::fs::create_dir_all(dir).map_err(|e| format!("login store dir: {e}"))?;
-        Ok(dir.join(FILE))
+            .map(std::path::PathBuf::as_path)
+            .ok_or_else(|| "the login store has no directory yet".to_string())
+    }
+
+    fn store() -> Result<tabverse_state::AppStateStore, String> {
+        tabverse_state::AppStateStore::open(app_data_dir()?).map_err(|e| format!("app.db: {e:#}"))
+    }
+
+    fn legacy_path() -> Result<std::path::PathBuf, String> {
+        Ok(app_data_dir()?.join("state").join(FILE))
     }
 
     fn key() -> Result<[u8; 32], String> {
         Ok(key_bundle()?.login_vault)
     }
 
-    fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, String> {
+    pub(super) fn seal(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>, String> {
         use aes_gcm::aead::Aead;
         use aes_gcm::{Aes256Gcm, KeyInit};
         let cipher = Aes256Gcm::new(key.into());
@@ -221,29 +229,39 @@ mod vault {
     }
 
     pub fn read() -> Result<Store, String> {
-        let p = path()?;
-        if !p.exists() {
+        let database = store()?;
+        let data = if let Some(data) = database
+            .load_credential_vault(ID)
+            .map_err(|e| format!("read credential vault from app.db: {e:#}"))?
+        {
+            data
+        } else if let Ok(data) = std::fs::read(legacy_path()?) {
+            // Import only ciphertext that authenticates and decodes. The old
+            // file remains untouched until a later release can drop rollback.
+            let plain = unseal(&key()?, &data)?;
+            serde_json::from_slice::<Store>(&plain)
+                .map_err(|e| format!("legacy login store is damaged: {e}"))?;
+            database
+                .save_credential_vault(ID, &data)
+                .map_err(|e| format!("import credential vault into app.db: {e:#}"))?;
+            data
+        } else {
             // Nothing yet: an empty store, written so the next read has a
-            // file to open. Nothing is carried in from anywhere — this app
-            // keeps logins in exactly one place.
+            // database row to open.
             let store = Store::new();
             write(&store)?;
             return Ok(store);
-        }
-        let data = std::fs::read(&p).map_err(|e| format!("read login store: {e}"))?;
+        };
         let plain = unseal(&key()?, &data)?;
         serde_json::from_slice(&plain).map_err(|e| format!("login store is damaged: {e}"))
     }
 
-    pub fn write(store: &Store) -> Result<(), String> {
-        let plain = serde_json::to_vec(store).map_err(|e| format!("login store: {e}"))?;
+    pub fn write(contents: &Store) -> Result<(), String> {
+        let plain = serde_json::to_vec(contents).map_err(|e| format!("login store: {e}"))?;
         let sealed = seal(&key()?, &plain)?;
-        let p = path()?;
-        // Written beside and renamed, so a crash mid-write cannot leave a
-        // half file where every saved login used to be.
-        let tmp = p.with_extension("vault.tmp");
-        std::fs::write(&tmp, sealed).map_err(|e| format!("write login store: {e}"))?;
-        std::fs::rename(&tmp, &p).map_err(|e| format!("replace login store: {e}"))
+        store()?
+            .save_credential_vault(ID, &sealed)
+            .map_err(|e| format!("write credential vault to app.db: {e:#}"))
     }
 }
 
@@ -646,13 +664,45 @@ mod key_bundle_tests {
     fn legacy_vault_file_is_ignored_without_being_modified() {
         let preferred = tempfile::tempdir().unwrap();
         let _guard = test_vault_guard(preferred.path().to_path_buf());
-        let dir = VAULT_DIR.get().unwrap();
-        let legacy = dir.join("logins.vault");
+        let dir = APP_DATA_DIR.get().unwrap();
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        let legacy = dir.join("state/logins.vault");
         let marker = b"legacy-vault-must-remain-untouched";
         std::fs::write(&legacy, marker).unwrap();
 
         assert!(vault::read().unwrap().is_empty());
         assert_eq!(std::fs::read(&legacy).unwrap(), marker);
-        assert!(dir.join("logins.v2.vault").exists());
+        assert!(!dir.join("state/logins.v2.vault").exists());
+        assert!(tabverse_state::AppStateStore::open(dir)
+            .unwrap()
+            .load_credential_vault("browser-logins-v2")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn authenticated_v2_file_imports_once_without_being_deleted() {
+        let preferred = tempfile::tempdir().unwrap();
+        let _guard = test_vault_guard(preferred.path().to_path_buf());
+        let dir = APP_DATA_DIR.get().unwrap();
+        std::fs::create_dir_all(dir.join("state")).unwrap();
+        let mut original = vault::Store::new();
+        original
+            .entry(WEB_SERVICE.into())
+            .or_default()
+            .insert(account("example.test", "me").unwrap(), "secret".into());
+        let plain = serde_json::to_vec(&original).unwrap();
+        let sealed = vault::seal(&[0x22; KEY_BYTES], &plain).unwrap();
+        let legacy = dir.join("state/logins.v2.vault");
+        std::fs::write(&legacy, &sealed).unwrap();
+
+        assert_eq!(vault::read().unwrap(), original);
+        assert_eq!(std::fs::read(&legacy).unwrap(), sealed);
+        let imported = tabverse_state::AppStateStore::open(dir)
+            .unwrap()
+            .load_credential_vault("browser-logins-v2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(imported, sealed);
     }
 }

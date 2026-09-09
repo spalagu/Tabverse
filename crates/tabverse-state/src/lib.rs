@@ -7,6 +7,7 @@ pub const MAX_STATE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SCOPE_LEN: usize = 120;
 const INITIAL_SCHEMA_VERSION: i64 = 1;
 const WORKSPACE_PROJECTION_VERSION: i64 = 2;
+const CREDENTIAL_VAULT_VERSION: i64 = 3;
 const DEFAULT_WORKSPACE_ID: &str = "main";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +110,31 @@ impl AppStateStore {
         let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    pub fn load_credential_vault(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        validate_identifier("credential vault", id)?;
+        self.connection()?
+            .query_row(
+                "SELECT ciphertext FROM credential_vault WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn save_credential_vault(&self, id: &str, ciphertext: &[u8]) -> Result<()> {
+        validate_identifier("credential vault", id)?;
+        if ciphertext.is_empty() {
+            return Err(anyhow!("credential vault ciphertext must not be empty"));
+        }
+        self.connection()?.execute(
+            "INSERT INTO credential_vault(id, ciphertext, updated_at) VALUES (?1, ?2, unixepoch())\
+             ON CONFLICT(id) DO UPDATE SET ciphertext=excluded.ciphertext, updated_at=excluded.updated_at",
+            params![id, ciphertext],
+        )?;
+        Ok(())
     }
 
     /// Replace all compatibility scopes from a validated migration payload.
@@ -285,6 +311,22 @@ impl AppStateStore {
             transaction.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, unixepoch())",
                 [WORKSPACE_PROJECTION_VERSION],
+            )?;
+        }
+        let credential_vault_applied: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=?1)",
+            [CREDENTIAL_VAULT_VERSION],
+            |row| row.get(0),
+        )?;
+        if !credential_vault_applied {
+            transaction.execute_batch(
+                "CREATE TABLE credential_vault (\
+                   id TEXT PRIMARY KEY, ciphertext BLOB NOT NULL, updated_at INTEGER NOT NULL\
+                 );",
+            )?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, unixepoch())",
+                [CREDENTIAL_VAULT_VERSION],
             )?;
         }
         transaction.commit()?;
@@ -584,6 +626,43 @@ mod tests {
         let workspace = store.load_workspace(DEFAULT_WORKSPACE_ID).unwrap().unwrap();
         assert_eq!(workspace.tabs[0].id, "old");
         assert_eq!(workspace.tabs[0].kind, "files");
+        assert!(store
+            .load_credential_vault("browser-logins-v2")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn encrypted_credential_vault_round_trips_as_an_opaque_blob() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AppStateStore::open(temp.path()).unwrap();
+        let first = b"not plaintext credentials, only caller-owned ciphertext";
+        store
+            .save_credential_vault("browser-logins-v2", first)
+            .unwrap();
+        assert_eq!(
+            store
+                .load_credential_vault("browser-logins-v2")
+                .unwrap()
+                .as_deref(),
+            Some(first.as_slice())
+        );
+
+        let replacement = b"replacement ciphertext";
+        store
+            .save_credential_vault("browser-logins-v2", replacement)
+            .unwrap();
+        assert_eq!(
+            store
+                .load_credential_vault("browser-logins-v2")
+                .unwrap()
+                .as_deref(),
+            Some(replacement.as_slice())
+        );
+        assert!(store.save_credential_vault("", replacement).is_err());
+        assert!(store
+            .save_credential_vault("browser-logins-v2", b"")
+            .is_err());
     }
 
     #[test]

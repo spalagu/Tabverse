@@ -4205,9 +4205,9 @@ pub fn run() {
             // first request from racing the session-cookie restore.
             // Before anything asks for a saved login: the encrypted store
             // has to know where it lives.
-            match state_dir(app.handle()) {
-                Ok(dir) => credentials::set_vault_dir(dir),
-                Err(e) => eprintln!("[credentials] no state dir, logins unavailable: {e}"),
+            match app.path().app_data_dir() {
+                Ok(dir) => credentials::set_app_data_dir(dir),
+                Err(e) => eprintln!("[credentials] no app data dir, logins unavailable: {e}"),
             }
             #[cfg(target_os = "macos")]
             {
