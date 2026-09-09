@@ -63,6 +63,7 @@ import {
   targetFromProxyUrl,
   type ProxyClient,
 } from "@tabverse/remote-client/proxy-fetch";
+import { relayProxyResponse } from "./proxyStreamBridge";
 
 /** The wasm client has no dial timeout of its own (the desktop library uses
  * 20s); race the join against this so a dead relay counts as an unexpected
@@ -248,19 +249,16 @@ function JoinApp() {
         try {
           const target = targetFromProxyUrl(new URL(url));
           if (target === null) throw new Error("not a proxy endpoint url");
-          const res = await proxy.requestViaProxy(target);
-          const buf = new Uint8Array(await res.arrayBuffer());
-          let bin = "";
-          for (let i = 0; i < buf.length; i += 0x8000) {
-            bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-          }
+          await relayProxyResponse(port, target, (requestUrl, init) =>
+            proxy.requestViaProxy(requestUrl, init)
+          );
+        } catch (error) {
           port.postMessage({
-            status: res.status,
-            contentType: res.headers.get("content-type") ?? "",
-            bodyB64: btoa(bin),
+            type: "error",
+            message: error instanceof Error ? error.message : "proxy failed",
           });
-        } catch {
-          port.postMessage({ status: 502, contentType: "", bodyB64: "" });
+        } finally {
+          port.close();
         }
       })();
     };

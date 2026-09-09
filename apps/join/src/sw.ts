@@ -72,23 +72,65 @@ async function proxyViaPage(request: Request): Promise<Response> {
   }
   return new Promise<Response>((resolve) => {
     const channel = new MessageChannel();
-    const timer = setTimeout(
-      () => resolve(new Response("proxy timeout", { status: 504 })),
-      30_000,
-    );
-    channel.port1.onmessage = (e: MessageEvent) => {
+    let settled = false;
+    let body: ReadableStreamDefaultController<Uint8Array> | null = null;
+    let timer = 0;
+    const close = () => {
       clearTimeout(timer);
-      const d = e.data as { status: number; contentType: string; bodyB64: string };
-      const bytes =
-        d.bodyB64.length > 0
-          ? Uint8Array.from(atob(d.bodyB64), (c) => c.charCodeAt(0))
-          : undefined;
-      resolve(
-        new Response(bytes, {
+      channel.port1.close();
+    };
+    const timeout = () => {
+      if (settled) {
+        body?.error(new Error("proxy timeout"));
+      } else {
+        settled = true;
+        resolve(new Response("proxy timeout", { status: 504 }));
+      }
+      channel.port1.postMessage({ type: "cancel" });
+      close();
+    };
+    const armTimeout = () => {
+      clearTimeout(timer);
+      timer = setTimeout(timeout, 30_000) as unknown as number;
+    };
+    armTimeout();
+    channel.port1.onmessage = (e: MessageEvent) => {
+      armTimeout();
+      const d = e.data as
+        | { type: "start"; status: number; statusText: string; headers: [string, string][] }
+        | { type: "chunk"; bytes: ArrayBuffer }
+        | { type: "end" }
+        | { type: "error"; message: string };
+      if (d.type === "start" && !settled) {
+        settled = true;
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            body = controller;
+          },
+          cancel() {
+            channel.port1.postMessage({ type: "cancel" });
+            close();
+          },
+        });
+        resolve(new Response(stream, {
           status: d.status,
-          headers: d.contentType ? { "content-type": d.contentType } : {},
-        }),
-      );
+          statusText: d.statusText,
+          headers: d.headers,
+        }));
+      } else if (d.type === "chunk" && body !== null) {
+        body.enqueue(new Uint8Array(d.bytes));
+      } else if (d.type === "end") {
+        body?.close();
+        close();
+      } else if (d.type === "error") {
+        if (settled) {
+          body?.error(new Error(d.message));
+        } else {
+          settled = true;
+          resolve(new Response(d.message, { status: 502 }));
+        }
+        close();
+      }
     };
     page.postMessage({ type: "tabverse-proxy-fetch", url: request.url }, [
       channel.port2,
