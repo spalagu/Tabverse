@@ -246,7 +246,13 @@ function JoinApp() {
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
     const onMessage = (event: MessageEvent) => {
-      const d = event.data as { type?: string; url?: string };
+      const d = event.data as {
+        type?: string;
+        url?: string;
+        method?: string;
+        headers?: [string, string][];
+        hasBody?: boolean;
+      };
       const url = d?.url;
       if (d?.type !== "tabverse-proxy-fetch" || typeof url !== "string") return;
       const port = (event as MessageEvent & { ports: MessagePort[] }).ports[0];
@@ -255,8 +261,20 @@ function JoinApp() {
         try {
           const route = proxyRouteFromUrl(new URL(url));
           if (route === null) throw new Error("not a proxy endpoint url");
-          await relayProxyResponse(port, route.target, (requestUrl, init) =>
-            proxy.requestViaProxy(requestUrl, init, route.contextId ?? undefined)
+          await relayProxyResponse(
+            port,
+            route.target,
+            (requestUrl, init) =>
+              proxy.requestViaProxy(
+                requestUrl,
+                init,
+                route.contextId ?? undefined,
+              ),
+            {
+              method: d.method ?? "GET",
+              headers: d.headers ?? [],
+              hasBody: d.hasBody ?? false,
+            },
           );
         } catch (error) {
           port.postMessage({

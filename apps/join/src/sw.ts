@@ -39,7 +39,6 @@ sw.addEventListener("activate", (event) => {
 
 sw.addEventListener("fetch", (event) => {
   const request = event.request;
-  if (request.method !== "GET") return;
   const url = new URL(request.url);
   if (url.origin !== sw.location.origin) return;
   if (url.pathname.includes("/__tabverse_proxy/")) {
@@ -132,9 +131,33 @@ async function proxyViaPage(request: Request): Promise<Response> {
         close();
       }
     };
-    page.postMessage({ type: "tabverse-proxy-fetch", url: request.url }, [
-      channel.port2,
-    ]);
+    page.postMessage({
+      type: "tabverse-proxy-fetch",
+      url: request.url,
+      method: request.method,
+      headers: Array.from(request.headers.entries()),
+      hasBody: request.body !== null,
+    }, [channel.port2]);
+    if (request.body !== null) {
+      void (async () => {
+        try {
+          const reader = request.body!.getReader();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            armTimeout();
+            const bytes = value.slice().buffer as ArrayBuffer;
+            channel.port1.postMessage({ type: "request-chunk", bytes }, [bytes]);
+          }
+          channel.port1.postMessage({ type: "request-end" });
+        } catch (error) {
+          channel.port1.postMessage({
+            type: "request-error",
+            message: error instanceof Error ? error.message : "request body failed",
+          });
+        }
+      })();
+    }
   });
 }
 

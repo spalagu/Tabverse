@@ -183,7 +183,7 @@ export function BrowserPane({
       <iframe
         className="browser-pane-frame"
         title={STR.remote.web.browserPane.frameTitle({ url })}
-        sandbox="allow-same-origin"
+        sandbox="allow-forms allow-same-origin"
         srcDoc={state.doc}
       />
       <span className="browser-pane-chip">

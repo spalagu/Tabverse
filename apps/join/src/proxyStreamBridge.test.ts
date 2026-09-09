@@ -14,6 +14,40 @@ function messagesUntilEnd(port: MessagePort): Promise<unknown[]> {
 }
 
 describe("Service Worker proxy byte stream bridge", () => {
+  it("streams method, headers and raw request body into the Host fetch", async () => {
+    const channel = new MessageChannel();
+    const received = messagesUntilEnd(channel.port2);
+    let requestBody: number[] = [];
+    const fetchViaHost = vi.fn(async (_url: string, init: RequestInit) => {
+      requestBody = Array.from(
+        new Uint8Array(await new Response(init.body).arrayBuffer()),
+      );
+      expect(init.method).toBe("POST");
+      expect(new Headers(init.headers).get("content-type")).toBe("application/octet-stream");
+      return new Response(null, { status: 204 });
+    });
+
+    const relaying = relayProxyResponse(
+      channel.port1,
+      "http://host.local/upload",
+      fetchViaHost,
+      {
+        method: "POST",
+        headers: [["content-type", "application/octet-stream"]],
+        hasBody: true,
+      },
+    );
+    const first = new Uint8Array([0, 1, 255]).buffer;
+    const second = new Uint8Array([2, 3]).buffer;
+    channel.port2.postMessage({ type: "request-chunk", bytes: first }, [first]);
+    channel.port2.postMessage({ type: "request-chunk", bytes: second }, [second]);
+    channel.port2.postMessage({ type: "request-end" });
+    await relaying;
+    await received;
+
+    expect(requestBody).toEqual([0, 1, 255, 2, 3]);
+  });
+
   it("transfers response chunks as raw bytes without whole-body buffering", async () => {
     const channel = new MessageChannel();
     const received = messagesUntilEnd(channel.port2);

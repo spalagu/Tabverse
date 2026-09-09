@@ -101,7 +101,7 @@ describe("BrowserPane", () => {
     expect(frame).not.toBeNull();
     // Scripts may not run; same origin is kept so relative URLs load
     // against the join origin rather than dying on a CORS wall.
-    expect(frame!.getAttribute("sandbox")).toBe("allow-same-origin");
+    expect(frame!.getAttribute("sandbox")).toBe("allow-forms allow-same-origin");
     // The document's directory, mirrored onto the endpoint path the
     // page's fetch patch (and, later, the SW arm) answers.
     expect(frame!.getAttribute("srcdoc")).toContain(
