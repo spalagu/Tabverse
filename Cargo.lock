@@ -5818,6 +5818,7 @@ dependencies = [
  "data-encoding",
  "iroh",
  "rand 0.10.2",
+ "rustls",
  "serde",
  "serde_json",
  "tabverse-network",

@@ -43,7 +43,35 @@ impl IncomingDataStream {
             recv,
         } = self;
         match preface.kind {
-            DataStreamKind::Http => gateway.serve_http_exchange(recv, send).await,
+            DataStreamKind::Http => {
+                // `RecvStream::stop` at the viewer sends STOP_SENDING for our
+                // response half. Observe it independently of write backpressure
+                // so dropping a Browser pane cancels the Host HTTP request now,
+                // rather than only after QUIC's send window eventually fills.
+                let stopped = send.stopped();
+                tokio::pin!(stopped);
+                tokio::select! {
+                    biased;
+                    result = &mut stopped => {
+                        result.context("wait for remote HTTP response consumer")?;
+                        Ok(())
+                    }
+                    result = gateway.serve_http_exchange(recv, send) => match result {
+                        // AsyncWrite erases noq's WriteError into io::Error. If
+                        // STOP_SENDING raced the failed write, the transport's
+                        // own stopped future is the authoritative distinction
+                        // between cancellation and a real gateway failure.
+                        Err(_) if matches!(
+                            tokio::time::timeout(
+                                std::time::Duration::from_millis(100),
+                                &mut stopped,
+                            ).await,
+                            Ok(Ok(Some(_)))
+                        ) => Ok(()),
+                        result => result,
+                    },
+                }
+            }
         }
     }
 }
@@ -276,5 +304,93 @@ mod tests {
         })
         .await
         .context("iroh control/data roundtrip exceeded 30 seconds")?
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stopping_response_stream_cancels_host_http_exchange() -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let port = listener.local_addr()?.port();
+            let origin = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    socket.read_exact(&mut byte).await.unwrap();
+                    request.push(byte[0]);
+                }
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                    .await
+                    .unwrap();
+                let chunk = vec![b'x'; 32 * 1024];
+                loop {
+                    let head = format!("{:x}\r\n", chunk.len());
+                    if socket.write_all(head.as_bytes()).await.is_err()
+                        || socket.write_all(&chunk).await.is_err()
+                        || socket.write_all(b"\r\n").await.is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+
+            let host_ep = Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .alpns(vec![TEST_ALPN.to_vec()])
+                .clear_ip_transports()
+                .bind_addr((Ipv4Addr::LOCALHOST, 0))?
+                .bind()
+                .await?;
+            let client_ep = Endpoint::builder(iroh::endpoint::presets::Minimal)
+                .clear_ip_transports()
+                .bind_addr((Ipv4Addr::LOCALHOST, 0))?
+                .bind()
+                .await?;
+            let host_ep_for_accept = host_ep.clone();
+            let host_accept =
+                tokio::spawn(
+                    async move { host_ep_for_accept.accept().await.unwrap().await.unwrap() },
+                );
+            let client_conn = client_ep.connect(host_ep.addr(), TEST_ALPN).await?;
+            let host_conn = host_accept.await?;
+            let host_data = tokio::spawn(async move {
+                accept_data_stream(&host_conn)
+                    .await?
+                    .serve(HostNetworkGateway::new(Default::default()))
+                    .await
+            });
+
+            let mut http = RemoteHttpStream::open(
+                &client_conn,
+                "browser-tab-cancelled",
+                &HttpRequestHead {
+                    method: "GET".into(),
+                    url: format!("http://localhost:{port}/slow"),
+                    headers: Vec::new(),
+                },
+            )
+            .await?;
+            http.finish_request()?;
+            assert!(matches!(
+                http.response_start().await?,
+                HttpResponseStart::Response { .. }
+            ));
+
+            http.recv.stop(0u32.into())?;
+            tokio::time::timeout(Duration::from_secs(2), host_data)
+                .await
+                .context("Host HTTP exchange survived viewer cancellation")???;
+            tokio::time::timeout(Duration::from_secs(2), origin)
+                .await
+                .context("origin connection survived viewer cancellation")??;
+
+            client_conn.close(0u32.into(), b"test complete");
+            client_ep.close().await;
+            host_ep.close().await;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .context("HTTP cancellation roundtrip exceeded 20 seconds")?
     }
 }
