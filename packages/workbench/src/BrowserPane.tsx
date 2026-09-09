@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { STR } from "./strings";
+import { rewriteRemoteHtml, type ProxyUrlResolver } from "./remoteBrowserDocument";
+
+export { rewriteRemoteHtml as mirroredDocument } from "./remoteBrowserDocument";
 
 /** The pane's one route to the host's network — App hands it the proxy
  * client's requestViaProxy. */
@@ -23,70 +26,6 @@ function refusalOf(res: Response): string {
   return STR.remote.web.browserPane.unmirroredType;
 }
 
-/** The URL a document's relative subresources resolve against: its own
- * directory, query dropped — the standard base of an HTML page. */
-function documentBase(url: string): string {
-  const u = new URL(url);
-  const dir = u.pathname.slice(0, u.pathname.lastIndexOf("/") + 1);
-  return `${u.protocol}//${u.host}${dir}`;
-}
-
-/**
- * The document as the pane renders it: our <base> first in <head> —
- * document order decides which base wins, and ours names the proxy
- * endpoint the pane's whole mirror is addressed by — with a synthetic
- * head for documents that ship without one.
- */
-const URL_ATTRIBUTES = [
-  "a[href]",
-  "area[href]",
-  "audio[src]",
-  "embed[src]",
-  "form[action]",
-  "iframe[src]",
-  "img[src]",
-  "input[src]",
-  "link[href]",
-  "object[data]",
-  "script[src]",
-  "source[src]",
-  "track[src]",
-  "video[poster]",
-  "video[src]",
-] as const;
-
-const attributeOf = (selector: string): string =>
-  selector.slice(selector.indexOf("[") + 1, -1);
-
-export function mirroredDocument(
-  html: string,
-  url: string,
-  resolveProxyUrl: (target: string, contextId?: string) => string,
-  contextId?: string,
-): string {
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  for (const selector of URL_ATTRIBUTES) {
-    const attribute = attributeOf(selector);
-    for (const element of doc.querySelectorAll<HTMLElement>(selector)) {
-      const value = element.getAttribute(attribute);
-      if (value === null || value.trim() === "" || value.startsWith("#")) continue;
-      try {
-        const target = new URL(value, url);
-        if (target.protocol === "http:" || target.protocol === "https:") {
-          element.setAttribute(attribute, resolveProxyUrl(target.href, contextId));
-        }
-      } catch {
-        // Leave malformed and non-URL attribute values to the browser.
-      }
-    }
-  }
-  for (const oldBase of doc.querySelectorAll("base")) oldBase.remove();
-  const base = doc.createElement("base");
-  base.href = resolveProxyUrl(documentBase(url), contextId);
-  doc.head.prepend(base);
-  return `<!doctype html>${doc.documentElement.outerHTML}`;
-}
-
 export function BrowserPane({
   url,
   contextId,
@@ -99,7 +38,7 @@ export function BrowserPane({
   contextId?: string;
   fetchViaHost: HostFetch;
   /** Maps a host URL to the runtime's same-origin proxy endpoint. */
-  resolveProxyUrl?: (target: string, contextId?: string) => string;
+  resolveProxyUrl?: ProxyUrlResolver;
 }) {
   const [state, setState] = useState<PaneState>({ kind: "loading" });
 
@@ -124,7 +63,7 @@ export function BrowserPane({
         if (res.ok && html) {
           setState({
             kind: "mirrored",
-            doc: mirroredDocument(body, res.url || url, resolveProxyUrl, contextId),
+            doc: rewriteRemoteHtml(body, res.url || url, resolveProxyUrl, contextId),
           });
         } else {
           setState({ kind: "unmirrored", line: refusalOf(res), detail: null });

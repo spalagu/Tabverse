@@ -7,7 +7,9 @@
   "dependencies": {
     "@tabverse/runtime-contracts": "file:../runtime-contracts",
     "dompurify": "^3.4.12",
-    "marked": "^18.0.7"
+    "marked": "^18.0.7",
+    "postcss": "8.5.25",
+    "postcss-value-parser": "4.2.0"
   },
   "peerDependencies": {
     "@xterm/addon-search": "^0.15.0",
@@ -151,6 +153,7 @@
     "./settings-pane": "./src/SettingsPane.tsx",
     "./host-panes.css": "./src/hostPanes.css",
     "./browser-pane": "./src/BrowserPane.tsx",
+    "./remote-browser-document": "./src/remoteBrowserDocument.ts",
     "./browser-progress": "./src/browser/progress.ts",
     "./browser-progress-bar": "./src/browser/BrowserProgressBar.tsx",
     "./browser-native-pane": "./src/browser/BrowserNativePane.tsx",

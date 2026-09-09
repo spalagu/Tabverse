@@ -21,6 +21,7 @@ import {
 } from "@tabverse/workbench/strings/errors";
 import { STR, plural } from "@tabverse/workbench/strings";
 import type { TermSink } from "@tabverse/workbench/terminal/viewer";
+import { transformRemoteResponse } from "@tabverse/workbench/remote-browser-document";
 import { Toolbar } from "./Toolbar";
 import { TOOLBAR_BYTES, applyStickyCtrl, type ToolbarKey } from "./toolbarKeys";
 import { ticketFromHash } from "./ticket";
@@ -265,11 +266,16 @@ function JoinApp() {
             port,
             route.target,
             (requestUrl, init) =>
-              proxy.requestViaProxy(
-                requestUrl,
-                init,
-                route.contextId ?? undefined,
-              ),
+              proxy
+                .requestViaProxy(requestUrl, init, route.contextId ?? undefined)
+                .then((response) =>
+                  transformRemoteResponse(
+                    response,
+                    requestUrl,
+                    resolveProxyUrl,
+                    route.contextId ?? undefined,
+                  ),
+                ),
             {
               method: d.method ?? "GET",
               headers: d.headers ?? [],
