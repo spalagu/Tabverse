@@ -37,6 +37,8 @@ crates/tabverse-*            可复用 Rust Core
 
 `src-tauri/src/remote_commands.rs` 持有 Remote Join IPC 和 GUI channel 适配。连接、加密传输、控制/数据流以及 Host 端授权仍由 `tabverse-remote` 实现；`context_id` 不在该适配器中参与授权判断。
 
+`src-tauri/src/agent_commands.rs` 持有 Agent 登录、Agent Tab IPC、Runtime Supervisor 接线和共享源注册。Agent 事件与回合语义属于 `tabverse-agent`，runtime 身份和进程生命周期属于 `tabverse-runtime`；适配器不保存恢复状态，也不伪造进程恢复。
+
 ## 非目标
 
 - 外部插件安装、更新、签名和包管理。

@@ -145,6 +145,9 @@ if (/\b(?:async\s+)?fn\s+term_[a-z0-9_]+\s*\(/.test(tauriComposition)) {
 if (/\b(?:async\s+)?fn\s+remote_(?:join|input|agent_[a-z0-9_]+|viewport|ping|leave)\s*\(/.test(tauriComposition)) {
   violations.push("src-tauri/src/lib.rs defines a Remote Join command; move it to remote_commands.rs");
 }
+if (/\b(?:async\s+)?fn\s+agent_(?:start|prompt|cancel|answer|close|detach|login_[a-z0-9_]+|logout)\s*\(/.test(tauriComposition)) {
+  violations.push("src-tauri/src/lib.rs defines an Agent command; move it to agent_commands.rs");
+}
 
 if (violations.length > 0) {
   console.error("V3 architecture boundary check failed:");
