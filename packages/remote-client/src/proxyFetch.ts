@@ -16,7 +16,11 @@ const PROXY_PATH_SEGMENT = "__tabverse_proxy/";
 
 /** Same-origin root beneath which every virtual Browser URL lives. */
 export function proxyPathRoot(basePath = "/"): string {
-  const scopedBase = `/${basePath.replace(/^\/+|\/+$/g, "")}`.replace(/^\/$/, "");
+  let start = 0;
+  let end = basePath.length;
+  while (start < end && basePath[start] === "/") start += 1;
+  while (end > start && basePath[end - 1] === "/") end -= 1;
+  const scopedBase = start === end ? "" : `/${basePath.slice(start, end)}`;
   return `${scopedBase}/${PROXY_PATH_SEGMENT}`;
 }
 

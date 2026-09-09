@@ -173,6 +173,12 @@ describe("the endpoint path", () => {
     );
   });
 
+  it("trims an untrusted base path in linear time", () => {
+    expect(proxyPathRoot(`${"/".repeat(20_000)}join${"/".repeat(20_000)}`)).toBe(
+      "/join/__tabverse_proxy/",
+    );
+  });
+
   it("mirrors a target URL after the scheme segment, query included", () => {
     expect(proxyUrlFor("http://intranet.example/dir/page?q=1")).toBe(
       `${PROXY_PATH_PREFIX}http/intranet.example/dir/page?q=1`
