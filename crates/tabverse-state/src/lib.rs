@@ -31,6 +31,7 @@ pub struct TabRecord {
 
 /// The desktop-owned durable store. Workbench talks to this through narrow
 /// state commands and never opens SQLite itself.
+#[derive(Clone)]
 pub struct AppStateStore {
     path: PathBuf,
 }
@@ -174,6 +175,37 @@ impl AppStateStore {
         let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    /// Import legacy settings exactly once. The marker and every value land
+    /// in one transaction, so a crash cannot leave a partial migration that
+    /// will never retry. The legacy source is intentionally left untouched.
+    pub fn import_settings_once(&self, marker: &str, values: &[(String, String)]) -> Result<bool> {
+        validate_identifier("settings migration", marker)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let already_imported: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM settings WHERE key=?1)",
+            [marker],
+            |row| row.get(0),
+        )?;
+        if already_imported {
+            return Ok(false);
+        }
+        for (key, value_json) in values {
+            validate_identifier("setting", key)?;
+            validate_json(value_json)?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO settings(key, value_json, updated_at) VALUES (?1, ?2, unixepoch())",
+                params![key, value_json],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO settings(key, value_json, updated_at) VALUES (?1, 'true', unixepoch())",
+            [marker],
+        )?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     pub fn load_content_preference(&self, content_type: &str) -> Result<Option<String>> {
@@ -753,6 +785,26 @@ mod tests {
         assert!(store.save_setting("broken", "not-json").is_err());
         store.delete_setting("appearance.theme").unwrap();
         assert!(store.load_setting("appearance.theme").unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_settings_import_is_atomic_and_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AppStateStore::open(temp.path()).unwrap();
+        let marker = "_migration.config-toml-v1";
+        assert!(store
+            .import_settings_once(marker, &[("appearance.theme".into(), r#""dark""#.into())],)
+            .unwrap());
+        assert!(!store
+            .import_settings_once(marker, &[("appearance.theme".into(), r#""light""#.into())],)
+            .unwrap());
+        assert_eq!(
+            store.load_setting("appearance.theme").unwrap().as_deref(),
+            Some(r#""dark""#)
+        );
+
+        let second = AppStateStore::open(temp.path()).unwrap();
+        assert!(!second.import_settings_once(marker, &[]).unwrap());
     }
 
     #[test]

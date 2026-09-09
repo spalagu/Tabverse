@@ -210,6 +210,42 @@ struct AppState {
     app_source: Arc<app_share::AppShareSource>,
 }
 
+struct AppDatabase(Arc<tabverse_state::AppStateStore>);
+
+#[tauri::command]
+async fn config_get(db: State<'_, AppDatabase>) -> Result<config::ConfigSnapshot, String> {
+    let store = db.0.clone();
+    tauri::async_runtime::spawn_blocking(move || config::snapshot_with_store(&store))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn config_set(
+    db: State<'_, AppDatabase>,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let store = db.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        config::set_with_store(&store, &key, &value)?;
+        config::project_network_setting(&key, Some(&value))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn config_reset(db: State<'_, AppDatabase>, key: String) -> Result<(), String> {
+    let store = db.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        config::reset_with_store(&store, &key)?;
+        config::project_network_setting(&key, None)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // Filesystem commands run on the blocking pool: a `git status` over a large
 // repo, or a slow disk, must never freeze the UI thread that every terminal
 // tab paints on. (Sync Tauri commands execute on the main thread.)
@@ -4185,6 +4221,13 @@ pub fn run() {
         .manage(system_open::Pending::default())
         .manage(std::sync::Arc::new(agent_client::AgentClientRegistry::new()))
         .setup(|app| {
+            let app_data_dir = app.path().app_data_dir()?;
+            let app_db = Arc::new(
+                tabverse_state::AppStateStore::open(&app_data_dir)
+                    .map_err(|e| format!("cannot open app.db: {e:#}"))?,
+            );
+            app.manage(AppDatabase(app_db.clone()));
+            credentials::set_app_data_dir(app_data_dir);
             {
                 let main_cfg = app
                     .config()
@@ -4210,8 +4253,8 @@ pub fn run() {
                 // is exactly what the registry exists to abolish. A load failure
                 // injects nothing: the interface then knows the values are not
                 // ready and asks config_get, which reports the error properly.
-                if let Ok(loaded) = config::load() {
-                    if let Ok(json) = serde_json::to_string(&loaded.config) {
+                if let Ok(snapshot) = config::snapshot_with_store(&app_db) {
+                    if let Ok(json) = serde_json::to_string(&snapshot.values) {
                         wb = wb.initialization_script(format!(
                             "window.__TABVERSE_BOOT_CONFIG__ = {json};"
                         ));
@@ -4238,10 +4281,6 @@ pub fn run() {
             // first request from racing the session-cookie restore.
             // Before anything asks for a saved login: the encrypted store
             // has to know where it lives.
-            match app.path().app_data_dir() {
-                Ok(dir) => credentials::set_app_data_dir(dir),
-                Err(e) => eprintln!("[credentials] no app data dir, logins unavailable: {e}"),
-            }
             #[cfg(target_os = "macos")]
             {
                 if let Some(window) = app.get_window("main") {
@@ -4396,9 +4435,9 @@ pub fn run() {
             completions::completions_update,
             default_apps::default_apps_status,
             default_apps::default_apps_set,
-            config::config_get,
-            config::config_set,
-            config::config_reset,
+            config_get,
+            config_set,
+            config_reset,
             config::config_schema,
             config::config_key_set,
             config::config_key_reset,

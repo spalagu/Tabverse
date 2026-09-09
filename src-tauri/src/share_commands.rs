@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::agent_client;
 use crate::app_share::AgentCmd;
-use crate::AppState;
+use crate::{AppDatabase, AppState};
 
 /// The glue layer's share bookkeeping. Entries live exactly as long as what
 /// they name: a session row dies with its runtime (`term_kill` or shell
@@ -293,6 +293,7 @@ const APP_SHARE_TAB_ID: &str = "app";
 pub async fn app_share_start(
     app: AppHandle,
     state: State<'_, AppState>,
+    db: State<'_, AppDatabase>,
     registry: State<'_, Arc<agent_client::AgentClientRegistry>>,
     ttl_secs: Option<u64>,
     access: String,
@@ -313,8 +314,8 @@ pub async fn app_share_start(
     // viewer's keystrokes must reach the active terminal, and the webview
     // bridge (which owns the term registry) is where they land.
     source.set_term_input_channel(app.clone());
-    register_app_rpc_read_commands(&state);
-    register_app_rpc_steer_commands(&state);
+    register_app_rpc_read_commands(&state, db.0.clone());
+    register_app_rpc_steer_commands(&state, db.0.clone());
     {
         let registry = registry.inner().clone();
         let bind_registry = registry.clone();
@@ -384,7 +385,10 @@ pub async fn app_share_start(
     })
 }
 
-fn register_app_rpc_read_commands(state: &State<'_, AppState>) {
+fn register_app_rpc_read_commands(
+    state: &State<'_, AppState>,
+    app_db: Arc<tabverse_state::AppStateStore>,
+) {
     let fs = state.fs.clone();
     state.app_source.register_rpc(
         "fs_list",
@@ -411,13 +415,8 @@ fn register_app_rpc_read_commands(state: &State<'_, AppState>) {
     );
     state.app_source.register_rpc(
         "config_get",
-        Arc::new(|_args| {
-            let loaded = crate::config::load().map_err(|e| e.to_string())?;
-            let snapshot = crate::config::ConfigSnapshot {
-                values: loaded.config,
-                warnings: loaded.warnings,
-                sources: loaded.sources,
-            };
+        Arc::new(move |_args| {
+            let snapshot = crate::config::snapshot_with_store(&app_db)?;
             serde_json::to_value(snapshot).map_err(|e| e.to_string())
         }),
     );
@@ -429,7 +428,10 @@ fn register_app_rpc_read_commands(state: &State<'_, AppState>) {
     );
 }
 
-fn register_app_rpc_steer_commands(state: &State<'_, AppState>) {
+fn register_app_rpc_steer_commands(
+    state: &State<'_, AppState>,
+    app_db: Arc<tabverse_state::AppStateStore>,
+) {
     let fs = state.fs.clone();
     state.app_source.register_steer_rpc(
         "fs_write",
@@ -448,17 +450,14 @@ fn register_app_rpc_steer_commands(state: &State<'_, AppState>) {
     );
     state.app_source.register_steer_rpc(
         "config_set",
-        Arc::new(|args| {
+        Arc::new(move |args| {
             let key = args
                 .get("key")
                 .and_then(|v| v.as_str())
                 .ok_or("config_set needs a string 'key'")?;
             let value = args.get("value").ok_or("config_set needs a 'value'")?;
-            let path = crate::config::write_target(
-                crate::config::current_platform(),
-                &crate::config::EnvVars::from_process(),
-            )?;
-            crate::config::set_in_file(&path, key, value)?;
+            crate::config::set_with_store(&app_db, key, value)?;
+            crate::config::project_network_setting(key, Some(value))?;
             Ok(serde_json::Value::Null)
         }),
     );
