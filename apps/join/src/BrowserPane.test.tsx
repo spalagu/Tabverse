@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { act } from "react";
 import { createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { BrowserPane } from "@tabverse/workbench/browser-pane";
+import {
+  BrowserPane,
+  mirroredDocument,
+} from "@tabverse/workbench/browser-pane";
 import { proxyUrlFor } from "@tabverse/remote-client/proxy-fetch";
 import { STR } from "@tabverse/workbench/strings";
 
@@ -51,6 +54,39 @@ const okHtml = (): Promise<Response> =>
   );
 
 describe("BrowserPane", () => {
+  it("rewrites static relative, root and absolute HTTP URLs into the virtual space", () => {
+    const html = mirroredDocument(
+      '<html><head><base href="https://wrong.example/"></head><body>' +
+        '<img id="relative" src="img/logo.png">' +
+        '<img id="root" src="/assets/app.png">' +
+        '<link id="cross" href="https://cdn.example/site.css">' +
+        '<a id="fragment" href="#part">part</a>' +
+        '<img id="data" src="data:image/gif;base64,AA==">' +
+        "</body></html>",
+      "http://intranet.local/wiki/Home",
+      (target) => proxyUrlFor(target, "/Tabverse/join/"),
+    );
+    const doc = new DOMParser().parseFromString(html, "text/html");
+
+    expect(doc.querySelector("base")?.getAttribute("href")).toBe(
+      "/Tabverse/join/__tabverse_proxy/http/intranet.local/wiki/",
+    );
+    expect(doc.querySelector("#relative")?.getAttribute("src")).toBe(
+      "/Tabverse/join/__tabverse_proxy/http/intranet.local/wiki/img/logo.png",
+    );
+    expect(doc.querySelector("#root")?.getAttribute("src")).toBe(
+      "/Tabverse/join/__tabverse_proxy/http/intranet.local/assets/app.png",
+    );
+    expect(doc.querySelector("#cross")?.getAttribute("href")).toBe(
+      "/Tabverse/join/__tabverse_proxy/https/cdn.example/site.css",
+    );
+    expect(doc.querySelector("#fragment")?.getAttribute("href")).toBe("#part");
+    expect(doc.querySelector("#data")?.getAttribute("src")).toBe(
+      "data:image/gif;base64,AA==",
+    );
+    expect(doc.querySelectorAll("base")).toHaveLength(1);
+  });
+
   it("mirrored: an HTML answer renders in a sandboxed srcdoc frame, its base aimed at the proxy endpoint", async () => {
     mount(
       createElement(BrowserPane, {

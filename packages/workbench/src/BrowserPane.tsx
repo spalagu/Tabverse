@@ -37,19 +37,53 @@ function documentBase(url: string): string {
  * endpoint the pane's whole mirror is addressed by — with a synthetic
  * head for documents that ship without one.
  */
-function mirroredDocument(
+const URL_ATTRIBUTES = [
+  "a[href]",
+  "area[href]",
+  "audio[src]",
+  "embed[src]",
+  "form[action]",
+  "iframe[src]",
+  "img[src]",
+  "input[src]",
+  "link[href]",
+  "object[data]",
+  "script[src]",
+  "source[src]",
+  "track[src]",
+  "video[poster]",
+  "video[src]",
+] as const;
+
+const attributeOf = (selector: string): string =>
+  selector.slice(selector.indexOf("[") + 1, -1);
+
+export function mirroredDocument(
   html: string,
   url: string,
   resolveProxyUrl: (target: string) => string,
 ): string {
-  const tag = `<base href="${resolveProxyUrl(documentBase(url))}">`;
-  if (/<head[^>]*>/i.test(html)) {
-    return html.replace(/<head([^>]*)>/i, `<head$1>${tag}`);
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  for (const selector of URL_ATTRIBUTES) {
+    const attribute = attributeOf(selector);
+    for (const element of doc.querySelectorAll<HTMLElement>(selector)) {
+      const value = element.getAttribute(attribute);
+      if (value === null || value.trim() === "" || value.startsWith("#")) continue;
+      try {
+        const target = new URL(value, url);
+        if (target.protocol === "http:" || target.protocol === "https:") {
+          element.setAttribute(attribute, resolveProxyUrl(target.href));
+        }
+      } catch {
+        // Leave malformed and non-URL attribute values to the browser.
+      }
+    }
   }
-  if (/<html[^>]*>/i.test(html)) {
-    return html.replace(/<html([^>]*)>/i, `<html$1><head>${tag}</head>`);
-  }
-  return `<html><head>${tag}</head><body>${html}</body></html>`;
+  for (const oldBase of doc.querySelectorAll("base")) oldBase.remove();
+  const base = doc.createElement("base");
+  base.href = resolveProxyUrl(documentBase(url));
+  doc.head.prepend(base);
+  return `<!doctype html>${doc.documentElement.outerHTML}`;
 }
 
 export function BrowserPane({

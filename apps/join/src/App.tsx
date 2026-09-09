@@ -186,6 +186,11 @@ function JoinApp() {
     [inst]
   );
 
+  const resolveProxyUrl = useCallback(
+    (target: string) => proxyUrlFor(target, import.meta.env.BASE_URL),
+    [],
+  );
+
   const appSinks = useMemo<AppFrameSinks>(() => mirrorSinks(), []);
 
   const appChannel = useMemo(
@@ -238,7 +243,7 @@ function JoinApp() {
   }, [activeMirrorTab, filesOpenPath]);
 
   useEffect(() => {
-    if (!connected || !("serviceWorker" in navigator)) return;
+    if (!("serviceWorker" in navigator)) return;
     const onMessage = (event: MessageEvent) => {
       const d = event.data as { type?: string; url?: string };
       const url = d?.url;
@@ -264,7 +269,7 @@ function JoinApp() {
     };
     navigator.serviceWorker.addEventListener("message", onMessage);
     return () => navigator.serviceWorker.removeEventListener("message", onMessage);
-  }, [connected, proxy]);
+  }, [proxy]);
 
   useEffect(() => {
     if (!connected) return;
@@ -744,7 +749,7 @@ function JoinApp() {
     settings: { rpc: appChannel.rpc, readOnly },
     browser: {
       fetchViaHost,
-      resolveProxyUrl: proxyUrlFor,
+      resolveProxyUrl,
     },
   };
 

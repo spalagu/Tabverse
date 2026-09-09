@@ -42,7 +42,7 @@ sw.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
   const url = new URL(request.url);
   if (url.origin !== sw.location.origin) return;
-  if (url.pathname.startsWith("/__tabverse_proxy/")) {
+  if (url.pathname.includes("/__tabverse_proxy/")) {
     event.respondWith(proxyViaPage(request));
     return;
   }

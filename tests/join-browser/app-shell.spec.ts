@@ -30,6 +30,21 @@ async function replayActions(page: Page) {
   });
 }
 
+test("the Pages Service Worker controls the scoped Host-network URL", async ({ page }) => {
+  await openReplay(page);
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+
+  const result = await page.evaluate(async () => {
+    const response = await fetch(
+      "/Tabverse/join/__tabverse_proxy/http/intranet.local/probe",
+    );
+    return { status: response.status, body: await response.text() };
+  });
+  expect(result.status).toBe(502);
+  expect(result.body).toContain("session is not connected");
+});
+
 test("renders the same replayed app shell across desktop and mobile widths", async ({ page }, testInfo) => {
   await openReplay(page);
   await expect(page.locator("#term")).toBeVisible();

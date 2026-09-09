@@ -169,6 +169,19 @@ describe("the endpoint path", () => {
     expect(() => proxyUrlFor("ftp://files/")).toThrow("http requests only");
   });
 
+  it("keeps a Pages proxy URL inside the Service Worker scope", () => {
+    const proxyUrl = proxyUrlFor(
+      "http://intranet.example/dir/page?q=1",
+      "/Tabverse/join/",
+    );
+    expect(proxyUrl).toBe(
+      "/Tabverse/join/__tabverse_proxy/http/intranet.example/dir/page?q=1",
+    );
+    expect(
+      targetFromProxyUrl(new URL(proxyUrl, "https://spalagu.github.io")),
+    ).toBe("http://intranet.example/dir/page?q=1");
+  });
+
   it("reads a target back out of a proxy path, and nothing out of other paths", () => {
     const read = (path: string) =>
       targetFromProxyUrl(new URL(path, "https://join.example/page"));

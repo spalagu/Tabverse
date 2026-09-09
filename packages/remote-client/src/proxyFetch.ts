@@ -12,6 +12,7 @@
  * — which a query-parameter form cannot do.
  */
 export const PROXY_PATH_PREFIX = "/__tabverse_proxy/";
+const PROXY_PATH_SEGMENT = "__tabverse_proxy/";
 
 /**
  * The endpoint path standing for one host-side URL, origin-relative so
@@ -29,13 +30,14 @@ export const PROXY_PATH_PREFIX = "/__tabverse_proxy/";
  * scheme (cross-origin, unproxied). A query-parameter form could not
  * even do the directory-relative case.
  */
-export function proxyUrlFor(target: string): string {
+export function proxyUrlFor(target: string, basePath = "/"): string {
   const u = new URL(target);
   const scheme = u.protocol.slice(0, -1);
   if (scheme !== "http" && scheme !== "https") {
     throw new Error(`the proxy carries http requests only, not ${u.protocol}`);
   }
-  return `${PROXY_PATH_PREFIX}${scheme}/${u.host}${u.pathname}${u.search}`;
+  const scopedBase = `/${basePath.replace(/^\/+|\/+$/g, "")}`.replace(/^\/$/, "");
+  return `${scopedBase}/${PROXY_PATH_SEGMENT}${scheme}/${u.host}${u.pathname}${u.search}`;
 }
 /**
  * The host-side URL a request to this path is aimed at, or null when the
@@ -45,8 +47,10 @@ export function proxyUrlFor(target: string): string {
  * same function reads back what proxyUrlFor wrote, from any origin.
  */
 export function targetFromProxyUrl(url: URL): string | null {
-  if (!url.pathname.startsWith(PROXY_PATH_PREFIX)) return null;
-  const rest = url.pathname.slice(PROXY_PATH_PREFIX.length);
+  const marker = `/${PROXY_PATH_SEGMENT}`;
+  const markerAt = url.pathname.indexOf(marker);
+  if (markerAt < 0) return null;
+  const rest = url.pathname.slice(markerAt + marker.length);
   const slash = rest.indexOf("/");
   if (slash <= 0) return null;
   const scheme = rest.slice(0, slash);
