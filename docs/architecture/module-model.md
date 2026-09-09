@@ -41,6 +41,8 @@ crates/tabverse-*            可复用 Rust Core
 
 `src-tauri/src/credential_commands.rs` 持有本机用户确认、密码导入导出和整机迁移 IPC。凭据存储与加密属于 credential adapter 和 `app.db` vault；迁移包格式与备份恢复语义属于 `migrate` 模块，组合根不得直接处理明文凭据。
 
+`src-tauri/src/appearance_commands.rs` 持有窗口全屏、macOS traffic lights、主题背景、主题偏好和 webview 日志 IPC。平台调用只存在于带 target 条件的适配器分支，主题偏好仍写入 `app.db` scope。
+
 ## 非目标
 
 - 外部插件安装、更新、签名和包管理。

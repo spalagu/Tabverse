@@ -151,6 +151,9 @@ if (/\b(?:async\s+)?fn\s+agent_(?:start|prompt|cancel|answer|close|detach|login_
 if (/\b(?:async\s+)?fn\s+(?:pw_|migrate_)(?:authorize_[a-z0-9_]+|reveal|forget_all|export|import|import_check|import_apply)\s*\(/.test(tauriComposition)) {
   violations.push("src-tauri/src/lib.rs defines a credential or migration command; move it to credential_commands.rs");
 }
+if (/\b(?:async\s+)?fn\s+(?:traffic_light_reapply|toggle_simple_fullscreen|set_theme|theme_pref_(?:save|load)|js_log)\s*\(/.test(tauriComposition)) {
+  violations.push("src-tauri/src/lib.rs defines an appearance command; move it to appearance_commands.rs");
+}
 
 if (violations.length > 0) {
   console.error("V3 architecture boundary check failed:");

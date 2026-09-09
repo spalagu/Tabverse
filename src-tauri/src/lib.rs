@@ -4,6 +4,7 @@ mod agent_commands;
 mod agent_http;
 mod agent_login;
 mod agent_supervisor;
+mod appearance_commands;
 mod basic_auth;
 #[cfg(target_os = "windows")]
 mod basic_auth_win;
@@ -107,72 +108,6 @@ fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
-#[cfg(target_os = "macos")]
-fn reapply_traffic_light_position(window: Window, x: f64, y: f64) {
-    let for_main = window.clone();
-    let _ = window.run_on_main_thread(move || unsafe {
-        use objc2::msg_send;
-        use objc2::runtime::AnyObject;
-        use objc2_foundation::NSRect;
-
-        let Ok(window_ptr) = for_main.ns_window() else {
-            return;
-        };
-        let ns_window = window_ptr as *mut AnyObject;
-        let close: *mut AnyObject = msg_send![&*ns_window, standardWindowButton: 0isize];
-        let miniaturize: *mut AnyObject = msg_send![&*ns_window, standardWindowButton: 1isize];
-        let zoom: *mut AnyObject = msg_send![&*ns_window, standardWindowButton: 2isize];
-        if close.is_null() || miniaturize.is_null() || zoom.is_null() {
-            eprintln!("[window] traffic lights unavailable for delayed reapply");
-            return;
-        }
-
-        let close_superview: *mut AnyObject = msg_send![&*close, superview];
-        let title_bar_container: *mut AnyObject = msg_send![&*close_superview, superview];
-        let close_rect: NSRect = msg_send![&*close, frame];
-        let mut title_bar_rect: NSRect = msg_send![&*title_bar_container, frame];
-        title_bar_rect.size.height = close_rect.size.height + y;
-        let window_rect: NSRect = msg_send![&*ns_window, frame];
-        title_bar_rect.origin.y = window_rect.size.height - title_bar_rect.size.height;
-        let _: () = msg_send![&*title_bar_container, setFrame: title_bar_rect];
-
-        let miniaturize_rect: NSRect = msg_send![&*miniaturize, frame];
-        let space_between = miniaturize_rect.origin.x - close_rect.origin.x;
-        for (index, button) in [close, miniaturize, zoom].into_iter().enumerate() {
-            let mut rect: NSRect = msg_send![&*button, frame];
-            rect.origin.x = x + index as f64 * space_between;
-            let _: () = msg_send![&*button, setFrameOrigin: rect.origin];
-        }
-    });
-}
-
-#[tauri::command]
-fn traffic_light_reapply(window: Window) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    reapply_traffic_light_position(window, TRAFFIC_LIGHT_X, TRAFFIC_LIGHT_Y);
-    #[cfg(not(target_os = "macos"))]
-    let _ = window;
-    Ok(())
-}
-
-#[tauri::command]
-fn toggle_simple_fullscreen(window: Window) -> Result<(), String> {
-    let fullscreen = window.is_fullscreen().map_err(|e| e.to_string())?;
-    if fullscreen {
-        // `set_simple_fullscreen(false)` is the normal exit path. The fallback
-        // also lets the command recover if the user entered native fullscreen
-        // through the system green button before using the app menu.
-        window
-            .set_simple_fullscreen(false)
-            .or_else(|_| window.set_fullscreen(false))
-            .map_err(|e| e.to_string())
-    } else {
-        window
-            .set_simple_fullscreen(true)
-            .map_err(|e| e.to_string())
-    }
-}
-
 struct AppState {
     helper: terminal_helper::TerminalHelper,
     hub: Arc<RemoteHub>,
@@ -194,105 +129,6 @@ struct AppState {
     /// `app_share_start`. The source's glue seams (snapshot from the
     /// webview, clipboard, proxy) are wired there, once.
     app_source: Arc<app_share::AppShareSource>,
-}
-
-const THEME_SCOPE: &str = "theme";
-
-/// The saved theme preference. Anything unreadable — no file, bad JSON, an
-/// unknown value — is "system": a first launch and a corrupt file both get
-/// the follow-the-OS default rather than an error.
-fn theme_preference(app: &AppHandle) -> String {
-    let fallback = || "system".to_string();
-    let Ok(store) = app_state_store(app) else {
-        return fallback();
-    };
-    let Ok(Some(json)) = store.load_scope(THEME_SCOPE) else {
-        return fallback();
-    };
-    theme_preference_json(&json)
-}
-
-fn theme_preference_json(json: &str) -> String {
-    let fallback = || "system".to_string();
-    serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|v| {
-            v.get("preference")
-                .and_then(|p| p.as_str())
-                .map(String::from)
-        })
-        .filter(|p| is_theme_preference(p))
-        .unwrap_or_else(fallback)
-}
-
-/// The disk half of [`theme_preference`], split on the state directory so a
-/// test can drive it against a sandbox dir without an [`AppHandle`].
-#[cfg(test)]
-fn theme_preference_in(dir: &std::path::Path) -> String {
-    let fallback = || "system".to_string();
-    let Ok(Some(json)) = tabverse_fs::state::load(dir, THEME_SCOPE) else {
-        return fallback();
-    };
-    theme_preference_json(&json)
-}
-
-fn is_theme_preference(p: &str) -> bool {
-    config::ThemePref::from_token(p).is_some()
-}
-
-/// Paint the window backdrop: the one funnel to
-/// ui_plane::set_window_backdrop, so the color can only come from the
-/// generated table (theme token tests pin the call shape).
-#[cfg(target_os = "macos")]
-fn apply_backdrop(window: &tauri::Window, backdrop: &theme_gen::Backdrop) -> Result<(), String> {
-    ui_plane::set_window_backdrop(window, backdrop.r, backdrop.g, backdrop.b)
-}
-
-#[tauri::command]
-fn set_theme(window: tauri::Window, theme: String) -> Result<(), String> {
-    let Some(entry) = theme_gen::theme(&theme) else {
-        return Err(format!("unknown theme {theme:?}"));
-    };
-    #[cfg(target_os = "macos")]
-    {
-        apply_backdrop(&window, &entry.backdrop)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        // No backdrop channel on this platform yet; the CSS side of the
-        // switch still applies, so the command succeeds as a no-op.
-        let _ = (window, entry);
-        Ok(())
-    }
-}
-
-// Theme preference is also an app.db scope; the synchronous startup reader
-// and asynchronous settings writer share one source of truth.
-#[tauri::command]
-async fn theme_pref_save(app: AppHandle, pref: String) -> Result<(), String> {
-    if !is_theme_preference(&pref) {
-        return Err(format!("unknown theme preference {pref:?}"));
-    }
-    let json = serde_json::json!({ "preference": pref }).to_string();
-    tauri::async_runtime::spawn_blocking(move || {
-        app_state_store(&app)?
-            .save_scope(THEME_SCOPE, &json)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn theme_pref_load(app: AppHandle) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || Ok(theme_preference(&app)))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-fn js_log(level: String, msg: String) {
-    eprintln!("[webview:{level}] {msg}");
 }
 
 /// Where a child webview goes, in *device* pixels.
@@ -2841,7 +2677,7 @@ pub fn run() {
         .on_menu_event(|app, event| {
             if event.id().as_ref() == "toggle-fullscreen" {
                 if let Some(window) = app.get_window("main") {
-                    if let Err(e) = toggle_simple_fullscreen(window) {
+                    if let Err(e) = appearance_commands::toggle_simple_fullscreen(window) {
                         eprintln!("[window] simple fullscreen failed: {e}");
                     }
                 }
@@ -2870,7 +2706,11 @@ pub fn run() {
                 let window = _window.clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    reapply_traffic_light_position(window, TRAFFIC_LIGHT_X, TRAFFIC_LIGHT_Y);
+                    appearance_commands::reapply_traffic_light_position(
+                        window,
+                        TRAFFIC_LIGHT_X,
+                        TRAFFIC_LIGHT_Y,
+                    );
                 });
             }
         })
@@ -2926,7 +2766,7 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 let traffic_light_position = main_cfg.traffic_light_position.clone();
                 let mut wb = tauri::WebviewWindowBuilder::from_config(app.handle(), &main_cfg)?;
-                let pref = theme_preference(app.handle());
+                let pref = appearance_commands::theme_preference(app.handle());
                 if theme_gen::theme(&pref).is_some() {
                     wb = wb.initialization_script(format!(
                         "window.__TABVERSE_BOOT_THEME__ = \"{pref}\";"
@@ -2954,7 +2794,11 @@ pub fn run() {
                     let delayed_window = window.clone();
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                        reapply_traffic_light_position(delayed_window, position.x, position.y);
+                        appearance_commands::reapply_traffic_light_position(
+                            delayed_window,
+                            position.x,
+                            position.y,
+                        );
                     });
                 }
             }
@@ -2970,7 +2814,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 if let Some(window) = app.get_window("main") {
-                    let pref = theme_preference(app.handle());
+                    let pref = appearance_commands::theme_preference(app.handle());
                     let backdrop = match theme_gen::theme(&pref) {
                         Some(t) => &t.backdrop,
                         None => theme_gen::backdrop(
@@ -2980,7 +2824,7 @@ pub fn run() {
                                 .unwrap_or(true),
                         ),
                     };
-                    if let Err(e) = apply_backdrop(&window, backdrop) {
+                    if let Err(e) = appearance_commands::apply_backdrop(&window, backdrop) {
                         eprintln!("[ui-plane] window backdrop: {e}");
                     }
                     if let Some(wv) = window.get_webview("main") {
@@ -3016,8 +2860,8 @@ pub fn run() {
             app_health,
             page_coverable,
             notify,
-            js_log,
-            traffic_light_reapply,
+            appearance_commands::js_log,
+            appearance_commands::traffic_light_reapply,
             share_commands::share_start,
             share_commands::app_share_start,
             share_commands::app_share_stop,
@@ -3062,9 +2906,9 @@ pub fn run() {
             state_commands::state_load,
             state_commands::state_delete,
             state_commands::state_list,
-            set_theme,
-            theme_pref_save,
-            theme_pref_load,
+            appearance_commands::set_theme,
+            appearance_commands::theme_pref_save,
+            appearance_commands::theme_pref_load,
             browser_create,
             browser_find,
             browser_clear_find,
@@ -3521,7 +3365,7 @@ mod injected_script_derives_its_keys {
 
 #[cfg(test)]
 mod theme_gen_drift {
-    use super::{is_theme_preference, theme_gen};
+    use super::{appearance_commands::is_theme_preference, theme_gen};
 
     // The path build.rs reads, resolved from this source file instead of
     // OUT_DIR, so the test cannot accidentally bless the generated copy.
@@ -3645,7 +3489,7 @@ mod theme_gen_drift {
 
 #[cfg(test)]
 mod theme_preference_read {
-    use super::theme_preference_in;
+    use super::appearance_commands::theme_preference_in;
     use std::path::PathBuf;
 
     // Same sandbox convention as tabverse-fs's own state tests: a pid-tagged
