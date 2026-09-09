@@ -125,6 +125,8 @@ export interface ConfigSnapshot {
   warnings: ConfigWarning[];
   /** The files that contributed, in reading order. Empty = no file exists. */
   sources: string[];
+  /** A declarative config error; app.db settings are still returned. */
+  error?: string | null;
 }
 
 /**

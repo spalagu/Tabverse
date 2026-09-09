@@ -39,10 +39,9 @@ sw.addEventListener("activate", (event) => {
 
 sw.addEventListener("fetch", (event) => {
   const request = event.request;
-  if (request.method !== "GET") return;
   const url = new URL(request.url);
   if (url.origin !== sw.location.origin) return;
-  if (url.pathname.startsWith("/__tabverse_proxy/")) {
+  if (url.pathname.includes("/__tabverse_proxy/")) {
     event.respondWith(proxyViaPage(request));
     return;
   }
@@ -72,27 +71,98 @@ async function proxyViaPage(request: Request): Promise<Response> {
   }
   return new Promise<Response>((resolve) => {
     const channel = new MessageChannel();
-    const timer = setTimeout(
-      () => resolve(new Response("proxy timeout", { status: 504 })),
-      30_000,
-    );
-    channel.port1.onmessage = (e: MessageEvent) => {
+    let settled = false;
+    let body: ReadableStreamDefaultController<Uint8Array> | null = null;
+    let timer = 0;
+    const close = () => {
       clearTimeout(timer);
-      const d = e.data as { status: number; contentType: string; bodyB64: string };
-      const bytes =
-        d.bodyB64.length > 0
-          ? Uint8Array.from(atob(d.bodyB64), (c) => c.charCodeAt(0))
-          : undefined;
-      resolve(
-        new Response(bytes, {
-          status: d.status,
-          headers: d.contentType ? { "content-type": d.contentType } : {},
-        }),
-      );
+      channel.port1.close();
     };
-    page.postMessage({ type: "tabverse-proxy-fetch", url: request.url }, [
-      channel.port2,
-    ]);
+    const timeout = () => {
+      if (settled) {
+        body?.error(new Error("proxy timeout"));
+      } else {
+        settled = true;
+        resolve(new Response("proxy timeout", { status: 504 }));
+      }
+      channel.port1.postMessage({ type: "cancel" });
+      close();
+    };
+    const armTimeout = () => {
+      clearTimeout(timer);
+      timer = setTimeout(timeout, 30_000) as unknown as number;
+    };
+    armTimeout();
+    channel.port1.onmessage = (e: MessageEvent) => {
+      armTimeout();
+      const d = e.data as
+        | { type: "start"; status: number; statusText: string; headers: [string, string][] }
+        | { type: "chunk"; bytes: ArrayBuffer }
+        | { type: "end" }
+        | { type: "error"; message: string };
+      if (d.type === "start" && !settled) {
+        settled = true;
+        const headers = new Headers(d.headers);
+        // Mirrored pages deliberately have an opaque sandbox origin. Their
+        // scripts/fonts may consume only this virtual endpoint, so the
+        // endpoint must opt into reads from that isolated origin.
+        headers.set("access-control-allow-origin", "*");
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            body = controller;
+          },
+          cancel() {
+            channel.port1.postMessage({ type: "cancel" });
+            close();
+          },
+        });
+        resolve(new Response(stream, {
+          status: d.status,
+          statusText: d.statusText,
+          headers,
+        }));
+      } else if (d.type === "chunk" && body !== null) {
+        body.enqueue(new Uint8Array(d.bytes));
+      } else if (d.type === "end") {
+        body?.close();
+        close();
+      } else if (d.type === "error") {
+        if (settled) {
+          body?.error(new Error(d.message));
+        } else {
+          settled = true;
+          resolve(new Response(d.message, { status: 502 }));
+        }
+        close();
+      }
+    };
+    page.postMessage({
+      type: "tabverse-proxy-fetch",
+      url: request.url,
+      method: request.method,
+      headers: Array.from(request.headers.entries()),
+      hasBody: request.body !== null,
+    }, [channel.port2]);
+    if (request.body !== null) {
+      void (async () => {
+        try {
+          const reader = request.body!.getReader();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            armTimeout();
+            const bytes = value.slice().buffer as ArrayBuffer;
+            channel.port1.postMessage({ type: "request-chunk", bytes }, [bytes]);
+          }
+          channel.port1.postMessage({ type: "request-end" });
+        } catch (error) {
+          channel.port1.postMessage({
+            type: "request-error",
+            message: error instanceof Error ? error.message : "request body failed",
+          });
+        }
+      })();
+    }
   });
 }
 

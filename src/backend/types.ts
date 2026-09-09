@@ -26,6 +26,9 @@ export interface AgentHandle {
   cancel(): Promise<void>;
   /** Answer a pending approval. False means nothing was waiting on that call. */
   answer(callId: string, allow: boolean, reason?: string): Promise<boolean>;
+  /** Disconnect this GUI while leaving the Supervisor LiveProcess running. */
+  detach(): Promise<void>;
+  /** Terminate the LiveProcess because the logical tab was closed. */
   close(): Promise<void>;
   /** Subscribe to session events; returns an unsubscribe fn. Events produced
    * before the first subscriber are replayed on subscription. */

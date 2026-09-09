@@ -18,7 +18,9 @@ const h = vi.hoisted(() => {
   const calls: Array<{ fn: string; args: unknown[] }> = [];
   const httpStarts: Array<(value: unknown) => void> = [];
   const httpBodies: Uint8Array[][] = [];
-  return { termInstances, onDataHandlers, events, tickets, calls, httpStarts, httpBodies };
+  const fileStarts: Array<(value: unknown) => void> = [];
+  const fileBodies: Uint8Array[][] = [];
+  return { termInstances, onDataHandlers, events, tickets, calls, httpStarts, httpBodies, fileStarts, fileBodies };
 });
 
 vi.mock("@tabverse/runtime-remote/wasm-loader", () => ({
@@ -58,6 +60,17 @@ vi.mock("@tabverse/runtime-remote/wasm-loader", () => ({
             finishRequest: () => {},
             responseStart: () => start,
             readResponseChunk: async () => h.httpBodies[bodyIndex].shift() ?? new Uint8Array(),
+          };
+        },
+        openFileStream: async (contextId: string, path: string, offset: bigint, length?: bigint) => {
+          h.calls.push({ fn: "openFileStream", args: [contextId, path, offset, length] });
+          const bodyIndex = h.fileBodies.length;
+          h.fileBodies.push([]);
+          const start = new Promise((resolve) => h.fileStarts.push(resolve));
+          return {
+            cancel: () => h.calls.push({ fn: "cancelFileStream", args: [path] }),
+            responseStart: () => start,
+            readResponseChunk: async () => h.fileBodies[bodyIndex].shift() ?? new Uint8Array(),
           };
         },
       };
@@ -163,6 +176,8 @@ beforeEach(() => {
   h.calls.length = 0;
   h.httpStarts.length = 0;
   h.httpBodies.length = 0;
+  h.fileStarts.length = 0;
+  h.fileBodies.length = 0;
   location.hash = "#tabv-test-ticket";
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -550,6 +565,55 @@ describe("join page renderer dispatch", () => {
     expect(writeText).toHaveBeenCalledTimes(1);
   });
 
+  it("a fronting Files tab reads raw bytes on a cancellable file stream, not fs_read RPC", async () => {
+    const send = await mountAppShare(false);
+    await send({
+      type: "appSnapshot",
+      state: {
+        ...APP_SNAPSHOT,
+        tabs: [
+          ...APP_SNAPSHOT.tabs,
+          { id: "f1", type: "files", title: "notes.txt", cwd: "/work" },
+        ],
+        activeTabId: "f1",
+        filesOpenPath: { f1: "/work/notes.txt" },
+        filesOpenDir: { f1: "/work" },
+      },
+    });
+    await flush();
+    expect(sent("openFileStream")).toEqual([
+      { fn: "openFileStream", args: ["f1", "/work/notes.txt", 0n, 4n * 1024n * 1024n] },
+    ]);
+    expect(
+      sent("sendRpc").some((call) => call.args[1] === "fs_read"),
+    ).toBe(false);
+
+    const body = new TextEncoder().encode("read from Host bytes");
+    h.fileBodies[0].push(body);
+    h.fileStarts[0]({
+      type: "file",
+      head: {
+        path: "/work/notes.txt",
+        name: "notes.txt",
+        mime: "text/plain",
+        total: BigInt(body.byteLength),
+        offset: 0n,
+        length: BigInt(body.byteLength),
+      },
+    });
+    await flush();
+    expect(host.querySelector<HTMLTextAreaElement>(".files-pane-text")?.value)
+      .toBe("read from Host bytes");
+
+    await send({ type: "actionApplied", name: "activateTab", args: "t1" });
+    await send({ type: "actionApplied", name: "activateTab", args: "f1" });
+    await flush();
+    expect(sent("openFileStream")).toHaveLength(2);
+    await send({ type: "actionApplied", name: "activateTab", args: "t1" });
+    await flush();
+    expect(sent("cancelFileStream").at(-1)?.args).toEqual(["/work/notes.txt"]);
+  });
+
   it("a fronting browser tab mounts the proxied pane over an independent HTTP stream", async () => {
     const send = await mountAppShare(false);
     // The host fronts a browser row carrying its address.
@@ -583,7 +647,7 @@ describe("join page renderer dispatch", () => {
     expect(frame).not.toBeNull();
     expect(frame!.getAttribute("srcdoc")).toContain("<h1>Intranet wiki</h1>");
     expect(frame!.getAttribute("srcdoc")).toContain(
-      '<base href="/__tabverse_proxy/http/intranet.local/wiki/">'
+      '<base href="/__tabverse_proxy/b1/http/intranet.local/wiki/">'
     );
     expect(host.querySelector(".app-share-content")).toBeNull();
 

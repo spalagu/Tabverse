@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { STR } from "./strings";
+import { rewriteRemoteHtml, type ProxyUrlResolver } from "./remoteBrowserDocument";
+
+export { rewriteRemoteHtml as mirroredDocument } from "./remoteBrowserDocument";
 
 /** The pane's one route to the host's network — App hands it the proxy
  * client's requestViaProxy. */
@@ -23,45 +26,22 @@ function refusalOf(res: Response): string {
   return STR.remote.web.browserPane.unmirroredType;
 }
 
-/** The URL a document's relative subresources resolve against: its own
- * directory, query dropped — the standard base of an HTML page. */
-function documentBase(url: string): string {
-  const u = new URL(url);
-  const dir = u.pathname.slice(0, u.pathname.lastIndexOf("/") + 1);
-  return `${u.protocol}//${u.host}${dir}`;
-}
-
-/**
- * The document as the pane renders it: our <base> first in <head> —
- * document order decides which base wins, and ours names the proxy
- * endpoint the pane's whole mirror is addressed by — with a synthetic
- * head for documents that ship without one.
- */
-function mirroredDocument(
-  html: string,
-  url: string,
-  resolveProxyUrl: (target: string) => string,
-): string {
-  const tag = `<base href="${resolveProxyUrl(documentBase(url))}">`;
-  if (/<head[^>]*>/i.test(html)) {
-    return html.replace(/<head([^>]*)>/i, `<head$1>${tag}`);
-  }
-  if (/<html[^>]*>/i.test(html)) {
-    return html.replace(/<html([^>]*)>/i, `<html$1><head>${tag}</head>`);
-  }
-  return `<html><head>${tag}</head><body>${html}</body></html>`;
-}
-
 export function BrowserPane({
   url,
+  contextId,
   fetchViaHost,
   resolveProxyUrl = directUrl,
+  networkProxyRoot,
 }: {
   /** The host browser tab's address. */
   url: string;
+  /** Stable routing key for this remote Browser tab; never an authority. */
+  contextId?: string;
   fetchViaHost: HostFetch;
   /** Maps a host URL to the runtime's same-origin proxy endpoint. */
-  resolveProxyUrl?: (target: string) => string;
+  resolveProxyUrl?: ProxyUrlResolver;
+  /** Absolute same-origin root reserved for Host-network requests. */
+  networkProxyRoot?: string;
 }) {
   const [state, setState] = useState<PaneState>({ kind: "loading" });
 
@@ -86,7 +66,13 @@ export function BrowserPane({
         if (res.ok && html) {
           setState({
             kind: "mirrored",
-            doc: mirroredDocument(body, res.url || url, resolveProxyUrl),
+            doc: rewriteRemoteHtml(
+              body,
+              res.url || url,
+              resolveProxyUrl,
+              contextId,
+              networkProxyRoot,
+            ),
           });
         } else {
           setState({ kind: "unmirrored", line: refusalOf(res), detail: null });
@@ -106,7 +92,7 @@ export function BrowserPane({
       alive = false;
       abort.abort();
     };
-  }, [url, fetchViaHost, resolveProxyUrl]);
+  }, [url, contextId, fetchViaHost, resolveProxyUrl, networkProxyRoot]);
 
   if (state.kind === "loading") {
     return (
@@ -138,14 +124,13 @@ export function BrowserPane({
   }
   return (
     <div className="browser-pane browser-pane-mirrored">
-      {/* allow-same-origin, no allow-scripts: the document's relative
-          URLs load against this origin (no CORS wall on top of the
-          endpoint 404s), while nothing it carries can execute — the
-          sandbox omits script permission entirely. */}
+      {/* Scripts run in an opaque sandbox origin. The injected CSP and
+          bootstrap restrict their network access to this tab's Host proxy;
+          no same-origin grant exposes the Join application or ticket. */}
       <iframe
         className="browser-pane-frame"
         title={STR.remote.web.browserPane.frameTitle({ url })}
-        sandbox="allow-same-origin"
+        sandbox={networkProxyRoot === undefined ? "allow-forms" : "allow-forms allow-scripts"}
         srcDoc={state.doc}
       />
       <span className="browser-pane-chip">

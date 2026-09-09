@@ -3345,7 +3345,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         // preference would sit in the store while the screen kept the
         // colour the cold-start snapshot resolved to.
         ...themeFanOut(slice.themePreference, s.systemDark),
-        configError: null,
+        configError: snap.error ?? null,
         configWarnings: snap.warnings,
         configWarningsDismissed: false,
         // A load re-reads the whole file, so the store and the file agree

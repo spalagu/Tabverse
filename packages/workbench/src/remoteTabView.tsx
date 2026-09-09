@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { HostRpc } from "./hostRpc";
 import { BrowserPane, type HostFetch } from "./BrowserPane";
-import { FilesPane } from "./FilesPane";
+import { FilesPane, type RemoteFileReader } from "./FilesPane";
 import { SettingsPane } from "./SettingsPane";
 import {
   RemoteAgentPane,
@@ -32,6 +32,7 @@ export interface RemoteWorkbenchTabViewContext {
     readonly dir: string | null;
     readonly rpc: HostRpc;
     readonly readOnly: boolean;
+    readonly readFile?: RemoteFileReader;
   };
   readonly settings: {
     readonly rpc: HostRpc;
@@ -39,7 +40,8 @@ export interface RemoteWorkbenchTabViewContext {
   };
   readonly browser: {
     readonly fetchViaHost: HostFetch;
-    readonly resolveProxyUrl: (target: string) => string;
+    readonly resolveProxyUrl: (target: string, contextId?: string) => string;
+    readonly networkProxyRoot: string;
   };
 }
 
@@ -57,8 +59,10 @@ const REMOTE_TAB_RENDERERS = defineTabViewRenderers<
     tab.url ? (
       <BrowserPane
         url={tab.url}
+        contextId={tab.id}
         fetchViaHost={context.browser.fetchViaHost}
         resolveProxyUrl={context.browser.resolveProxyUrl}
+        networkProxyRoot={context.browser.networkProxyRoot}
       />
     ) : (
       unavailable(STR.remote.web.appShareLive)

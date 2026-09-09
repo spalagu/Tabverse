@@ -1,27 +1,28 @@
-//! Blocking loopback transport for the resident terminal helper.
+//! Blocking local IPC transport for the terminal Runtime Host.
 //!
-//! Authentication, not an OS-specific pathname, is the trust boundary. The
-//! listener binds only 127.0.0.1 and uses the same framed stream on Unix and
-//! Windows, so both platforms exercise one black-box transport contract.
+//! `interprocess` maps this byte stream to Unix Domain Sockets and Windows
+//! Named Pipes. Authentication remains mandatory in addition to OS-local IPC.
 
 use std::{
     collections::VecDeque,
     io::{self, Read, Write},
-    net::{SocketAddr, TcpStream},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use interprocess::local_socket::{prelude::*, ConnectOptions, GenericNamespaced};
+use interprocess::{ConnectWaitMode, TryClone};
+
 use crate::protocol::{AuthToken, Decoder, Frame, Kind, ProtocolError, ServerHandshake, SessionId};
 
 pub struct FramedStream {
-    stream: TcpStream,
+    stream: LocalSocketStream,
     decoder: Decoder,
     pending: VecDeque<Frame>,
 }
 
 impl FramedStream {
-    pub fn new(stream: TcpStream) -> Self {
+    pub fn new(stream: LocalSocketStream) -> Self {
         Self {
             stream,
             decoder: Decoder::new(),
@@ -29,14 +30,17 @@ impl FramedStream {
         }
     }
 
-    pub fn connect(endpoint: SocketAddr, timeout: Duration) -> io::Result<Self> {
-        let stream = TcpStream::connect_timeout(&endpoint, timeout)?;
-        stream.set_nodelay(true)?;
+    pub fn connect(endpoint: &str, timeout: Duration) -> io::Result<Self> {
+        let name = endpoint.to_ns_name::<GenericNamespaced>()?;
+        let stream = ConnectOptions::new()
+            .name(name)
+            .wait_mode(ConnectWaitMode::Timeout(timeout))
+            .connect_sync()?;
         Ok(Self::new(stream))
     }
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.stream.set_read_timeout(timeout)
+        self.stream.set_recv_timeout(timeout)
     }
 
     pub fn authenticate_client(
@@ -120,20 +124,23 @@ impl FramedStream {
         }
     }
 
-    pub fn into_inner(self) -> TcpStream {
+    pub fn into_inner(self) -> LocalSocketStream {
         self.stream
     }
 }
 
 #[derive(Clone)]
 pub struct FrameSender {
-    stream: Arc<Mutex<TcpStream>>,
+    stream: Arc<Mutex<LocalSocketStream>>,
 }
 
 impl FrameSender {
     pub fn shutdown(&self) {
         if let Ok(stream) = self.stream.lock() {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+            // Local sockets have no portable shutdown(2). The reader uses a
+            // short receive timeout; nonblocking mode wakes it promptly and
+            // the shared alive flag ends its loop.
+            let _ = stream.set_nonblocking(true);
         }
     }
 
@@ -183,15 +190,15 @@ impl From<ProtocolError> for TransportError {
 mod tests {
     use super::*;
     use crate::protocol::{Kind, SessionId};
-    use std::net::TcpListener;
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions};
 
     #[test]
-    fn framed_stream_crosses_a_real_loopback_socket_in_both_directions() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = listener.local_addr().unwrap();
+    fn framed_stream_crosses_a_real_local_socket_in_both_directions() {
+        let endpoint = format!("tabverse-transport-test-{}", uuid::Uuid::new_v4());
+        let name = endpoint.as_str().to_ns_name::<GenericNamespaced>().unwrap();
+        let listener = ListenerOptions::new().name(name).create_sync().unwrap();
         let server = std::thread::spawn(move || {
-            let (stream, peer) = listener.accept().unwrap();
-            assert!(peer.ip().is_loopback());
+            let stream = listener.accept().unwrap();
             let mut framed = FramedStream::new(stream);
             let input = framed.recv().unwrap();
             assert_eq!(input.kind, Kind::Input);
@@ -206,7 +213,7 @@ mod tests {
                 .unwrap();
         });
 
-        let mut client = FramedStream::connect(endpoint, Duration::from_secs(2)).unwrap();
+        let mut client = FramedStream::connect(&endpoint, Duration::from_secs(2)).unwrap();
         let session = SessionId([9; 16]);
         client
             .send(&Frame::new(Kind::Input, session, 4, vec![0, 0xff, b'\n']))

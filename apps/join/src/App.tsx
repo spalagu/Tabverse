@@ -21,6 +21,8 @@ import {
 } from "@tabverse/workbench/strings/errors";
 import { STR, plural } from "@tabverse/workbench/strings";
 import type { TermSink } from "@tabverse/workbench/terminal/viewer";
+import type { ReadMeta, RemoteFileReader } from "@tabverse/workbench/files-pane";
+import { transformRemoteResponse } from "@tabverse/workbench/remote-browser-document";
 import { Toolbar } from "./Toolbar";
 import { TOOLBAR_BYTES, applyStickyCtrl, type ToolbarKey } from "./toolbarKeys";
 import { ticketFromHash } from "./ticket";
@@ -59,10 +61,12 @@ import {
 import {
   createProxyClient,
   installProxyFetchPatch,
+  proxyPathRoot,
   proxyUrlFor,
-  targetFromProxyUrl,
+  proxyRouteFromUrl,
   type ProxyClient,
 } from "@tabverse/remote-client/proxy-fetch";
+import { relayProxyResponse } from "./proxyStreamBridge";
 
 /** The wasm client has no dial timeout of its own (the desktop library uses
  * 20s); race the join against this so a dead relay counts as an unexpected
@@ -185,6 +189,16 @@ function JoinApp() {
     [inst]
   );
 
+  const resolveProxyUrl = useCallback(
+    (target: string, contextId?: string) =>
+      proxyUrlFor(target, import.meta.env.BASE_URL, contextId),
+    [],
+  );
+  const networkProxyRoot = useMemo(
+    () => new URL(proxyPathRoot(import.meta.env.BASE_URL), location.href).href,
+    [],
+  );
+
   const appSinks = useMemo<AppFrameSinks>(() => mirrorSinks(), []);
 
   const appChannel = useMemo(
@@ -200,6 +214,62 @@ function JoinApp() {
     (url: string, init?: RequestInit) => proxy.requestViaProxy(url, init),
     [proxy]
   );
+
+  const readFileViaHost = useCallback<RemoteFileReader>(async (path, signal) => {
+    const session = inst.session;
+    if (session === null) throw new Error("the session is not connected");
+    const contextId = useRemoteMirrorStore.getState().activeTabId ?? "remote-files";
+    const previewLimit = 4n * 1024n * 1024n;
+    const stream = await session.openFileStream(contextId, path, 0n, previewLimit);
+    const cancel = () => stream.cancel();
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      if (signal.aborted) throw new DOMException("file read aborted", "AbortError");
+      const start = await stream.responseStart();
+      if (start.type === "error") throw new Error(start.message);
+      const total = Number(start.head.total);
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      while (received < Number(previewLimit)) {
+        const chunk = await stream.readResponseChunk(64 * 1024);
+        if (chunk.byteLength === 0) break;
+        chunks.push(chunk);
+        received += chunk.byteLength;
+      }
+      const bytes = new Uint8Array(received);
+      let cursor = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, cursor);
+        cursor += chunk.byteLength;
+      }
+      const textKind = start.head.mime.startsWith("text/") ||
+        ["application/json", "application/xml", "application/javascript"].includes(start.head.mime);
+      let text: string | null = null;
+      let readOnlyReason: string | null = null;
+      if (textKind) {
+        try {
+          text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        } catch {
+          text = new TextDecoder().decode(bytes);
+          readOnlyReason = "This file is not valid UTF-8, so saving could damage it.";
+        }
+      }
+      const truncated = total > received;
+      if (truncated && readOnlyReason === null) {
+        readOnlyReason = "Only the first 4 MB are loaded, so saving would discard the rest.";
+      }
+      return {
+        name: start.head.name,
+        size: total,
+        text,
+        truncated,
+        read_only_reason: readOnlyReason,
+      } satisfies ReadMeta;
+    } finally {
+      signal.removeEventListener("abort", cancel);
+      if (signal.aborted) stream.cancel();
+    }
+  }, [inst]);
 
   /** The selected host row. Workbench owns dispatch from its type to a View. */
   const activeMirrorTab = useMemo(
@@ -228,7 +298,8 @@ function JoinApp() {
   /** The active tab when it is a files row: the pane mounts with the file
    * the host fronts (the snapshot overlay's filesOpenPath), read over the
    * app channel's fs_read rpc. Subscribed, not getState-read: the host
-   * opening another file must re-render the pane. */
+   * opening another file must re-render the pane. Its body is read through
+   * the independent FileRead stream, not the app RPC channel. */
   const filesOpenPath = useRemoteMirrorStore((s) => s.filesOpenPath);
   const activeFilesPath = useMemo(() => {
     return activeMirrorTab?.type === "files"
@@ -237,36 +308,57 @@ function JoinApp() {
   }, [activeMirrorTab, filesOpenPath]);
 
   useEffect(() => {
-    if (!connected || !("serviceWorker" in navigator)) return;
+    if (!("serviceWorker" in navigator)) return;
     const onMessage = (event: MessageEvent) => {
-      const d = event.data as { type?: string; url?: string };
+      const d = event.data as {
+        type?: string;
+        url?: string;
+        method?: string;
+        headers?: [string, string][];
+        hasBody?: boolean;
+      };
       const url = d?.url;
       if (d?.type !== "tabverse-proxy-fetch" || typeof url !== "string") return;
       const port = (event as MessageEvent & { ports: MessagePort[] }).ports[0];
       if (port === undefined) return;
       void (async () => {
         try {
-          const target = targetFromProxyUrl(new URL(url));
-          if (target === null) throw new Error("not a proxy endpoint url");
-          const res = await proxy.requestViaProxy(target);
-          const buf = new Uint8Array(await res.arrayBuffer());
-          let bin = "";
-          for (let i = 0; i < buf.length; i += 0x8000) {
-            bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-          }
+          const route = proxyRouteFromUrl(new URL(url));
+          if (route === null) throw new Error("not a proxy endpoint url");
+          await relayProxyResponse(
+            port,
+            route.target,
+            (requestUrl, init) =>
+              proxy
+                .requestViaProxy(requestUrl, init, route.contextId ?? undefined)
+                .then((response) =>
+                  transformRemoteResponse(
+                    response,
+                    requestUrl,
+                    resolveProxyUrl,
+                    route.contextId ?? undefined,
+                    networkProxyRoot,
+                  ),
+                ),
+            {
+              method: d.method ?? "GET",
+              headers: d.headers ?? [],
+              hasBody: d.hasBody ?? false,
+            },
+          );
+        } catch (error) {
           port.postMessage({
-            status: res.status,
-            contentType: res.headers.get("content-type") ?? "",
-            bodyB64: btoa(bin),
+            type: "error",
+            message: error instanceof Error ? error.message : "proxy failed",
           });
-        } catch {
-          port.postMessage({ status: 502, contentType: "", bodyB64: "" });
+        } finally {
+          port.close();
         }
       })();
     };
     navigator.serviceWorker.addEventListener("message", onMessage);
     return () => navigator.serviceWorker.removeEventListener("message", onMessage);
-  }, [connected, proxy]);
+  }, [networkProxyRoot, proxy, resolveProxyUrl]);
 
   useEffect(() => {
     if (!connected) return;
@@ -742,11 +834,13 @@ function JoinApp() {
       dir: activeFilesDir,
       rpc: appChannel.rpc,
       readOnly,
+      readFile: readFileViaHost,
     },
     settings: { rpc: appChannel.rpc, readOnly },
     browser: {
       fetchViaHost,
-      resolveProxyUrl: proxyUrlFor,
+      resolveProxyUrl,
+      networkProxyRoot,
     },
   };
 

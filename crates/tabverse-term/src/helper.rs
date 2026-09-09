@@ -1,8 +1,7 @@
-//! Authenticated loopback server and helper-owned session dispatch.
+//! Authenticated local IPC server and helper-owned session dispatch.
 
 use std::{
     io,
-    net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -11,7 +10,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use interprocess::local_socket::{
+    prelude::*, GenericNamespaced, ListenerNonblockingMode, ListenerOptions,
+};
 use serde::{Deserialize, Serialize};
+use tabverse_runtime::RuntimeStore;
 
 use crate::{
     backend::{HelperRuntime, SessionMeta, SessionSink},
@@ -91,7 +94,7 @@ impl From<SessionMeta> for SessionWire {
 }
 
 pub struct HelperServer {
-    endpoint: SocketAddr,
+    endpoint: String,
     runtime: Arc<HelperRuntime>,
     shutdown: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
@@ -105,10 +108,67 @@ impl HelperServer {
         capabilities: u64,
         idle_timeout: Duration,
     ) -> io::Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(true)?;
-        let endpoint = listener.local_addr()?;
-        let runtime = Arc::new(HelperRuntime::new());
+        Self::start_runtime(
+            token,
+            helper_nonce,
+            capabilities,
+            idle_timeout,
+            Arc::new(HelperRuntime::new()),
+            Arc::new(|| false),
+        )
+    }
+
+    pub fn start_persistent(
+        token: AuthToken,
+        helper_nonce: [u8; 32],
+        capabilities: u64,
+        idle_timeout: Duration,
+        store: RuntimeStore,
+        host_instance: String,
+    ) -> io::Result<Self> {
+        Self::start_runtime(
+            token,
+            helper_nonce,
+            capabilities,
+            idle_timeout,
+            Arc::new(HelperRuntime::persistent(store, host_instance)),
+            Arc::new(|| false),
+        )
+    }
+
+    pub fn start_persistent_guarded(
+        token: AuthToken,
+        helper_nonce: [u8; 32],
+        capabilities: u64,
+        idle_timeout: Duration,
+        store: RuntimeStore,
+        host_instance: String,
+        keep_alive: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> io::Result<Self> {
+        Self::start_runtime(
+            token,
+            helper_nonce,
+            capabilities,
+            idle_timeout,
+            Arc::new(HelperRuntime::persistent(store, host_instance)),
+            keep_alive,
+        )
+    }
+
+    fn start_runtime(
+        token: AuthToken,
+        helper_nonce: [u8; 32],
+        capabilities: u64,
+        idle_timeout: Duration,
+        runtime: Arc<HelperRuntime>,
+        keep_alive: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> io::Result<Self> {
+        let endpoint = format!("tabverse-terminal-{}", uuid::Uuid::new_v4());
+        let name = endpoint.as_str().to_ns_name::<GenericNamespaced>()?;
+        let listener = ListenerOptions::new()
+            .name(name)
+            .nonblocking(ListenerNonblockingMode::Both)
+            .create_sync()?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let clients = Arc::new(AtomicUsize::new(0));
@@ -124,10 +184,7 @@ impl HelperServer {
             .spawn(move || {
                 while !thread_shutdown.load(Ordering::Acquire) {
                     match listener.accept() {
-                        Ok((stream, peer)) => {
-                            if !peer.ip().is_loopback() {
-                                continue;
-                            }
+                        Ok(stream) => {
                             thread_clients.fetch_add(1, Ordering::AcqRel);
                             *thread_activity.lock().unwrap() = Instant::now();
                             let client_count = Arc::clone(&thread_clients);
@@ -154,6 +211,7 @@ impl HelperServer {
                     }
                     let idle = thread_clients.load(Ordering::Acquire) == 0
                         && thread_runtime.list().is_empty()
+                        && !keep_alive()
                         && thread_activity.lock().unwrap().elapsed() >= idle_timeout;
                     if idle {
                         break;
@@ -172,8 +230,8 @@ impl HelperServer {
         })
     }
 
-    pub fn endpoint(&self) -> SocketAddr {
-        self.endpoint
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
     }
 
     pub fn runtime(&self) -> Arc<HelperRuntime> {
@@ -186,7 +244,9 @@ impl HelperServer {
 
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        let _ = TcpStream::connect(self.endpoint);
+        if let Ok(name) = self.endpoint.as_str().to_ns_name::<GenericNamespaced>() {
+            let _ = LocalSocketStream::connect(name);
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -214,7 +274,7 @@ fn session_sink(id: SessionId, generation: u64, sender: FrameSender) -> SessionS
 }
 
 fn handle_client(
-    stream: TcpStream,
+    stream: LocalSocketStream,
     token: AuthToken,
     helper_nonce: [u8; 32],
     capabilities: u64,
@@ -223,7 +283,7 @@ fn handle_client(
 ) {
     // Accepted sockets inherit O_NONBLOCK from the listener on macOS.
     let _ = stream.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_recv_timeout(Some(Duration::from_secs(5)));
     let mut framed = FramedStream::new(stream);
     if framed
         .authenticate_server(token, helper_nonce, capabilities)
@@ -367,7 +427,7 @@ mod tests {
 
     const TOKEN: AuthToken = AuthToken::new([0x44; 32]);
 
-    fn connect(endpoint: SocketAddr) -> FramedStream {
+    fn connect(endpoint: &str) -> FramedStream {
         let framed = FramedStream::connect(endpoint, Duration::from_secs(2)).unwrap();
         framed
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -441,6 +501,40 @@ mod tests {
         server.stop();
     }
 
+    #[test]
+    fn another_runtime_driver_keeps_the_shared_supervisor_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RuntimeStore::open(dir.path(), "shared-helper").unwrap();
+        let agent_live = Arc::new(AtomicBool::new(true));
+        let guard = Arc::clone(&agent_live);
+        let mut server = HelperServer::start_persistent_guarded(
+            TOKEN,
+            [0x14; 32],
+            0,
+            Duration::from_millis(40),
+            store,
+            "shared-helper".into(),
+            Arc::new(move || guard.load(Ordering::Acquire)),
+        )
+        .unwrap();
+
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            server.is_alive(),
+            "the Agent driver still needs the process"
+        );
+        agent_live.store(false, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.is_alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !server.is_alive(),
+            "the final idle driver releases the process"
+        );
+        server.stop();
+    }
+
     #[cfg(unix)]
     #[test]
     fn protocol_spawns_detaches_lists_and_terminates_a_helper_owned_shell() {
@@ -489,6 +583,88 @@ mod tests {
             .unwrap();
         recv_kind(&mut client, Kind::Terminate);
         assert!(server.runtime().list().is_empty());
+        server.stop();
+    }
+
+    #[test]
+    fn a_new_gui_connection_reattaches_the_same_running_terminal() {
+        let mut server = HelperServer::start(TOKEN, [8; 32], 0, Duration::from_secs(5)).unwrap();
+        let endpoint = server.endpoint().to_string();
+        let mut first_gui = connect(&endpoint);
+        first_gui.authenticate_client(TOKEN, [9; 32]).unwrap();
+        let (shell, before_command, after_command): (&str, &[u8], &[u8]) = if cfg!(windows) {
+            (
+                "powershell.exe",
+                b"Write-Output BEFORE-GUI-EXIT\r\n",
+                b"Write-Output AFTER-GUI-START\r\n",
+            )
+        } else {
+            (
+                "/bin/sh",
+                b"printf 'BEFORE-GUI-EXIT\\n'\n",
+                b"printf 'AFTER-GUI-START\\n'\n",
+            )
+        };
+        let spawn = serde_json::json!({
+            "shell": shell, "cols": 80, "rows": 24,
+            "shell_integration": false
+        });
+        first_gui
+            .send(&Frame::new(
+                Kind::Spawn,
+                SessionId::default(),
+                0,
+                serde_json::to_vec(&spawn).unwrap(),
+            ))
+            .unwrap();
+        let spawned = recv_kind(&mut first_gui, Kind::Spawn);
+        first_gui
+            .send(&Frame::new(
+                Kind::Input,
+                spawned.session_id,
+                1,
+                before_command.to_vec(),
+            ))
+            .unwrap();
+        let before = recv_kind(&mut first_gui, Kind::Output);
+        assert!(before.payload.windows(15).any(|w| w == b"BEFORE-GUI-EXIT"));
+        first_gui
+            .send(&Frame::new(Kind::Detach, spawned.session_id, 1, vec![]))
+            .unwrap();
+        assert_eq!(recv_kind(&mut first_gui, Kind::Detach).generation, 2);
+        drop(first_gui);
+
+        let mut second_gui = connect(&endpoint);
+        second_gui.authenticate_client(TOKEN, [10; 32]).unwrap();
+        second_gui
+            .send(&Frame::new(Kind::Attach, spawned.session_id, 0, vec![]))
+            .unwrap();
+        let replay = recv_kind(&mut second_gui, Kind::Snapshot);
+        assert_eq!(replay.generation, 3);
+        assert!(replay
+            .payload
+            .windows(15)
+            .any(|window| window == b"BEFORE-GUI-EXIT"));
+        second_gui
+            .send(&Frame::new(
+                Kind::Input,
+                spawned.session_id,
+                3,
+                after_command.to_vec(),
+            ))
+            .unwrap();
+        let mut after = Vec::new();
+        for _ in 0..30 {
+            after.extend(recv_kind(&mut second_gui, Kind::Output).payload);
+            if after.windows(15).any(|w| w == b"AFTER-GUI-START") {
+                break;
+            }
+        }
+        assert!(after.windows(15).any(|w| w == b"AFTER-GUI-START"));
+        second_gui
+            .send(&Frame::new(Kind::Terminate, spawned.session_id, 3, vec![]))
+            .unwrap();
+        recv_kind(&mut second_gui, Kind::Terminate);
         server.stop();
     }
 }

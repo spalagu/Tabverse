@@ -30,6 +30,44 @@ async function replayActions(page: Page) {
   });
 }
 
+test("the Pages Service Worker controls the scoped Host-network URL", async ({ page }) => {
+  await openReplay(page);
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+
+  const result = await page.evaluate(async () => {
+    const response = await fetch(
+      "/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/probe",
+    );
+    return { status: response.status, body: await response.text() };
+  });
+  expect(result.status).toBe(502);
+  expect(result.body).toContain("session is not connected");
+
+  const iframeResourceFinished = await page.evaluate(() =>
+    new Promise<boolean>((resolve) => {
+      const frame = document.createElement("iframe");
+      const timer = window.setTimeout(() => resolve(false), 3_000);
+      frame.onload = () => {
+        const image = frame.contentDocument?.querySelector("img");
+        if (image?.complete) {
+          window.clearTimeout(timer);
+          resolve(true);
+          return;
+        }
+        image?.addEventListener("error", () => {
+          window.clearTimeout(timer);
+          resolve(true);
+        }, { once: true });
+      };
+      frame.srcdoc =
+        '<img src="/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/image.png">';
+      document.body.appendChild(frame);
+    }),
+  );
+  expect(iframeResourceFinished).toBe(true);
+});
+
 test("renders the same replayed app shell across desktop and mobile widths", async ({ page }, testInfo) => {
   await openReplay(page);
   await expect(page.locator("#term")).toBeVisible();

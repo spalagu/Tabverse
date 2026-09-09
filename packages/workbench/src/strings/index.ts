@@ -947,7 +947,7 @@ export const STR = {
         "session mirrored from another machine, and the shell under a file " +
         "listing, keep the accelerated renderer and draw no ligatures.",
       terminalLigaturesUnread:
-        "Waiting for the configuration file before this can be changed.",
+        "Waiting for saved settings before this can be changed.",
       terminalBackgroundTasks: "Keep terminal tasks running in the background",
       terminalBackgroundTasksNote:
         "Off keeps today’s behavior: closing a terminal tab stops its task, " +
@@ -955,7 +955,7 @@ export const STR = {
         "to the background automatically; closing a busy tab or quitting " +
         "while tasks run asks what to do.",
       terminalBackgroundTasksUnread:
-        "Waiting for the configuration file before this can be changed.",
+        "Waiting for saved settings before this can be changed.",
       terminalImageMemory: "Inline image memory",
       terminalImageMemoryUnit:
         "Megabytes of decoded image storage, per terminal pane.",
@@ -977,15 +977,14 @@ export const STR = {
     config: {
       errorHeading: "Your configuration file could not be read",
       errorBlurb:
-        "Nothing in the file has been changed, and nothing you set through " +
-        "this page will be saved until it loads. Settings on screen are the " +
-        "built-in ones.",
+        "The file has not been changed. Settings saved in Tabverse remain " +
+        "available; profiles, templates, shortcuts and file-walk rules from " +
+        "this file use their built-in values until the file is fixed.",
       openFile: "Show the file",
       writeFailedHeading: "Some changes could not be saved",
       writeFailedBlurb:
-        "Your configuration file could not be written, so these settings " +
-        "are back on the values they had. Once the file can be saved, " +
-        "change them again.",
+        "Tabverse could not save these settings, so they are back on the " +
+        "values they had. Change them again after the reported problem is fixed.",
       writeFailedLine: (p: { setting: string; reason: string }) =>
         `${p.setting} — ${p.reason}`,
       dismissWriteFailures: "Close",
@@ -1010,9 +1009,9 @@ export const STR = {
       onlyChanged: "Show only what I have changed",
       none: "Nothing here differs from its built-in value.",
       blurb:
-        "These settings are the ones your configuration file sets to " +
-        "something other than the built-in value. Resetting one removes " +
-        "its line from the file, so it follows the built-in value again — " +
+        "These settings are saved in Tabverse at something other than the " +
+        "built-in value. Resetting one removes its saved override, so it " +
+        "follows the built-in value again — " +
         "including when a later version of Tabverse improves that value.",
       reset: "Reset",
       /** Names which setting a reset button belongs to, for a screen reader. */
@@ -1229,7 +1228,7 @@ export const STR = {
         "switch to that shared route; loads already in flight finish where " +
         "they started.",
       coverUnread:
-        "Waiting for the configuration file before this can be changed.",
+        "Waiting for saved settings before this can be changed.",
       coverGateNote:
         "This Mac is running a macOS older than 14, whose page engine " +
         "cannot be given a proxy. Page traffic stays on the system " +

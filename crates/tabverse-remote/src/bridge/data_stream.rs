@@ -7,11 +7,24 @@
 
 use anyhow::{bail, Context, Result};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
+use std::sync::Arc;
 use tabverse_network::{
-    read_data_stream_preface, read_http_response_start, write_data_stream_preface,
-    write_http_request_head, DataStreamKind, DataStreamPreface, HostNetworkGateway,
-    HttpRequestHead, HttpResponseStart, DATA_STREAM_VERSION,
+    read_data_stream_preface, read_file_read_request, read_file_read_start,
+    read_http_response_start, write_data_stream_preface, write_file_read_request,
+    write_file_read_start, write_http_request_head, DataStreamKind, DataStreamPreface,
+    FileReadHead, FileReadRequest, FileReadStart, HostNetworkGateway, HttpRequestHead,
+    HttpResponseStart, DATA_STREAM_VERSION,
 };
+use tokio::io::AsyncReadExt;
+
+pub struct OpenedRemoteFile {
+    pub file: std::fs::File,
+    pub head: FileReadHead,
+}
+
+pub trait RemoteFileSource: Send + Sync {
+    fn open(&self, request: &FileReadRequest) -> Result<OpenedRemoteFile>;
+}
 
 /// One extra bidirectional stream whose small routing preface has already been
 /// read, but whose request has not yet been executed.
@@ -56,7 +69,7 @@ impl IncomingDataStream {
                         result.context("wait for remote HTTP response consumer")?;
                         Ok(())
                     }
-                    result = gateway.serve_http_exchange(recv, send) => match result {
+                    result = gateway.serve_http_exchange(&preface.context_id, recv, send) => match result {
                         // AsyncWrite erases noq's WriteError into io::Error. If
                         // STOP_SENDING raced the failed write, the transport's
                         // own stopped future is the authoritative distinction
@@ -72,7 +85,51 @@ impl IncomingDataStream {
                     },
                 }
             }
+            DataStreamKind::FileRead => bail!("FileRead stream needs a RemoteFileSource"),
         }
+    }
+
+    pub async fn serve_file(self, source: Arc<dyn RemoteFileSource>) -> Result<()> {
+        let Self {
+            preface: _,
+            mut send,
+            mut recv,
+        } = self;
+        let request = read_file_read_request(&mut recv)
+            .await
+            .context("read file request")?;
+        let opened = match tokio::task::spawn_blocking(move || source.open(&request))
+            .await
+            .context("join file open task")?
+        {
+            Ok(opened) => opened,
+            Err(error) => {
+                write_file_read_start(
+                    &mut send,
+                    &FileReadStart::Error {
+                        code: "file-read-failed".into(),
+                        message: error.to_string(),
+                    },
+                )
+                .await?;
+                send.finish().context("finish failed file stream")?;
+                return Ok(());
+            }
+        };
+        write_file_read_start(
+            &mut send,
+            &FileReadStart::File {
+                head: opened.head.clone(),
+            },
+        )
+        .await?;
+
+        let mut file = tokio::fs::File::from_std(opened.file).take(opened.head.length);
+        tokio::io::copy(&mut file, &mut send)
+            .await
+            .context("stream file bytes")?;
+        send.finish().context("finish file stream")?;
+        Ok(())
     }
 }
 
@@ -109,6 +166,39 @@ pub async fn accept_data_stream(conn: &Connection) -> Result<IncomingDataStream>
 pub struct RemoteHttpStream {
     send: SendStream,
     recv: RecvStream,
+}
+
+pub struct RemoteFileStream {
+    recv: RecvStream,
+}
+
+impl RemoteFileStream {
+    pub async fn open(
+        conn: &Connection,
+        context_id: &str,
+        request: &FileReadRequest,
+    ) -> Result<Self> {
+        let (mut send, recv) = conn.open_bi().await.context("open file data stream")?;
+        write_data_stream_preface(&mut send, &DataStreamPreface::file_read(context_id)).await?;
+        write_file_read_request(&mut send, request).await?;
+        send.finish().context("finish file request")?;
+        Ok(Self { recv })
+    }
+
+    pub async fn response_start(&mut self) -> Result<FileReadStart> {
+        read_file_read_start(&mut self.recv).await
+    }
+
+    pub async fn read_chunk(&mut self, limit: usize) -> Result<Vec<u8>> {
+        let mut bytes = vec![0; limit.clamp(1, 1024 * 1024)];
+        let read = self.recv.read(&mut bytes).await?.unwrap_or(0);
+        bytes.truncate(read);
+        Ok(bytes)
+    }
+
+    pub fn cancel(&mut self) {
+        let _ = self.recv.stop(0u8.into());
+    }
 }
 
 impl RemoteHttpStream {
@@ -157,7 +247,10 @@ impl RemoteHttpStream {
 mod tests {
     use super::*;
     use iroh::Endpoint;
-    use std::{net::Ipv4Addr, time::Duration};
+    use std::{
+        net::Ipv4Addr,
+        time::{Duration, Instant},
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -244,6 +337,8 @@ mod tests {
             let mut control_marker = [0u8; 13];
             host_control_recv.read_exact(&mut control_marker).await?;
             assert_eq!(&control_marker, b"control-alive");
+            let before = client_conn.stats();
+            let started = Instant::now();
 
             let gateway = HostNetworkGateway::new(Default::default());
             let host_data = tokio::spawn(async move {
@@ -284,6 +379,22 @@ mod tests {
             let mut marker = [0u8; 1];
             host_control_recv.read_exact(&mut marker).await?;
             assert_eq!(&marker, b"!");
+
+            // Transport-level baseline: count encrypted QUIC datagrams, not
+            // just application bytes. A normal page fetch may pay framing and
+            // ACK overhead, but must remain proportional to its body instead
+            // of silently starting a continuous pixel stream.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let after = client_conn.stats();
+            let host_to_remote = after.udp_rx.bytes.saturating_sub(before.udp_rx.bytes);
+            let remote_to_host = after.udp_tx.bytes.saturating_sub(before.udp_tx.bytes);
+            assert!(host_to_remote >= BODY_LEN as u64);
+            assert!(host_to_remote < (BODY_LEN as u64) * 2);
+            assert!(remote_to_host < 256 * 1024);
+            eprintln!(
+                "remote_baseline body_bytes={BODY_LEN} host_to_remote_bytes={host_to_remote} remote_to_host_bytes={remote_to_host} elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
 
             host_data.await??;
             origin.await?;

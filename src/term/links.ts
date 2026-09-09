@@ -1,4 +1,6 @@
 import { type TerminalLink } from "@tabverse/workbench/terminal/links";
+import { urlOpenIntent } from "@tabverse/runtime-contracts";
+import { tabForOpenIntent } from "../openIntent";
 import { useStore } from "../state/store";
 
 export * from "@tabverse/workbench/terminal/links";
@@ -59,7 +61,9 @@ function targetKind(link: TerminalLink): "browser" | "files" {
 
 function openFresh(link: TerminalLink): string {
   if (link.kind === "url") {
-    return useStore.getState().addTab({ type: "browser", url: link.url });
+    const tab = tabForOpenIntent(urlOpenIntent(link.url));
+    if (tab === null) throw new Error(`No Tabverse handler for URL: ${link.url}`);
+    return useStore.getState().addTab(tab);
   }
   if (link.kind === "dir") {
     return useStore.getState().addTab({ type: "files", cwd: link.path });

@@ -1,7 +1,6 @@
 //! Reconnecting GUI-side client for the resident terminal helper.
 
 use std::{
-    net::SocketAddr,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex,
@@ -33,7 +32,7 @@ pub struct HelperClient {
 
 impl HelperClient {
     pub fn connect(
-        endpoint: SocketAddr,
+        endpoint: &str,
         token: AuthToken,
         client_nonce: [u8; 32],
         on_event: HelperEventCallback,
@@ -41,7 +40,7 @@ impl HelperClient {
         let mut framed = FramedStream::connect(endpoint, Duration::from_secs(3))?;
         framed.set_read_timeout(Some(Duration::from_secs(5)))?;
         let (capabilities, helper_nonce) = framed.authenticate_client(token, client_nonce)?;
-        framed.set_read_timeout(None)?;
+        framed.set_read_timeout(Some(Duration::from_millis(100)))?;
         let sender = framed.sender()?;
         let pending = Arc::new(Mutex::new(None::<Pending>));
         let reader_pending = Arc::clone(&pending);
@@ -50,7 +49,19 @@ impl HelperClient {
         let reader = thread::Builder::new()
             .name("tabverse-helper-reader".into())
             .spawn(move || {
-                while let Ok(frame) = framed.recv() {
+                loop {
+                    let frame = match framed.recv() {
+                        Ok(frame) => frame,
+                        Err(TransportError::Io(error))
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                            ) && reader_alive.load(Ordering::Acquire) =>
+                        {
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
                     let delivered = {
                         let mut pending = reader_pending.lock().unwrap();
                         let matches = pending.as_ref().is_some_and(|waiting| {

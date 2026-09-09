@@ -374,9 +374,9 @@ fn ensure_loaded(app: &AppHandle) {
         return;
     }
     let mut scripts = Vec::new();
-    let index = crate::state_dir(app)
+    let index = crate::app_state_store(app)
         .ok()
-        .and_then(|dir| tabverse_fs::state::load(&dir, INDEX_SCOPE).ok().flatten())
+        .and_then(|store| store.load_scope(INDEX_SCOPE).ok().flatten())
         .and_then(|json| serde_json::from_str::<StoredIndex>(&json).ok());
     if let (Some(index), Some(dir)) = (index, bodies_dir(app)) {
         for entry in index.scripts {
@@ -423,13 +423,11 @@ fn persist_registry(app: &AppHandle) {
     }) else {
         return;
     };
-    let Ok(dir) = crate::state_dir(app) else {
-        return;
-    };
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _ = tabverse_fs::state::save(&dir, INDEX_SCOPE, &json);
-        let _ = app; // keep the handle alive for the write's duration
+        if let Ok(store) = crate::app_state_store(&app) {
+            let _ = store.save_scope(INDEX_SCOPE, &json);
+        }
     });
 }
 
@@ -456,13 +454,9 @@ fn values_of(app: &AppHandle, script_id: &str) -> serde_json::Map<String, serde_
     if let Some(hit) = values_cache().lock().unwrap().get(script_id) {
         return hit.clone();
     }
-    let loaded: serde_json::Map<String, serde_json::Value> = crate::state_dir(app)
+    let loaded: serde_json::Map<String, serde_json::Value> = crate::app_state_store(app)
         .ok()
-        .and_then(|dir| {
-            tabverse_fs::state::load(&dir, &values_scope(script_id))
-                .ok()
-                .flatten()
-        })
+        .and_then(|store| store.load_scope(&values_scope(script_id)).ok().flatten())
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default();
     values_cache()
@@ -479,12 +473,12 @@ fn persist_values(app: &AppHandle, script_id: &str) {
     let Ok(json) = serde_json::to_string(&map) else {
         return;
     };
-    let Ok(dir) = crate::state_dir(app) else {
-        return;
-    };
     let scope = values_scope(script_id);
+    let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _ = tabverse_fs::state::save(&dir, &scope, &json);
+        if let Ok(store) = crate::app_state_store(&app) {
+            let _ = store.save_scope(&scope, &json);
+        }
     });
 }
 
@@ -504,9 +498,9 @@ fn ensure_grants_loaded(app: &AppHandle) {
     if g.is_some() {
         return;
     }
-    let loaded = crate::state_dir(app)
+    let loaded = crate::app_state_store(app)
         .ok()
-        .and_then(|dir| tabverse_fs::state::load(&dir, GRANTS_SCOPE).ok().flatten())
+        .and_then(|store| store.load_scope(GRANTS_SCOPE).ok().flatten())
         .and_then(|json| serde_json::from_str(&json).ok())
         .unwrap_or_default();
     *g = Some(loaded);
@@ -519,11 +513,11 @@ fn persist_grants(app: &AppHandle) {
     let Ok(json) = serde_json::to_string(&map) else {
         return;
     };
-    let Ok(dir) = crate::state_dir(app) else {
-        return;
-    };
+    let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _ = tabverse_fs::state::save(&dir, GRANTS_SCOPE, &json);
+        if let Ok(store) = crate::app_state_store(&app) {
+            let _ = store.save_scope(GRANTS_SCOPE, &json);
+        }
     });
 }
 
@@ -1692,12 +1686,13 @@ pub fn userscript_remove(app: AppHandle, script_id: String) -> Result<(), String
     if let Some(dir) = bodies_dir(&app) {
         let _ = std::fs::remove_file(dir.join(format!("{script_id}.js")));
     }
-    if let Ok(dir) = crate::state_dir(&app) {
-        let scope = values_scope(&script_id);
-        tauri::async_runtime::spawn_blocking(move || {
-            let _ = tabverse_fs::state::delete(&dir, &scope);
-        });
-    }
+    let state_app = app.clone();
+    let scope = values_scope(&script_id);
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Ok(store) = crate::app_state_store(&state_app) {
+            let _ = store.delete_scope(&scope);
+        }
+    });
     eprintln!("[userscripts] removed script={script_id}");
     Ok(())
 }

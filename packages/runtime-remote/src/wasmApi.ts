@@ -37,6 +37,21 @@ export interface WasmSession {
     url: string,
     headers: Array<{ name: string; value: string }>
   ): Promise<WasmHttpStream>;
+  openFileStream(
+    contextId: string,
+    path: string,
+    offset: bigint,
+    length?: bigint
+  ): Promise<WasmFileStream>;
+}
+
+export interface WasmFileStream {
+  cancel(): void;
+  responseStart(): Promise<
+    | { type: "file"; head: { path: string; name: string; mime: string; total: bigint; offset: bigint; length: bigint } }
+    | { type: "error"; code: string; message: string }
+  >;
+  readResponseChunk(limit: number): Promise<Uint8Array>;
 }
 
 export interface WasmHttpStream {

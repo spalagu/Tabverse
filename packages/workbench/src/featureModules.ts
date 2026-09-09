@@ -8,11 +8,63 @@ import type { TabType } from "@tabverse/runtime-contracts";
  */
 export type FeatureCloseBehavior = "close" | "stop-runtime" | "detach-runtime" | "ask";
 
+export type FeatureStateDecodeResult<State> =
+  | { readonly kind: "ready"; readonly version: number; readonly state: State }
+  | {
+      readonly kind: "unsupported-newer";
+      readonly version: number;
+      readonly original: unknown;
+    }
+  | { readonly kind: "invalid"; readonly reason: string; readonly original: unknown };
+
+export interface FeatureStateCodec<State> {
+  readonly currentVersion: number;
+  decode(version: number, original: unknown): FeatureStateDecodeResult<State>;
+}
+
+type StateMigration = (state: Record<string, unknown>) => Record<string, unknown>;
+
+/** Versioned object state shared by today's built-ins. Missing migrations
+ * fail without rewriting the payload; future versions remain byte-for-byte
+ * available to the unsupported-state UI. */
+export function objectStateCodec(
+  currentVersion: number,
+  migrations: Readonly<Record<number, StateMigration>> = {},
+): FeatureStateCodec<Record<string, unknown>> {
+  if (!Number.isSafeInteger(currentVersion) || currentVersion < 1) {
+    throw new Error("Feature state version must be a positive integer");
+  }
+  return {
+    currentVersion,
+    decode(version, original) {
+      if (!Number.isSafeInteger(version) || version < 1) {
+        return { kind: "invalid", reason: "invalid-version", original };
+      }
+      if (version > currentVersion) {
+        return { kind: "unsupported-newer", version, original };
+      }
+      if (typeof original !== "object" || original === null || Array.isArray(original)) {
+        return { kind: "invalid", reason: "invalid-shape", original };
+      }
+      let state = original as Record<string, unknown>;
+      for (let from = version; from < currentVersion; from += 1) {
+        const migrate = migrations[from];
+        if (migrate === undefined) {
+          return { kind: "invalid", reason: `missing-migration-${from}`, original };
+        }
+        state = migrate(state);
+      }
+      return { kind: "ready", version: currentVersion, state };
+    },
+  };
+}
+
 export interface BuiltInFeatureModuleDefinition {
   readonly kind: TabType;
   readonly label: string;
   readonly hint: string;
   readonly closeBehavior: FeatureCloseBehavior;
+  readonly state: FeatureStateCodec<Record<string, unknown>>;
 }
 
 /**
@@ -38,35 +90,41 @@ export const BUILT_IN_FEATURE_MODULES = defineBuiltInFeatureModules([
     label: "Terminal",
     hint: "A shell session",
     closeBehavior: "stop-runtime",
+    state: objectStateCodec(1),
   },
   {
     kind: "files",
     label: "Files",
     hint: "Explorer with git status and previews",
     closeBehavior: "close",
+    state: objectStateCodec(1),
   },
   {
     kind: "browser",
     label: "Browser",
     hint: "Embedded web page",
     closeBehavior: "close",
+    state: objectStateCodec(1),
   },
   {
     kind: "agent",
     label: "Agent",
     hint: "A coding agent working in a folder",
     closeBehavior: "ask",
+    state: objectStateCodec(1),
   },
   {
     kind: "remote",
     label: "Join remote…",
     hint: "Join a shared Tabverse session",
     closeBehavior: "close",
+    state: objectStateCodec(1),
   },
   {
     kind: "settings",
     label: "Settings",
     hint: "Preferences",
     closeBehavior: "close",
+    state: objectStateCodec(1),
   },
 ] as const);

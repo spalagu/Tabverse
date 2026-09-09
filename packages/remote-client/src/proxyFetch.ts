@@ -12,6 +12,17 @@
  * — which a query-parameter form cannot do.
  */
 export const PROXY_PATH_PREFIX = "/__tabverse_proxy/";
+const PROXY_PATH_SEGMENT = "__tabverse_proxy/";
+
+/** Same-origin root beneath which every virtual Browser URL lives. */
+export function proxyPathRoot(basePath = "/"): string {
+  let start = 0;
+  let end = basePath.length;
+  while (start < end && basePath[start] === "/") start += 1;
+  while (end > start && basePath[end - 1] === "/") end -= 1;
+  const scopedBase = start === end ? "" : `/${basePath.slice(start, end)}`;
+  return `${scopedBase}/${PROXY_PATH_SEGMENT}`;
+}
 
 /**
  * The endpoint path standing for one host-side URL, origin-relative so
@@ -29,13 +40,51 @@ export const PROXY_PATH_PREFIX = "/__tabverse_proxy/";
  * scheme (cross-origin, unproxied). A query-parameter form could not
  * even do the directory-relative case.
  */
-export function proxyUrlFor(target: string): string {
+export function proxyUrlFor(
+  target: string,
+  basePath = "/",
+  contextId?: string,
+): string {
   const u = new URL(target);
   const scheme = u.protocol.slice(0, -1);
   if (scheme !== "http" && scheme !== "https") {
     throw new Error(`the proxy carries http requests only, not ${u.protocol}`);
   }
-  return `${PROXY_PATH_PREFIX}${scheme}/${u.host}${u.pathname}${u.search}`;
+  const context = contextId === undefined ? "" : `${encodeURIComponent(contextId)}/`;
+  return `${proxyPathRoot(basePath)}${context}${scheme}/${u.host}${u.pathname}${u.search}`;
+}
+
+export interface ProxyRoute {
+  contextId: string | null;
+  target: string;
+}
+
+/** Decode both current context-scoped paths and legacy unscoped test paths. */
+export function proxyRouteFromUrl(url: URL): ProxyRoute | null {
+  const marker = `/${PROXY_PATH_SEGMENT}`;
+  const markerAt = url.pathname.indexOf(marker);
+  if (markerAt < 0) return null;
+  const rest = url.pathname.slice(markerAt + marker.length);
+  const parts = rest.split("/");
+  const scoped = parts[0] !== "http" && parts[0] !== "https";
+  const schemeAt = scoped ? 1 : 0;
+  const scheme = parts[schemeAt];
+  if (scheme !== "http" && scheme !== "https") return null;
+  const authorityAndPath = parts.slice(schemeAt + 1).join("/");
+  if (authorityAndPath === "") return null;
+  let contextId: string | null = null;
+  if (scoped) {
+    try {
+      contextId = decodeURIComponent(parts[0]);
+    } catch {
+      return null;
+    }
+    if (contextId === "") return null;
+  }
+  return {
+    contextId,
+    target: `${scheme}://${authorityAndPath}${url.search}`,
+  };
 }
 /**
  * The host-side URL a request to this path is aimed at, or null when the
@@ -45,13 +94,7 @@ export function proxyUrlFor(target: string): string {
  * same function reads back what proxyUrlFor wrote, from any origin.
  */
 export function targetFromProxyUrl(url: URL): string | null {
-  if (!url.pathname.startsWith(PROXY_PATH_PREFIX)) return null;
-  const rest = url.pathname.slice(PROXY_PATH_PREFIX.length);
-  const slash = rest.indexOf("/");
-  if (slash <= 0) return null;
-  const scheme = rest.slice(0, slash);
-  if (scheme !== "http" && scheme !== "https") return null;
-  return `${scheme}://${rest.slice(slash + 1)}${url.search}`;
+  return proxyRouteFromUrl(url)?.target ?? null;
 }
 
 /** One independently multiplexed HTTP stream exposed by the wasm seam. */
@@ -85,7 +128,8 @@ export interface ProxyClient {
    * status is a resolved Response, the same split window.fetch has. */
   requestViaProxy(
     input: string | URL | Request,
-    init?: RequestInit
+    init?: RequestInit,
+    requestContextId?: string,
   ): Promise<Response>;
   /** Reject every operation belonging to the ended connection. */
   failAll(reason: string): void;
@@ -101,11 +145,16 @@ export function createProxyClient(
   const active = new Set<HttpDataStream>();
   let generation = 0;
 
-  async function perform(req: Request, requestGeneration: number, redirects: number): Promise<Response> {
+  async function perform(
+    req: Request,
+    requestGeneration: number,
+    redirects: number,
+    requestContextId: string,
+  ): Promise<Response> {
     const headers: HeaderPair[] = [];
     req.headers.forEach((value, name) => headers.push({ name, value }));
     const redirectSource = req.body === null ? req : req.clone();
-    const stream = await open(contextId(), req.method, req.url, headers);
+    const stream = await open(requestContextId, req.method, req.url, headers);
     active.add(stream);
     let bodyOwnsStream = false;
     const abort = () => stream.cancel();
@@ -152,7 +201,7 @@ export function createProxyClient(
           safe.delete("cookie");
           next = new Request(next, { headers: safe });
         }
-        return perform(next, requestGeneration, redirects + 1);
+        return perform(next, requestGeneration, redirects + 1, requestContextId);
       }
 
       const nullBody = [204, 205, 304].includes(start.head.status);
@@ -197,7 +246,8 @@ export function createProxyClient(
 
   function requestViaProxy(
     input: string | URL | Request,
-    init?: RequestInit
+    init?: RequestInit,
+    requestContextId = contextId(),
   ): Promise<Response> {
     const req = new Request(input, init);
     const requestGeneration = generation;
@@ -205,7 +255,7 @@ export function createProxyClient(
       waiting.add(reject);
       void (async () => {
         try {
-          resolve(await perform(req, requestGeneration, 0));
+          resolve(await perform(req, requestGeneration, 0, requestContextId));
         } catch (error) {
           reject(error instanceof Error ? error : new Error(String(error)));
         } finally {
@@ -246,10 +296,10 @@ export function installProxyFetchPatch(
       return original(input, init);
     }
     if (url.origin !== pageOrigin) return original(input, init);
-    const target = targetFromProxyUrl(url);
-    return target === null
+    const route = proxyRouteFromUrl(url);
+    return route === null
       ? original(input, init)
-      : client.requestViaProxy(target, init);
+      : client.requestViaProxy(route.target, init, route.contextId ?? undefined);
   };
   globalThis.fetch = patched;
   return () => {

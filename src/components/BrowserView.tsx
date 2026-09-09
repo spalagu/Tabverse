@@ -422,13 +422,20 @@ export function BrowserView({ tab, active }: Props) {
     if (!offer) return;
     const { invoke } = await import("@tauri-apps/api/core");
     if (saveIt) {
-      await invoke("pw_offer_save", { host: offer.host }).catch((e) =>
+      await invoke("pw_offer_save", {
+        tabId: tab.id,
+        host: offer.host,
+        username: offer.username,
+      }).catch((e) =>
         coreLog("error", `pw_offer_save failed: ${e}`)
       );
     } else {
-      await invoke("pw_offer_dismiss", { host: offer.host, never }).catch(
-        () => {}
-      );
+      await invoke("pw_offer_dismiss", {
+        tabId: tab.id,
+        host: offer.host,
+        username: offer.username,
+        never,
+      }).catch(() => {});
     }
   };
 

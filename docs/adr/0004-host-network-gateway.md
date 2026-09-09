@@ -40,7 +40,9 @@ Each data stream begins with a small preface describing its kind and Remote Brow
 The preface is routing metadata, not an authorization token. Host network capability must only be attached to a connection after the existing Remote share authentication and viewer-access checks have succeeded; a caller-controlled `context_id` must never grant or widen access.
 
 ## Browser state
-`context_id` identifies Remote Browser context state. It deliberately does not identify or synchronize a local Wry BrowserSession. Cookie/cache layers may later key their own state by this context without changing the data transport.
+`context_id` identifies Remote Browser context state. It deliberately does not identify or synchronize a local Wry BrowserSession.
+
+当前实现由 HostNetworkGateway 按 Remote 连接隔离 cookie 和 HTTP 缓存，并在连接内继续按 `context_id` 隔离。缓存键包含目标 URL 和 `Vary` 指定的请求头；实现支持 `Cache-Control`、`Expires`、`ETag`、`Last-Modified` 和条件重验证。正文仍先流向 Remote，同时在有界内存中旁路收集可缓存响应；单项上限 16 MiB、连接总上限 64 MiB。缓存命中仍要求建立新的已认证数据流，因此每次请求都会先经过当前 App share 和 Steer 权限检查。`context_id` 仍然只是状态路由键，不是授权凭据。
 
 ## Dependency boundary
 `tabverse-network` owns the streaming protocol and HTTP exchange mechanics, not operating-environment policy. It must remain usable without Tauri and must not create HTTP clients on its own.

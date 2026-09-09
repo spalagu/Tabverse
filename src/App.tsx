@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import { WorkbenchRuntimeProvider } from "@tabverse/workbench/runtime";
 import { desktopRuntime } from "@tabverse/runtime-desktop";
+import { pathOpenIntent, urlOpenIntent, type OpenIntent } from "@tabverse/runtime-contracts";
+import { OPEN_INTENT_EVENT, tabForOpenIntent } from "./openIntent";
 
 /**
  * One thing the system handed over. Mirrors `Opened` in
@@ -349,7 +351,10 @@ function DesktopApp() {
       for (const item of items) {
         switch (item.kind) {
           case "browser":
-            st.addTab({ type: "browser", url: item.url });
+            {
+              const tab = tabForOpenIntent(urlOpenIntent(item.url));
+              if (tab) st.addTab(tab);
+            }
             break;
           case "terminal":
             st.addTab({
@@ -359,8 +364,10 @@ function DesktopApp() {
             });
             break;
           case "file":
-            // The file itself, not just the folder around it — see Tab.openPath.
-            st.addTab({ type: "files", openPath: item.path });
+            {
+              const tab = tabForOpenIntent(pathOpenIntent(item.path));
+              if (tab) st.addTab(tab);
+            }
             break;
           case "folder":
             st.addTab({ type: "files", cwd: item.path });
@@ -393,6 +400,18 @@ function DesktopApp() {
   }, []);
 
   useEffect(() => {
+    const receive = (event: Event) => {
+      void (async () => {
+        if ((await sessionBoot.current) === "preserved") return;
+        const tab = tabForOpenIntent((event as CustomEvent<OpenIntent>).detail);
+        if (tab) useStore.getState().addTab(tab);
+      })();
+    };
+    window.addEventListener(OPEN_INTENT_EVENT, receive);
+    return () => window.removeEventListener(OPEN_INTENT_EVENT, receive);
+  }, []);
+
+  useEffect(() => {
     if (!isTauri) return;
     let stop: (() => void) | null = null;
     let cancelled = false;
@@ -400,7 +419,8 @@ function DesktopApp() {
       listen<{ url: string }>("browser-open-tab", (e) => {
         void (async () => {
           if ((await sessionBoot.current) !== "preserved" && !cancelled && e.payload.url) {
-            useStore.getState().addTab({ type: "browser", url: e.payload.url });
+            const tab = tabForOpenIntent(urlOpenIntent(e.payload.url));
+            if (tab) useStore.getState().addTab(tab);
           }
         })();
       }).then((fn) => {

@@ -94,7 +94,8 @@ export function AgentView({ tab, active }: { tab: Tab; active: boolean }) {
         if (!disposed) setCwd(resolved);
         const agent = await backend.createAgent({ cwd: resolved, sessionId: tab.id });
         if (disposed) {
-          void agent.close();
+          const tabStillExists = useStore.getState().tabs.some((item) => item.id === tab.id);
+          void (tabStillExists ? agent.detach() : agent.close());
           return;
         }
         agentRef.current = agent;
@@ -112,9 +113,11 @@ export function AgentView({ tab, active }: { tab: Tab; active: boolean }) {
     return () => {
       disposed = true;
       unsubscribe?.();
-      // Closing the session is what ends its thread; leaving it would leak one
-      // per tab the user opens and closes.
-      void agentRef.current?.close();
+      const agent = agentRef.current;
+      if (agent !== null) {
+        const tabStillExists = useStore.getState().tabs.some((item) => item.id === tab.id);
+        void (tabStillExists ? agent.detach() : agent.close());
+      }
       agentRef.current = null;
     };
   }, [tab.cwd, tab.id]);

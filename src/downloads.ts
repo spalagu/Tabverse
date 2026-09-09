@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
+import { requestPathOpen } from "./openIntent";
 import { deleteState, loadState, saveState } from "./persist";
 import { isFreshRun } from "./state/store";
-
 
 /** The scope the ledger occupies in the state store. */
 export const DOWNLOADS_SCOPE = "downloads";
@@ -183,14 +183,10 @@ export function clearDownloads(): void {
   listeners.forEach((fn) => fn());
 }
 
-/**
- * Open a downloaded file with whatever the system opens it with. The core
- * command re-checks the path against this same ledger before launching
- * anything, so a compromised page cannot turn this into "open any path".
- */
+/** Open a downloaded file inside Tabverse through the same OpenIntent path as
+ * OS associations and other product ingress. */
 export async function openDownload(path: string): Promise<void> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("download_open", { path });
+  requestPathOpen(path);
 }
 
 /** Show the file in the system's file manager. */

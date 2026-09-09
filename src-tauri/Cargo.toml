@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-# build.rs reads tauri.conf.json to bake the claimed file types into the
+# build.rs reads the content catalog to bake claimed file types into the
 # binary — the runtime config does not carry them (see build.rs).
 serde_json = { workspace = true }
 
@@ -33,6 +33,8 @@ tabverse-agent = { path = "../crates/tabverse-agent" }
 tabverse-agent-tools = { path = "../crates/tabverse-agent-tools" }
 tabverse-remote = { path = "../crates/tabverse-remote" }
 tabverse-network = { path = "../crates/tabverse-network" }
+tabverse-state = { path = "../crates/tabverse-state" }
+tabverse-runtime = { path = "../crates/tabverse-runtime" }
 tabverse-fs = { version = "0.1.0", path = "../crates/tabverse-fs" }
 toml = "1"
 toml_edit = { version = "0.25", features = ["serde"] }
@@ -65,6 +67,12 @@ notify = "6"
 # so declaring it adds no download and no compilation unit.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Freedesktop Secret Service is implemented by GNOME Keyring and KWallet.
+# Only the machine master-key bundle lives there; credential records remain
+# encrypted in app.db like the macOS and Windows implementations.
+secret-service = { version = "5.2.0", default-features = false, features = ["rt-tokio-crypto-rust"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
