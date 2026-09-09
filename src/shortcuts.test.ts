@@ -1,6 +1,7 @@
 // The Rust side is read as text through the bundler, so this test needs no
 // filesystem types and works the same way the app is built.
 import menuSource from "../src-tauri/src/lib.rs?raw";
+import browserSource from "../src-tauri/src/browser_commands.rs?raw";
 // The command union, read the same way, because a JSON table cannot be type
 // checked against it — see "what this file locks" below.
 import commandSource from "./appCommands?raw";
@@ -149,7 +150,7 @@ describe("the script injected into pages is serialized, not written", () => {
     // empty match and reporting green — which the length assertion below is
     // the second guard against.
     const script =
-      /fn shortcut_script_for\([\s\S]*?\n\}/.exec(menuSource)?.[0] ?? "";
+      /fn shortcut_script_for\([\s\S]*?\n\}/.exec(browserSource)?.[0] ?? "";
     expect(script.length).toBeGreaterThan(1000);
     // Substitutions, not literals. The copy that used to stand here bound
     // shift+D to a command deleted long enough ago that the menu's version of

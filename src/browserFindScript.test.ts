@@ -6,17 +6,17 @@ import { STR } from "./strings";
 
 // happy-dom rewrites import.meta.url to a non-file scheme, so resolve the
 // Rust source from the vitest root (where vitest.config.ts lives).
-const LIB_PATH = join(process.cwd(), "src-tauri/src/lib.rs");
-const LIB_RS = readFileSync(LIB_PATH, "utf8");
+const BROWSER_PATH = join(process.cwd(), "src-tauri/src/browser_commands.rs");
+const BROWSER_RS = readFileSync(BROWSER_PATH, "utf8");
 const BEGIN = 'const FIND_SCRIPT: &str = r#"';
-const begin = LIB_RS.indexOf(BEGIN);
-const end = begin === -1 ? -1 : LIB_RS.indexOf('"#;', begin);
+const begin = BROWSER_RS.indexOf(BEGIN);
+const end = begin === -1 ? -1 : BROWSER_RS.indexOf('"#;', begin);
 if (begin === -1 || end === -1) {
   throw new Error(
-    "FIND_SCRIPT not found in src-tauri/src/lib.rs — test harness is stale"
+    "FIND_SCRIPT not found in src-tauri/src/browser_commands.rs — test harness is stale"
   );
 }
-const FIND_SCRIPT = LIB_RS.slice(begin + BEGIN.length, end);
+const FIND_SCRIPT = BROWSER_RS.slice(begin + BEGIN.length, end);
 
 /** Fill placeholders exactly as find_script_for does, with dummy colors. */
 function findJs(query: string, backwards = false): string {
