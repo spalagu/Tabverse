@@ -2,6 +2,7 @@ import catalogSource from "../../../resources/content-types.json";
 
 export type ContentHandlerId =
   | "archive"
+  | "binary"
   | "certificate"
   | "code"
   | "font"
