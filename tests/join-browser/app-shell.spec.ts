@@ -37,7 +37,7 @@ test("the Pages Service Worker controls the scoped Host-network URL", async ({ p
 
   const result = await page.evaluate(async () => {
     const response = await fetch(
-      "/Tabverse/join/__tabverse_proxy/http/intranet.local/probe",
+      "/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/probe",
     );
     return { status: response.status, body: await response.text() };
   });

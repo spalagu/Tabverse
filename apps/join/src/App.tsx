@@ -60,7 +60,7 @@ import {
   createProxyClient,
   installProxyFetchPatch,
   proxyUrlFor,
-  targetFromProxyUrl,
+  proxyRouteFromUrl,
   type ProxyClient,
 } from "@tabverse/remote-client/proxy-fetch";
 import { relayProxyResponse } from "./proxyStreamBridge";
@@ -187,7 +187,8 @@ function JoinApp() {
   );
 
   const resolveProxyUrl = useCallback(
-    (target: string) => proxyUrlFor(target, import.meta.env.BASE_URL),
+    (target: string, contextId?: string) =>
+      proxyUrlFor(target, import.meta.env.BASE_URL, contextId),
     [],
   );
 
@@ -252,10 +253,10 @@ function JoinApp() {
       if (port === undefined) return;
       void (async () => {
         try {
-          const target = targetFromProxyUrl(new URL(url));
-          if (target === null) throw new Error("not a proxy endpoint url");
-          await relayProxyResponse(port, target, (requestUrl, init) =>
-            proxy.requestViaProxy(requestUrl, init)
+          const route = proxyRouteFromUrl(new URL(url));
+          if (route === null) throw new Error("not a proxy endpoint url");
+          await relayProxyResponse(port, route.target, (requestUrl, init) =>
+            proxy.requestViaProxy(requestUrl, init, route.contextId ?? undefined)
           );
         } catch (error) {
           port.postMessage({

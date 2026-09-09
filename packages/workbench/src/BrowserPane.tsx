@@ -61,7 +61,8 @@ const attributeOf = (selector: string): string =>
 export function mirroredDocument(
   html: string,
   url: string,
-  resolveProxyUrl: (target: string) => string,
+  resolveProxyUrl: (target: string, contextId?: string) => string,
+  contextId?: string,
 ): string {
   const doc = new DOMParser().parseFromString(html, "text/html");
   for (const selector of URL_ATTRIBUTES) {
@@ -72,7 +73,7 @@ export function mirroredDocument(
       try {
         const target = new URL(value, url);
         if (target.protocol === "http:" || target.protocol === "https:") {
-          element.setAttribute(attribute, resolveProxyUrl(target.href));
+          element.setAttribute(attribute, resolveProxyUrl(target.href, contextId));
         }
       } catch {
         // Leave malformed and non-URL attribute values to the browser.
@@ -81,21 +82,24 @@ export function mirroredDocument(
   }
   for (const oldBase of doc.querySelectorAll("base")) oldBase.remove();
   const base = doc.createElement("base");
-  base.href = resolveProxyUrl(documentBase(url));
+  base.href = resolveProxyUrl(documentBase(url), contextId);
   doc.head.prepend(base);
   return `<!doctype html>${doc.documentElement.outerHTML}`;
 }
 
 export function BrowserPane({
   url,
+  contextId,
   fetchViaHost,
   resolveProxyUrl = directUrl,
 }: {
   /** The host browser tab's address. */
   url: string;
+  /** Stable routing key for this remote Browser tab; never an authority. */
+  contextId?: string;
   fetchViaHost: HostFetch;
   /** Maps a host URL to the runtime's same-origin proxy endpoint. */
-  resolveProxyUrl?: (target: string) => string;
+  resolveProxyUrl?: (target: string, contextId?: string) => string;
 }) {
   const [state, setState] = useState<PaneState>({ kind: "loading" });
 
@@ -120,7 +124,7 @@ export function BrowserPane({
         if (res.ok && html) {
           setState({
             kind: "mirrored",
-            doc: mirroredDocument(body, res.url || url, resolveProxyUrl),
+            doc: mirroredDocument(body, res.url || url, resolveProxyUrl, contextId),
           });
         } else {
           setState({ kind: "unmirrored", line: refusalOf(res), detail: null });
@@ -140,7 +144,7 @@ export function BrowserPane({
       alive = false;
       abort.abort();
     };
-  }, [url, fetchViaHost, resolveProxyUrl]);
+  }, [url, contextId, fetchViaHost, resolveProxyUrl]);
 
   if (state.kind === "loading") {
     return (

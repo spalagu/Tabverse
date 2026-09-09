@@ -39,7 +39,7 @@ export interface RemoteWorkbenchTabViewContext {
   };
   readonly browser: {
     readonly fetchViaHost: HostFetch;
-    readonly resolveProxyUrl: (target: string) => string;
+    readonly resolveProxyUrl: (target: string, contextId?: string) => string;
   };
 }
 
@@ -57,6 +57,7 @@ const REMOTE_TAB_RENDERERS = defineTabViewRenderers<
     tab.url ? (
       <BrowserPane
         url={tab.url}
+        contextId={tab.id}
         fetchViaHost={context.browser.fetchViaHost}
         resolveProxyUrl={context.browser.resolveProxyUrl}
       />

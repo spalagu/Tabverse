@@ -583,7 +583,7 @@ describe("join page renderer dispatch", () => {
     expect(frame).not.toBeNull();
     expect(frame!.getAttribute("srcdoc")).toContain("<h1>Intranet wiki</h1>");
     expect(frame!.getAttribute("srcdoc")).toContain(
-      '<base href="/__tabverse_proxy/http/intranet.local/wiki/">'
+      '<base href="/__tabverse_proxy/b1/http/intranet.local/wiki/">'
     );
     expect(host.querySelector(".app-share-content")).toBeNull();
 

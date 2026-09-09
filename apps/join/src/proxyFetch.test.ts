@@ -3,6 +3,7 @@ import {
   createProxyClient,
   installProxyFetchPatch,
   PROXY_PATH_PREFIX,
+  proxyRouteFromUrl,
   proxyUrlFor,
   targetFromProxyUrl,
   type HeaderPair,
@@ -95,8 +96,10 @@ describe("createProxyClient data streams", () => {
 
   it("follows a Host-resolved redirect on a fresh authorized stream", async () => {
     const opened: string[] = [];
-    const client = createProxyClient(async (_context, _method, url) => {
+    const contexts: string[] = [];
+    const client = createProxyClient(async (context, _method, url) => {
       opened.push(url);
+      contexts.push(context);
       const redirected = opened.length === 1;
       let read = false;
       return {
@@ -122,11 +125,16 @@ describe("createProxyClient data streams", () => {
         },
       };
     });
-    const response = await client.requestViaProxy("http://intranet.local/start");
+    const response = await client.requestViaProxy(
+      "http://intranet.local/start",
+      undefined,
+      "browser-tab-9",
+    );
     expect(opened).toEqual([
       "http://intranet.local/start",
       "http://intranet.local/login",
     ]);
+    expect(contexts).toEqual(["browser-tab-9", "browser-tab-9"]);
     expect(response.redirected).toBe(true);
     expect(response.url).toBe("http://intranet.local/login");
     expect(await response.text()).toBe("signed in");
@@ -180,6 +188,21 @@ describe("the endpoint path", () => {
     expect(
       targetFromProxyUrl(new URL(proxyUrl, "https://spalagu.github.io")),
     ).toBe("http://intranet.example/dir/page?q=1");
+  });
+
+  it("round-trips the Browser context as a routing key", () => {
+    const proxyUrl = proxyUrlFor(
+      "https://intranet.example/wiki",
+      "/Tabverse/join/",
+      "browser/tab 7",
+    );
+    expect(proxyUrl).toBe(
+      "/Tabverse/join/__tabverse_proxy/browser%2Ftab%207/https/intranet.example/wiki",
+    );
+    expect(proxyRouteFromUrl(new URL(proxyUrl, "https://spalagu.github.io"))).toEqual({
+      contextId: "browser/tab 7",
+      target: "https://intranet.example/wiki",
+    });
   });
 
   it("reads a target back out of a proxy path, and nothing out of other paths", () => {
