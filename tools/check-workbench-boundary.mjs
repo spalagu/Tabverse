@@ -39,6 +39,8 @@ const CORE_RUST_MANIFESTS = [
   "crates/tabverse-term/Cargo.toml",
   "crates/tabverse-remote/Cargo.toml",
   "crates/tabverse-network/Cargo.toml",
+  "crates/tabverse-state/Cargo.toml",
+  "crates/tabverse-runtime/Cargo.toml",
   "crates/tabverse-fs/Cargo.toml",
   "crates/tabverse-web/Cargo.toml",
   "crates/tabverse-agent-tools/Cargo.toml",
@@ -69,6 +71,19 @@ function checkImports(dir, rules, description, violations) {
 }
 
 const violations = [];
+
+// Runtime V3 local IPC must not regress to a localhost TCP service. The
+// helper protocol is local-socket bytes (UDS on Unix, Named Pipe on Windows).
+for (const sourcePath of [
+  "crates/tabverse-term/src/helper.rs",
+  "crates/tabverse-term/src/transport.rs",
+  "src-tauri/src/terminal_helper.rs",
+]) {
+  const source = readFileSync(join(ROOT, sourcePath), "utf8");
+  if (/\bTcp(?:Listener|Stream)\b|127\.0\.0\.1/.test(source)) {
+    violations.push(`${sourcePath} reintroduces localhost TCP for Runtime IPC`);
+  }
+}
 
 // The Workbench is shared product UI. Desktop/remote implementations adapt to
 // it; the Workbench must not learn about Tauri or a concrete runtime.

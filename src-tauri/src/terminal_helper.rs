@@ -3,7 +3,6 @@
 use std::{
     fs,
     io::{self, Read, Write},
-    net::SocketAddr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -29,7 +28,7 @@ const CAPABILITIES: u64 = 1;
 struct EndpointRecord {
     version: u8,
     pid: u32,
-    port: u16,
+    name: String,
 }
 
 pub struct TerminalHelper {
@@ -133,8 +132,7 @@ fn connect_record(
     if record.version != tabverse_term::protocol::VERSION {
         return Err("helper endpoint has a different protocol version".into());
     }
-    let endpoint = SocketAddr::from(([127, 0, 0, 1], record.port));
-    let (client, _, _) = HelperClient::connect(endpoint, token, rand::random(), on_event)
+    let (client, _, _) = HelperClient::connect(&record.name, token, rand::random(), on_event)
         .map_err(|e| e.to_string())?;
     Ok(client)
 }
@@ -190,7 +188,7 @@ fn run_helper(state: &Path, token: AuthToken, idle: Duration) -> io::Result<i32>
     let record = EndpointRecord {
         version: tabverse_term::protocol::VERSION,
         pid: std::process::id(),
-        port: server.endpoint().port(),
+        name: server.endpoint().to_string(),
     };
     write_endpoint(state, &record)?;
     while server.is_alive() {

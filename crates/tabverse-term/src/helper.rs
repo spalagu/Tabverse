@@ -1,8 +1,7 @@
-//! Authenticated loopback server and helper-owned session dispatch.
+//! Authenticated local IPC server and helper-owned session dispatch.
 
 use std::{
     io,
-    net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -11,6 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use interprocess::local_socket::{
+    prelude::*, GenericNamespaced, ListenerNonblockingMode, ListenerOptions,
+};
 use serde::{Deserialize, Serialize};
 use tabverse_runtime::RuntimeStore;
 
@@ -92,7 +94,7 @@ impl From<SessionMeta> for SessionWire {
 }
 
 pub struct HelperServer {
-    endpoint: SocketAddr,
+    endpoint: String,
     runtime: Arc<HelperRuntime>,
     shutdown: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
@@ -139,9 +141,12 @@ impl HelperServer {
         idle_timeout: Duration,
         runtime: Arc<HelperRuntime>,
     ) -> io::Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(true)?;
-        let endpoint = listener.local_addr()?;
+        let endpoint = format!("tabverse-terminal-{}", uuid::Uuid::new_v4());
+        let name = endpoint.as_str().to_ns_name::<GenericNamespaced>()?;
+        let listener = ListenerOptions::new()
+            .name(name)
+            .nonblocking(ListenerNonblockingMode::Both)
+            .create_sync()?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let clients = Arc::new(AtomicUsize::new(0));
@@ -157,10 +162,7 @@ impl HelperServer {
             .spawn(move || {
                 while !thread_shutdown.load(Ordering::Acquire) {
                     match listener.accept() {
-                        Ok((stream, peer)) => {
-                            if !peer.ip().is_loopback() {
-                                continue;
-                            }
+                        Ok(stream) => {
                             thread_clients.fetch_add(1, Ordering::AcqRel);
                             *thread_activity.lock().unwrap() = Instant::now();
                             let client_count = Arc::clone(&thread_clients);
@@ -205,8 +207,8 @@ impl HelperServer {
         })
     }
 
-    pub fn endpoint(&self) -> SocketAddr {
-        self.endpoint
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
     }
 
     pub fn runtime(&self) -> Arc<HelperRuntime> {
@@ -219,7 +221,9 @@ impl HelperServer {
 
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        let _ = TcpStream::connect(self.endpoint);
+        if let Ok(name) = self.endpoint.as_str().to_ns_name::<GenericNamespaced>() {
+            let _ = LocalSocketStream::connect(name);
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -247,7 +251,7 @@ fn session_sink(id: SessionId, generation: u64, sender: FrameSender) -> SessionS
 }
 
 fn handle_client(
-    stream: TcpStream,
+    stream: LocalSocketStream,
     token: AuthToken,
     helper_nonce: [u8; 32],
     capabilities: u64,
@@ -256,7 +260,7 @@ fn handle_client(
 ) {
     // Accepted sockets inherit O_NONBLOCK from the listener on macOS.
     let _ = stream.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_recv_timeout(Some(Duration::from_secs(5)));
     let mut framed = FramedStream::new(stream);
     if framed
         .authenticate_server(token, helper_nonce, capabilities)
@@ -400,7 +404,7 @@ mod tests {
 
     const TOKEN: AuthToken = AuthToken::new([0x44; 32]);
 
-    fn connect(endpoint: SocketAddr) -> FramedStream {
+    fn connect(endpoint: &str) -> FramedStream {
         let framed = FramedStream::connect(endpoint, Duration::from_secs(2)).unwrap();
         framed
             .set_read_timeout(Some(Duration::from_secs(2)))
