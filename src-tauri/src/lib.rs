@@ -436,51 +436,6 @@ fn fs_reveal(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn download_open(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<(), String> {
-    let asked = std::path::PathBuf::from(&path);
-    let known_now = state.downloads.lock().unwrap().contains(&asked);
-    let allowed = known_now || {
-        // Not seen this run: consult the persisted ledger, which is how a
-        // file downloaded before a restart stays openable. Exact string
-        // match against recorded paths — no normalization, no prefixes.
-        let recorded = tauri::async_runtime::spawn_blocking(move || {
-            app_state_store(&app)
-                .ok()
-                .and_then(|store| store.load_scope("downloads").ok().flatten())
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-        recorded
-            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
-            .and_then(|v| v.get("entries").cloned())
-            .and_then(|e| e.as_array().cloned())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .any(|e| e.get("path").and_then(|p| p.as_str()) == Some(path.as_str()))
-            })
-            .unwrap_or(false)
-    };
-    if !allowed {
-        return Err("not a recorded download".into());
-    }
-    if !asked.is_file() {
-        return Err("the file is no longer there".into());
-    }
-    #[cfg(target_os = "macos")]
-    let res = std::process::Command::new("open").arg(&asked).spawn();
-    #[cfg(target_os = "windows")]
-    let res = std::process::Command::new("explorer").arg(&asked).spawn();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let res = std::process::Command::new("xdg-open").arg(&asked).spawn();
-    res.map(|_| ()).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 async fn fs_read_range(
     state: State<'_, AppState>,
     path: String,
@@ -4327,7 +4282,6 @@ pub fn run() {
             fs_read,
             fs_write,
             fs_reveal,
-            download_open,
             fs_walk,
             fs_transfer,
             fs_grep,
