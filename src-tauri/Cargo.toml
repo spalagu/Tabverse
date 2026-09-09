@@ -34,6 +34,7 @@ tabverse-agent-tools = { path = "../crates/tabverse-agent-tools" }
 tabverse-remote = { path = "../crates/tabverse-remote" }
 tabverse-network = { path = "../crates/tabverse-network" }
 tabverse-state = { path = "../crates/tabverse-state" }
+tabverse-runtime = { path = "../crates/tabverse-runtime" }
 tabverse-fs = { version = "0.1.0", path = "../crates/tabverse-fs" }
 toml = "1"
 toml_edit = { version = "0.25", features = ["serde"] }

@@ -5762,6 +5762,7 @@ dependencies = [
  "tabverse-network",
  "tabverse-proto",
  "tabverse-remote",
+ "tabverse-runtime",
  "tabverse-state",
  "tabverse-term",
  "tauri",
@@ -5907,6 +5908,8 @@ dependencies = [
  "portable-pty",
  "serde",
  "serde_json",
+ "tabverse-runtime",
+ "tempfile",
  "uuid",
 ]
 

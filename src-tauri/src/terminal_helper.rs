@@ -175,7 +175,18 @@ pub fn from_args(mut args: impl Iterator<Item = String>) -> Option<i32> {
 
 fn run_helper(state: &Path, token: AuthToken, idle: Duration) -> io::Result<i32> {
     fs::create_dir_all(state)?;
-    let server = HelperServer::start(token, rand::random(), CAPABILITIES, idle)?;
+    let host_instance = format!("{}-{:016x}", std::process::id(), rand::random::<u64>());
+    let runtime_dir = state.parent().unwrap_or(state);
+    let store = tabverse_runtime::RuntimeStore::open(runtime_dir, &host_instance)
+        .map_err(io::Error::other)?;
+    let server = HelperServer::start_persistent(
+        token,
+        rand::random(),
+        CAPABILITIES,
+        idle,
+        store,
+        host_instance,
+    )?;
     let record = EndpointRecord {
         version: tabverse_term::protocol::VERSION,
         pid: std::process::id(),

@@ -12,6 +12,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use tabverse_runtime::RuntimeStore;
 
 use crate::{
     backend::{HelperRuntime, SessionMeta, SessionSink},
@@ -105,10 +106,42 @@ impl HelperServer {
         capabilities: u64,
         idle_timeout: Duration,
     ) -> io::Result<Self> {
+        Self::start_runtime(
+            token,
+            helper_nonce,
+            capabilities,
+            idle_timeout,
+            Arc::new(HelperRuntime::new()),
+        )
+    }
+
+    pub fn start_persistent(
+        token: AuthToken,
+        helper_nonce: [u8; 32],
+        capabilities: u64,
+        idle_timeout: Duration,
+        store: RuntimeStore,
+        host_instance: String,
+    ) -> io::Result<Self> {
+        Self::start_runtime(
+            token,
+            helper_nonce,
+            capabilities,
+            idle_timeout,
+            Arc::new(HelperRuntime::persistent(store, host_instance)),
+        )
+    }
+
+    fn start_runtime(
+        token: AuthToken,
+        helper_nonce: [u8; 32],
+        capabilities: u64,
+        idle_timeout: Duration,
+        runtime: Arc<HelperRuntime>,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let endpoint = listener.local_addr()?;
-        let runtime = Arc::new(HelperRuntime::new());
         let shutdown = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let clients = Arc::new(AtomicUsize::new(0));

@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
+use tabverse_runtime::{RuntimeRecord, RuntimeStore};
 
 use crate::{
     protocol::SessionId,
@@ -64,6 +65,8 @@ pub struct HelperRuntime {
     sessions: Arc<Mutex<HashMap<SessionId, Arc<RuntimeSession>>>>,
     /// Serializes spawn/terminate/kill-all ownership changes across clients.
     lifecycle: Mutex<()>,
+    store: Option<RuntimeStore>,
+    host_instance: String,
 }
 
 impl Default for HelperRuntime {
@@ -78,6 +81,18 @@ impl HelperRuntime {
             terms: Arc::new(SessionManager::new()),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             lifecycle: Mutex::new(()),
+            store: None,
+            host_instance: "ephemeral".into(),
+        }
+    }
+
+    pub fn persistent(store: RuntimeStore, host_instance: String) -> Self {
+        Self {
+            terms: Arc::new(SessionManager::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            lifecycle: Mutex::new(()),
+            store: Some(store),
+            host_instance,
         }
     }
 
@@ -106,6 +121,7 @@ impl HelperRuntime {
         let data_state = Arc::clone(&state);
         let exit_state = Arc::clone(&state);
         let exit_sessions = Arc::clone(&self.sessions);
+        let exit_store = self.store.clone();
         let exit_id = id;
         let internal_id = self.terms.create(
             opts,
@@ -129,13 +145,20 @@ impl HelperRuntime {
                     (sink.on_exit)(code);
                 }
                 exit_sessions.lock().unwrap().remove(&exit_id);
+                if let Some(store) = &exit_store {
+                    let key = exit_id.to_hex();
+                    if let Ok(Some(mut record)) = store.get(&key) {
+                        record.state = "exited".into();
+                        let _ = store.put(&record);
+                    }
+                }
             }),
         )?;
         self.sessions.lock().unwrap().insert(
             id,
             Arc::new(RuntimeSession {
                 internal_id,
-                cwd,
+                cwd: cwd.clone(),
                 generation: AtomicU64::new(1),
                 state: Arc::clone(&state),
             }),
@@ -144,6 +167,8 @@ impl HelperRuntime {
         // is visible to its callback. Do not reinsert an already-dead session.
         if state.lock().unwrap().exited.is_some() {
             self.sessions.lock().unwrap().remove(&id);
+        } else {
+            self.persist(id, 1, "attached", cwd.as_deref())?;
         }
         Ok(id)
     }
@@ -170,7 +195,9 @@ impl HelperRuntime {
         let session = self.session(id)?;
         self.check_generation(&session, generation)?;
         session.state.lock().unwrap().sink = None;
-        Ok(session.generation.fetch_add(1, Ordering::AcqRel) + 1)
+        let next = session.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.persist(id, next, "detached", session.cwd.as_deref())?;
+        Ok(next)
     }
 
     pub fn begin_attach(&self, id: SessionId) -> Result<u64> {
@@ -180,7 +207,9 @@ impl HelperRuntime {
         // loses this reservation must not invalidate the winner.
         state.replay.begin_attach()?;
         state.sink = None;
-        Ok(session.generation.fetch_add(1, Ordering::AcqRel) + 1)
+        let next = session.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.persist(id, next, "attaching", session.cwd.as_deref())?;
+        Ok(next)
     }
 
     /// Send the frozen snapshot and attach delta while holding the session
@@ -199,6 +228,7 @@ impl HelperRuntime {
         let batch = state.replay.finish_attach()?;
         deliver_replay(&batch)?;
         state.sink = Some(sink);
+        self.persist(id, generation, "attached", session.cwd.as_deref())?;
         Ok(batch)
     }
 
@@ -207,20 +237,22 @@ impl HelperRuntime {
         let session = self.session(id)?;
         self.check_generation(&session, generation)?;
         self.sessions.lock().unwrap().remove(&id);
-        self.terms.kill(&session.internal_id)
+        self.terms.kill(&session.internal_id)?;
+        self.persist(id, generation, "stopped", session.cwd.as_deref())
     }
 
     pub fn kill_all(&self) {
         let _lifecycle = self.lifecycle.lock().unwrap();
-        let sessions: Vec<Arc<RuntimeSession>> = self
-            .sessions
-            .lock()
-            .unwrap()
-            .drain()
-            .map(|(_, session)| session)
-            .collect();
-        for session in sessions {
+        let sessions: Vec<(SessionId, Arc<RuntimeSession>)> =
+            self.sessions.lock().unwrap().drain().collect();
+        for (id, session) in sessions {
             let _ = self.terms.kill(&session.internal_id);
+            let _ = self.persist(
+                id,
+                session.generation.load(Ordering::Acquire),
+                "stopped",
+                session.cwd.as_deref(),
+            );
         }
     }
 
@@ -266,6 +298,26 @@ impl HelperRuntime {
             ));
         }
         Ok(())
+    }
+
+    fn persist(
+        &self,
+        id: SessionId,
+        generation: u64,
+        state: &str,
+        cwd: Option<&str>,
+    ) -> Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        store.put(&RuntimeRecord {
+            id: id.to_hex(),
+            kind: "terminal".into(),
+            generation,
+            state: state.into(),
+            host_instance: self.host_instance.clone(),
+            checkpoint_json: cwd.map(|value| serde_json::json!({ "cwd": value }).to_string()),
+        })
     }
 }
 
@@ -364,7 +416,7 @@ mod tests {
     #[test]
     fn stale_generation_cannot_write_or_detach() {
         let runtime = HelperRuntime::new();
-        let (sink, _) = sink();
+        let (initial_sink, _) = sink();
         let id = runtime
             .spawn(
                 SpawnOpts {
@@ -374,7 +426,7 @@ mod tests {
                     shell_integration: false,
                     ..Default::default()
                 },
-                sink,
+                initial_sink,
             )
             .unwrap();
         let current = runtime.detach(id, 1).unwrap();
@@ -406,9 +458,9 @@ mod tests {
         let winner = runtime.begin_attach(id).unwrap();
         assert!(runtime.begin_attach(id).is_err());
         assert_eq!(runtime.list()[0].generation, winner);
-        let (sink, _) = sink();
+        let (attached_sink, _) = sink();
         runtime
-            .complete_attach(id, winner, sink, |_| Ok(()))
+            .complete_attach(id, winner, attached_sink, |_| Ok(()))
             .unwrap();
         runtime.terminate(id, winner).unwrap();
         assert!(winner > detached);
@@ -440,5 +492,42 @@ mod tests {
             runtime.list().is_empty(),
             "exited sessions must not pin helper idle"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_helper_owns_terminal_runtime_lifecycle() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = RuntimeStore::open(temp.path(), "helper-a").unwrap();
+        let runtime = HelperRuntime::persistent(store.clone(), "helper-a".into());
+        let (initial_sink, _) = sink();
+        let id = runtime
+            .spawn(
+                SpawnOpts {
+                    shell: Some("/bin/sh".into()),
+                    cwd: Some(temp.path().to_string_lossy().into_owned()),
+                    shell_integration: false,
+                    ..Default::default()
+                },
+                initial_sink,
+            )
+            .unwrap();
+        let key = id.to_hex();
+        assert_eq!(store.get(&key).unwrap().unwrap().state, "attached");
+
+        let detached = runtime.detach(id, 1).unwrap();
+        let record = store.get(&key).unwrap().unwrap();
+        assert_eq!(record.state, "detached");
+        assert_eq!(record.generation, detached);
+
+        let attaching = runtime.begin_attach(id).unwrap();
+        let (attached_sink, _) = sink();
+        runtime
+            .complete_attach(id, attaching, attached_sink, |_| Ok(()))
+            .unwrap();
+        assert_eq!(store.get(&key).unwrap().unwrap().state, "attached");
+
+        runtime.terminate(id, attaching).unwrap();
+        assert_eq!(store.get(&key).unwrap().unwrap().state, "stopped");
     }
 }
