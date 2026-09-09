@@ -13,7 +13,7 @@ use tabverse_remote::source::terminal::TerminalSource;
 use tabverse_remote::{RemoteHub, ShareOpts, SourceRegistry, ViewerInfo};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::agent_bridge;
+use crate::agent_client;
 use crate::app_share::AgentCmd;
 use crate::AppState;
 
@@ -293,7 +293,7 @@ const APP_SHARE_TAB_ID: &str = "app";
 pub async fn app_share_start(
     app: AppHandle,
     state: State<'_, AppState>,
-    registry: State<'_, Arc<agent_bridge::AgentRegistry>>,
+    registry: State<'_, Arc<agent_client::AgentClientRegistry>>,
     ttl_secs: Option<u64>,
     access: String,
 ) -> Result<ShareStarted, String> {

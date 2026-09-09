@@ -38,6 +38,7 @@ pub enum Kind {
     Event = 8,
     Ack = 9,
     Error = 10,
+    Detach = 11,
 }
 
 impl TryFrom<u8> for Kind {
@@ -55,6 +56,7 @@ impl TryFrom<u8> for Kind {
             8 => Ok(Self::Event),
             9 => Ok(Self::Ack),
             10 => Ok(Self::Error),
+            11 => Ok(Self::Detach),
             other => Err(ProtocolError::UnknownKind(other)),
         }
     }
@@ -427,6 +429,7 @@ mod tests {
                     Err(error) => panic!("accept failed: {error}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream.authenticate_server(token, [0x41; 32]).unwrap();
             let sender = stream.sender().unwrap();
             std::thread::spawn(move || {

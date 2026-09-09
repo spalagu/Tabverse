@@ -112,6 +112,10 @@ function createMockAgent(opts: { cwd: string; sessionId: string }): Promise<Agen
       closed = true;
       cbs.clear();
     },
+    async detach() {
+      closed = true;
+      cbs.clear();
+    },
     onEvent(cb) {
       cbs.add(cb);
       if (backlog.length > 0) backlog.splice(0, backlog.length).forEach((e) => cb(e));

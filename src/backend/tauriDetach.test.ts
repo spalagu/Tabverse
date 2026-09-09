@@ -62,3 +62,26 @@ describe("detaching a helper-owned terminal", () => {
     expect(calls).not.toHaveBeenCalledWith("term_create", expect.anything());
   });
 });
+
+describe("detaching a supervisor-owned agent", () => {
+  beforeEach(() => {
+    calls.mockReset();
+    calls.mockImplementation(async (command: string) =>
+      command === "agent_start" ? "agent-handle" : undefined
+    );
+  });
+
+  it("uses detach for GUI lifetime and close for logical-tab lifetime", async () => {
+    const detached = await tauriBackend.createAgent({ cwd: "/work", sessionId: "tab-a" });
+    await detached.detach();
+    const closed = await tauriBackend.createAgent({ cwd: "/work", sessionId: "tab-b" });
+    await closed.close();
+
+    expect(calls.mock.calls.map(([command]) => command)).toEqual([
+      "agent_start",
+      "agent_detach",
+      "agent_start",
+      "agent_close",
+    ]);
+  });
+});

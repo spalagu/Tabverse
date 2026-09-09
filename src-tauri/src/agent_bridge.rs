@@ -67,6 +67,7 @@ impl AgentBroadcast for tabverse_remote::Share {
 }
 
 /// The slot a session's broadcast target lives in while it is being shared.
+#[cfg(test)]
 type ShareSlot = Arc<Mutex<Option<Arc<dyn AgentBroadcast>>>>;
 
 struct TeeSink {
@@ -75,6 +76,7 @@ struct TeeSink {
     /// Set while this session is being shared. Held behind a lock the sharing
     /// command also holds, so a share that starts mid-run is picked up on the
     /// very next event rather than at the next turn.
+    #[cfg(test)]
     share: ShareSlot,
 }
 
@@ -89,9 +91,12 @@ impl EventSink for TeeSink {
         // but not the disk would come back missing after a restart; one that
         // reached the screen but not the viewers would leave them quietly
         // behind. Neither divergence is possible if they are written together.
-        if let Some(share) = self.share.lock().unwrap().as_ref() {
-            if let Ok(json) = serde_json::to_value(&event) {
-                share.agent_event(json);
+        #[cfg(test)]
+        {
+            if let Some(share) = self.share.lock().unwrap().as_ref() {
+                if let Ok(json) = serde_json::to_value(&event) {
+                    share.agent_event(json);
+                }
             }
         }
         // A closed channel means the tab went away; the session is being torn
@@ -263,6 +268,7 @@ struct SessionHandle {
     gate: Arc<UiGate>,
     /// The share this session is being broadcast to, if any. Shared with the
     /// sink so attaching one takes effect immediately.
+    #[cfg(test)]
     share: ShareSlot,
     /// Where this session's events are written, which is also where a viewer's
     /// catch-up is read from.
@@ -320,11 +326,13 @@ impl AgentRegistry {
         let (prompt_tx, prompt_rx): (Sender<String>, Receiver<String>) = channel();
         let gate = Arc::new(UiGate::new());
         let cancel = CancelToken::new();
+        #[cfg(test)]
         let share_slot: ShareSlot = Arc::new(Mutex::new(None));
         let event_target = Arc::new(Mutex::new(events));
 
         let cache_session_id = session_id.clone();
         let thread_gate = Arc::clone(&gate);
+        #[cfg(test)]
         let thread_share = Arc::clone(&share_slot);
         let thread_cancel = cancel.clone();
         let thread_log = log_path.clone();
@@ -395,6 +403,7 @@ impl AgentRegistry {
                         target(event);
                     }),
                     log: thread_log.and_then(|p| SessionLog::open(p).ok()),
+                    #[cfg(test)]
                     share: thread_share,
                 };
                 pump_prompts(&mut session, &mut sink, &prompt_rx, &thread_cancel, resumed);
@@ -408,6 +417,7 @@ impl AgentRegistry {
                 prompts: prompt_tx,
                 cancel,
                 gate,
+                #[cfg(test)]
                 share: share_slot,
                 log_path,
                 event_target,
@@ -442,6 +452,14 @@ impl AgentRegistry {
         self.sessions.lock().unwrap().is_empty()
     }
 
+    pub fn session_id(&self, handle: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(handle)
+            .map(|session| session.session_id.clone())
+    }
+
     pub fn prompt(&self, id: &str, text: String) -> Result<()> {
         let sessions = self.sessions.lock().unwrap();
         let handle = sessions.get(id).ok_or_else(|| anyhow!("no session {id}"))?;
@@ -456,17 +474,6 @@ impl AgentRegistry {
         let handle = sessions.get(id).ok_or_else(|| anyhow!("no session {id}"))?;
         stop_session(&handle.cancel, &handle.gate);
         Ok(())
-    }
-
-    /// The handle id running a tab's session, if one is — what the app-level
-    /// share's routing needs (its active tab is a tab id, the registry's own
-    /// keys are handle ids).
-    pub fn handle_for_session(&self, session_id: &str) -> Option<String> {
-        let sessions = self.sessions.lock().unwrap();
-        sessions
-            .iter()
-            .find(|(_, h)| h.session_id == session_id)
-            .map(|(id, _)| id.clone())
     }
 
     pub fn answer(
@@ -493,6 +500,7 @@ impl AgentRegistry {
     /// has to be able to reach back into this registry, and because getting
     /// one of them wrong — an approval handler that always claims success,
     /// say — would be invisible from outside.
+    #[cfg(test)]
     pub fn agent_hooks(&self, id: &str) -> Option<tabverse_remote::source::agent::AgentHooks> {
         let sessions = self.sessions.lock().unwrap();
         let handle = sessions.get(id)?;

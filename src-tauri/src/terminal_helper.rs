@@ -121,6 +121,19 @@ impl TerminalHelper {
             .filter(|client| client.is_alive())
             .cloned()
     }
+
+    /// Agent endpoint published by the same windowless Supervisor process.
+    pub fn agent_endpoint(&self, app: &AppHandle) -> Result<String, String> {
+        let state = crate::state_dir(app)?;
+        let record: EndpointRecord = serde_json::from_slice(
+            &fs::read(state.join(ENDPOINT_FILE))
+                .map_err(|e| format!("read runtime endpoint: {e}"))?,
+        )
+        .map_err(|e| format!("parse runtime endpoint: {e}"))?;
+        record
+            .agent_name
+            .ok_or_else(|| "runtime endpoint predates Agent IPC; restart Tabverse".to_string())
+    }
 }
 
 fn connect_record(
@@ -189,8 +202,12 @@ fn run_helper(
     let store = tabverse_runtime::RuntimeStore::open(runtime_dir, &host_instance)
         .map_err(io::Error::other)?;
     let heartbeat_store = store.clone();
-    let agent =
-        crate::agent_supervisor::AgentSupervisor::start(agent_token, Some(state.to_path_buf()))?;
+    let agent = crate::agent_supervisor::AgentSupervisor::start_persistent(
+        agent_token,
+        Some(state.to_path_buf()),
+        store.clone(),
+        host_instance.clone(),
+    )?;
     let server = HelperServer::start_persistent_guarded(
         token,
         rand::random(),

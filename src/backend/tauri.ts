@@ -46,6 +46,9 @@ async function createAgent(opts: { cwd: string; sessionId: string }): Promise<Ag
     async close() {
       await invoke("agent_close", { id });
     },
+    async detach() {
+      await invoke("agent_detach", { id });
+    },
     onEvent(cb) {
       cbs.add(cb);
       if (backlog.length > 0) {

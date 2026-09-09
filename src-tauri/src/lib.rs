@@ -1,4 +1,5 @@
 mod agent_bridge;
+mod agent_client;
 mod agent_http;
 mod agent_login;
 mod agent_supervisor;
@@ -3945,7 +3946,7 @@ fn percent_decode(s: &str) -> String {
 fn agent_start(
     app: AppHandle,
     state: State<'_, AppState>,
-    registry: State<'_, Arc<agent_bridge::AgentRegistry>>,
+    registry: State<'_, Arc<agent_client::AgentClientRegistry>>,
     session_id: String,
     cwd: String,
     on_event: tauri::ipc::Channel<tabverse_agent::event::SessionEvent>,
@@ -3953,6 +3954,12 @@ fn agent_start(
     // A tab whose state directory cannot be resolved still gets to run; it
     // simply has no memory across restarts, which beats refusing to start.
     let log_dir = state_dir(&app).ok();
+    state.helper.ensure(&app, helper_callback(&state, &app))?;
+    let endpoint = state.helper.agent_endpoint(&app)?;
+    let token = tabverse_runtime::agent_ipc::AuthToken::new(credentials::helper_token()?);
+    registry
+        .connect(&endpoint, token)
+        .map_err(|e| format!("{e:#}"))?;
     let events: agent_bridge::AgentEventCallback = Arc::new(move |event| {
         let _ = on_event.send(event);
     });
@@ -3975,7 +3982,7 @@ fn agent_start(
 
 #[tauri::command]
 fn agent_prompt(
-    registry: State<'_, Arc<agent_bridge::AgentRegistry>>,
+    registry: State<'_, Arc<agent_client::AgentClientRegistry>>,
     id: String,
     text: String,
 ) -> Result<(), String> {
@@ -3984,7 +3991,7 @@ fn agent_prompt(
 
 #[tauri::command]
 fn agent_cancel(
-    registry: State<'_, Arc<agent_bridge::AgentRegistry>>,
+    registry: State<'_, Arc<agent_client::AgentClientRegistry>>,
     id: String,
 ) -> Result<(), String> {
     registry.cancel(&id).map_err(|e| format!("{e:#}"))
@@ -3994,7 +4001,7 @@ fn agent_cancel(
 /// call — a stale click, or a request that already timed out.
 #[tauri::command]
 fn agent_answer(
-    registry: State<'_, Arc<agent_bridge::AgentRegistry>>,
+    registry: State<'_, Arc<agent_client::AgentClientRegistry>>,
     id: String,
     call_id: String,
     allow: bool,
@@ -4008,23 +4015,45 @@ fn agent_answer(
 #[tauri::command]
 fn agent_close(
     state: State<'_, AppState>,
-    registry: State<'_, Arc<agent_bridge::AgentRegistry>>,
+    registry: State<'_, Arc<agent_client::AgentClientRegistry>>,
     id: String,
 ) {
     close_agent_tab(
         &state.hub,
         &state.sources,
         &state.share_glue,
-        &registry,
+        registry.inner().as_ref(),
         &id,
     );
+}
+
+#[tauri::command]
+fn agent_detach(registry: State<'_, Arc<agent_client::AgentClientRegistry>>, id: String) {
+    registry.detach(&id);
+}
+
+trait AgentCloser {
+    fn close_agent(&self, id: &str);
+}
+
+impl AgentCloser for agent_client::AgentClientRegistry {
+    fn close_agent(&self, id: &str) {
+        self.close(id);
+    }
+}
+
+#[cfg(test)]
+impl AgentCloser for agent_bridge::AgentRegistry {
+    fn close_agent(&self, id: &str) {
+        self.close(id);
+    }
 }
 
 fn close_agent_tab(
     hub: &Arc<RemoteHub>,
     sources: &SourceRegistry,
     glue: &share_commands::ShareGlue,
-    registry: &agent_bridge::AgentRegistry,
+    registry: &impl AgentCloser,
     id: &str,
 ) {
     // The lookup is its own statement so its lock is released before
@@ -4033,7 +4062,7 @@ fn close_agent_tab(
     if let Some(tab_id) = tab_id {
         share_commands::tab_runtime_died(hub, sources, glue, &tab_id);
     }
-    registry.close(id);
+    registry.close_agent(id);
 }
 
 pub fn run() {
@@ -4154,7 +4183,7 @@ pub fn run() {
         // Holds whatever the system asked us to open before the interface
         // existed to receive it (system_open.rs).
         .manage(system_open::Pending::default())
-        .manage(std::sync::Arc::new(agent_bridge::AgentRegistry::new()))
+        .manage(std::sync::Arc::new(agent_client::AgentClientRegistry::new()))
         .setup(|app| {
             {
                 let main_cfg = app
@@ -4245,6 +4274,7 @@ pub fn run() {
             agent_cancel,
             agent_answer,
             agent_close,
+            agent_detach,
             agent_login_start,
             agent_login_poll,
             agent_login_status,
