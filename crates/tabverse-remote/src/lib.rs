@@ -49,6 +49,9 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// discard it, leaving the viewer without the reason for the disconnect; a
 /// peer that never acks must not pin the host task forever either.
 const END_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per authenticated connection. Extra streams beyond this wait at the QUIC
+/// accept boundary; control traffic continues on its independent stream.
+pub const MAX_CONCURRENT_DATA_STREAMS: usize = 16;
 
 // ---------------------------------------------------------------- framing --
 
@@ -778,6 +781,7 @@ impl RemoteHub {
                 return std::future::pending::<Result<()>>().await;
             }
             let gateway = gateway.map(|gateway| gateway.isolated());
+            let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DATA_STREAMS));
             loop {
                 let incoming = bridge::data_stream::accept_data_stream(&conn).await?;
                 let Some(access) = share.viewer_access(viewer_id) else {
@@ -793,7 +797,13 @@ impl RemoteHub {
                         let Some(gateway) = gateway.clone() else {
                             continue;
                         };
+                        let permit = permits
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .context("data-stream concurrency gate closed")?;
                         tokio::spawn(async move {
+                            let _permit = permit;
                             if let Err(error) = incoming.serve(gateway).await {
                                 eprintln!("[remote] HTTP data stream failed: {error:#}");
                             }
@@ -803,7 +813,13 @@ impl RemoteHub {
                         let Some(source) = file_source.clone() else {
                             continue;
                         };
+                        let permit = permits
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .context("data-stream concurrency gate closed")?;
                         tokio::spawn(async move {
+                            let _permit = permit;
                             if let Err(error) = incoming.serve_file(source).await {
                                 eprintln!("[remote] file data stream failed: {error:#}");
                             }

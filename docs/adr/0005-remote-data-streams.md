@@ -23,6 +23,8 @@ Host 在每条流开始 I/O 前重新读取当前 App share 和 viewer 权限。
 ## Isolation
 Large data responses do not travel through the control channel and therefore do not occupy its JSON frame queue. QUIC stream-level multiplexing provides backpressure and isolates independent streams on the same encrypted connection.
 
+每条认证连接使用 16 个 permit 的 semaphore 限制并行 Host 数据任务；流级 backpressure 负责排队，控制流不进入该 semaphore。
+
 Authentication remains connection-scoped: data streams are accepted only after the connection's control stream has successfully authenticated a Share ticket. The data-stream bridge does not create a second authentication protocol.
 
 ## Test requirement
