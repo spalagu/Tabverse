@@ -147,7 +147,7 @@ pub fn capture_script() -> String {
     for (var i = 0; i < candidates.length; i++) {{
       if (candidates[i].value) {{ user = candidates[i].value; break; }}
     }}
-    return {{ host: location.hostname, username: user, password: pw.value }};
+    return {{ host: location.origin, username: user, password: pw.value }};
   }}
   document.addEventListener("submit", function(e) {{
     if (!e.isTrusted) return;
@@ -184,7 +184,7 @@ pub fn capture_script() -> String {
   window.addEventListener("popstate", offer);
   function probe() {{
     if (document.querySelector('input[type="password"]')) {{
-      report("pw-form?t=" + TOKEN + "&h=" + encodeURIComponent(location.hostname));
+      report("pw-form?t=" + TOKEN + "&h=" + encodeURIComponent(location.origin));
       return true;
     }}
     return false;
@@ -239,8 +239,35 @@ pub fn pw_delete(host: String, username: String) -> Result<(), String> {
     crate::credentials::delete_web(&host, &username)
 }
 
+fn fill_script(cred: &crate::credentials::WebCredential) -> Result<String, String> {
+    // serde_json string literals are exactly JS string literals, escaping
+    // included — the credential rides as data, never as code.
+    let host_js = serde_json::to_string(&cred.host).map_err(|e| e.to_string())?;
+    let user_js = serde_json::to_string(&cred.username).map_err(|e| e.to_string())?;
+    let pass_js = serde_json::to_string(&cred.password).map_err(|e| e.to_string())?;
+    Ok(format!(
+        r#"(function() {{
+  if (location.origin !== {host_js}) return;
+  function put(el, value) {{
+    if (!el) return;
+    el.focus();
+    el.value = value;
+    el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+    el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+  }}
+  var pw = document.querySelector('input[type="password"]');
+  if (!pw) return;
+  var form = pw.form || document;
+  var user = form.querySelector(
+    'input[type="text"],input[type="email"],input:not([type])');
+  put(user, {user_js});
+  put(pw, {pass_js});
+}})();"#
+    ))
+}
+
 /// Fill the picked credential into the page. The injected script re-checks
-/// the hostname before touching the DOM: the page may have navigated since
+/// the origin before touching the DOM: the page may have navigated since
 /// the offer, and a mismatch must fail closed.
 #[tauri::command]
 pub fn pw_fill(
@@ -267,30 +294,7 @@ pub fn pw_fill(
     let wv = window
         .get_webview(&label)
         .ok_or_else(|| "webview is gone".to_string())?;
-    // serde_json string literals are exactly JS string literals, escaping
-    // included — the credential rides as data, never as code.
-    let host_js = serde_json::to_string(&cred.host).map_err(|e| e.to_string())?;
-    let user_js = serde_json::to_string(&cred.username).map_err(|e| e.to_string())?;
-    let pass_js = serde_json::to_string(&cred.password).map_err(|e| e.to_string())?;
-    let script = format!(
-        r#"(function() {{
-  if (location.hostname !== {host_js}) return;
-  function put(el, value) {{
-    if (!el) return;
-    el.focus();
-    el.value = value;
-    el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-    el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-  }}
-  var pw = document.querySelector('input[type="password"]');
-  if (!pw) return;
-  var form = pw.form || document;
-  var user = form.querySelector(
-    'input[type="text"],input[type="email"],input:not([type])');
-  put(user, {user_js});
-  put(pw, {pass_js});
-}})();"#
-    );
+    let script = fill_script(&cred)?;
     wv.eval(&script).map_err(|e| e.to_string())
 }
 
@@ -322,5 +326,23 @@ mod tests {
             pending_take("tab-b", "example.test", "alice").as_deref(),
             Some("alice-from-b")
         );
+    }
+
+    #[test]
+    fn browser_bridge_uses_full_origin_not_hostname() {
+        let capture = capture_script();
+        assert!(capture.contains("host: location.origin"));
+        assert!(capture.contains("encodeURIComponent(location.origin)"));
+        assert!(!capture.contains("location.hostname"));
+
+        let credential = crate::credentials::WebCredential {
+            host: "https://example.test:8443".into(),
+            username: "a\"; globalThis.pwned = true; //".into(),
+            password: "p\"; globalThis.pwned = true; //".into(),
+        };
+        let fill = fill_script(&credential).unwrap();
+        assert!(fill.contains("location.origin !== \"https://example.test:8443\""));
+        assert!(fill.contains(r#"put(user, "a\"; globalThis.pwned = true; //")"#));
+        assert!(fill.contains(r#"put(pw, "p\"; globalThis.pwned = true; //")"#));
     }
 }
