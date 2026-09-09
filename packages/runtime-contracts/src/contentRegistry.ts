@@ -18,6 +18,15 @@ export type ContentHandlerId =
   | "table"
   | "text";
 
+export interface ContentAssociationDefinition {
+  readonly name: string;
+  readonly description: string;
+  readonly role: "Editor" | "Viewer" | "Shell";
+  readonly mimeType?: string;
+  readonly contentTypes?: readonly string[];
+  readonly rank: "Default" | "Alternate" | "Owner" | "None";
+}
+
 export interface ContentTypeDefinition {
   readonly id: string;
   readonly extensions: readonly string[];
@@ -26,6 +35,8 @@ export interface ContentTypeDefinition {
   readonly handler: ContentHandlerId;
   readonly view: boolean;
   readonly edit: boolean;
+  /** Installer and default-app metadata generated into the Tauri bundle. */
+  readonly association: ContentAssociationDefinition;
 }
 
 interface ContentCatalogSource {
@@ -46,6 +57,9 @@ export class ContentRegistry {
     const byExtension = new Map<string, ContentTypeDefinition>();
     for (const type of source.types) {
       if (ids.has(type.id)) throw new Error(`Duplicate content type: ${type.id}`);
+      if (!type.association?.name || !type.association.description) {
+        throw new Error(`Content type ${type.id} has no association metadata`);
+      }
       ids.add(type.id);
       for (const rawExtension of type.extensions) {
         const extension = normalizeExtension(rawExtension);

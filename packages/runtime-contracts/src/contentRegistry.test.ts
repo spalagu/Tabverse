@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { CONTENT_REGISTRY, ContentRegistry } from "./contentRegistry";
 
 describe("ContentRegistry", () => {
+  const association = {
+    name: "Test",
+    description: "Test content",
+    role: "Editor" as const,
+    rank: "Alternate" as const,
+  };
   it.each([
     ["README.md", "markdown", "markdown"],
     ["/work/config.YAML", "yaml", "structured-text"],
@@ -35,8 +41,22 @@ describe("ContentRegistry", () => {
         new ContentRegistry({
           schemaVersion: 1,
           types: [
-            { id: "a", extensions: ["x"], handler: "text", view: true, edit: true },
-            { id: "b", extensions: ["X"], handler: "code", view: true, edit: true },
+            {
+              id: "a",
+              extensions: ["x"],
+              handler: "text",
+              view: true,
+              edit: true,
+              association,
+            },
+            {
+              id: "b",
+              extensions: ["X"],
+              handler: "code",
+              view: true,
+              edit: true,
+              association,
+            },
           ],
         }),
     ).toThrow("belongs to both a and b");

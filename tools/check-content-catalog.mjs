@@ -32,6 +32,21 @@ for (const type of catalog.types ?? []) {
   if (type.view !== true) {
     violations.push(`${type.id} is associated but does not declare a useful view capability`);
   }
+  const association = type.association;
+  if (
+    association === null ||
+    typeof association !== "object" ||
+    typeof association.name !== "string" ||
+    association.name.length === 0 ||
+    typeof association.description !== "string" ||
+    association.description.length === 0 ||
+    !["Editor", "Viewer", "Shell"].includes(association.role) ||
+    !["Default", "Alternate", "Owner", "None"].includes(association.rank) ||
+    (association.mimeType !== undefined && typeof association.mimeType !== "string") ||
+    (association.contentTypes !== undefined && !Array.isArray(association.contentTypes))
+  ) {
+    violations.push(`${type.id} has invalid association metadata`);
+  }
   if (!Array.isArray(type.extensions) || type.extensions.length === 0) {
     violations.push(`${type.id} has no extensions`);
     continue;

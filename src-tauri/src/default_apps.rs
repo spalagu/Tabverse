@@ -12,9 +12,9 @@
 //! Finder's Get Info -- and they will, because that is where the rest of the
 //! world does it.
 //!
-//! **What gets claimed comes from the bundle config, never from a list in this
-//! file.** `bundle.fileAssociations` in tauri.conf.json is what the installer
-//! writes into the app's declarations, and only a declared type can be granted.
+//! **What gets claimed comes from the content catalog, never from a list in
+//! this file.** `resources/content-types.json` generates the installer's
+//! `bundle.fileAssociations`, and only a declared type can be granted.
 //! A second list here would drift from it, and the drift would be silent: the
 //! set would appear to succeed and the read-back would show someone else still
 //! holding the type. It reaches this file through `build.rs`, not through
@@ -47,7 +47,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime};
 
-// The claimed file types, baked in from tauri.conf.json at build time.
+// The claimed file types, baked in from resources/content-types.json at build time.
 //
 // Not read from `app.config()`: Tauri's code generation drops file
 // associations from the embedded config, so asking the running app what it
