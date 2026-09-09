@@ -5,7 +5,9 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 pub const MAX_STATE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SCOPE_LEN: usize = 120;
-const SCHEMA_VERSION: i64 = 1;
+const INITIAL_SCHEMA_VERSION: i64 = 1;
+const WORKSPACE_PROJECTION_VERSION: i64 = 2;
+const DEFAULT_WORKSPACE_ID: &str = "main";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceRecord {
@@ -13,6 +15,7 @@ pub struct WorkspaceRecord {
     pub title: String,
     pub created_at: i64,
     pub updated_at: i64,
+    pub state_json: String,
     pub tabs: Vec<TabRecord>,
 }
 
@@ -53,11 +56,17 @@ impl AppStateStore {
                 MAX_STATE_BYTES / (1024 * 1024)
             ));
         }
-        self.connection()?.execute(
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "INSERT INTO state_scopes(scope, json, updated_at) VALUES (?1, ?2, unixepoch())\
              ON CONFLICT(scope) DO UPDATE SET json=excluded.json, updated_at=excluded.updated_at",
             params![scope, json],
         )?;
+        if scope == "session" {
+            project_session(&transaction, json)?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -75,8 +84,13 @@ impl AppStateStore {
 
     pub fn delete_scope(&self, scope: &str) -> Result<()> {
         validate_scope(scope)?;
-        self.connection()?
-            .execute("DELETE FROM state_scopes WHERE scope=?1", [scope])?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM state_scopes WHERE scope=?1", [scope])?;
+        if scope == "session" {
+            transaction.execute("DELETE FROM workspaces WHERE id=?1", [DEFAULT_WORKSPACE_ID])?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -98,13 +112,14 @@ impl AppStateStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         transaction.execute(
-            "INSERT INTO workspaces(id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)\
-             ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at",
+            "INSERT INTO workspaces(id, title, created_at, updated_at, state_json) VALUES (?1, ?2, ?3, ?4, ?5)\
+             ON CONFLICT(id) DO UPDATE SET title=excluded.title, updated_at=excluded.updated_at, state_json=excluded.state_json",
             params![
                 workspace.id,
                 workspace.title,
                 workspace.created_at,
-                workspace.updated_at
+                workspace.updated_at,
+                workspace.state_json
             ],
         )?;
         transaction.execute("DELETE FROM tabs WHERE workspace_id=?1", [&workspace.id])?;
@@ -135,7 +150,7 @@ impl AppStateStore {
         let connection = self.connection()?;
         let workspace = connection
             .query_row(
-                "SELECT id, title, created_at, updated_at FROM workspaces WHERE id=?1",
+                "SELECT id, title, created_at, updated_at, state_json FROM workspaces WHERE id=?1",
                 [workspace_id],
                 |row| {
                     Ok(WorkspaceRecord {
@@ -143,6 +158,7 @@ impl AppStateStore {
                         title: row.get(1)?,
                         created_at: row.get(2)?,
                         updated_at: row.get(3)?,
+                        state_json: row.get(4)?,
                         tabs: Vec::new(),
                     })
                 },
@@ -202,21 +218,105 @@ impl AppStateStore {
              );",
         )?;
 
-        let applied: bool = transaction.query_row(
+        let initial_applied: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=?1)",
-            [SCHEMA_VERSION],
+            [INITIAL_SCHEMA_VERSION],
             |row| row.get(0),
         )?;
-        if !applied {
+        if !initial_applied {
             import_legacy_scopes(&transaction, legacy_dir)?;
             transaction.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, unixepoch())",
-                [SCHEMA_VERSION],
+                [INITIAL_SCHEMA_VERSION],
+            )?;
+        }
+        let projection_applied: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=?1)",
+            [WORKSPACE_PROJECTION_VERSION],
+            |row| row.get(0),
+        )?;
+        if !projection_applied {
+            transaction.execute(
+                "ALTER TABLE workspaces ADD COLUMN state_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )?;
+            let session: Option<String> = transaction
+                .query_row(
+                    "SELECT json FROM state_scopes WHERE scope='session'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(session) = session {
+                project_session(&transaction, &session)?;
+            }
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, unixepoch())",
+                [WORKSPACE_PROJECTION_VERSION],
             )?;
         }
         transaction.commit()?;
         Ok(())
     }
+}
+
+/// Project the current frontend session into the V3 relational model while
+/// preserving the complete source payload in `state_scopes` for recovery.
+/// Invalid or unsupported sessions remain recoverable and are not projected.
+fn project_session(transaction: &Transaction<'_>, json: &str) -> Result<()> {
+    let Ok(mut session) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Ok(());
+    };
+    let Some(object) = session.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(tabs) = object
+        .remove("tabs")
+        .and_then(|value| value.as_array().cloned())
+    else {
+        return Ok(());
+    };
+    let version = object
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    let now: i64 = transaction.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+    transaction.execute(
+        "INSERT INTO workspaces(id, title, created_at, updated_at, state_json)\
+         VALUES (?1, 'Workspace', ?2, ?2, ?3)\
+         ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at, state_json=excluded.state_json",
+        params![DEFAULT_WORKSPACE_ID, now, serde_json::to_string(&session)?],
+    )?;
+    transaction.execute(
+        "DELETE FROM tabs WHERE workspace_id=?1",
+        [DEFAULT_WORKSPACE_ID],
+    )?;
+    for (position, tab) in tabs.into_iter().enumerate() {
+        let Some(tab_object) = tab.as_object() else {
+            continue;
+        };
+        let Some(id) = tab_object.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(kind) = tab_object.get("type").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        validate_identifier("tab", id)?;
+        validate_identifier("tab kind", kind)?;
+        transaction.execute(
+            "INSERT INTO tabs(id, workspace_id, kind, state_version, state_json, position)\
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id,
+                DEFAULT_WORKSPACE_ID,
+                kind,
+                u32::try_from(version).unwrap_or(u32::MAX),
+                serde_json::to_string(&tab)?,
+                i64::try_from(position).context("too many tabs in session")?
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_scope(scope: &str) -> Result<()> {
@@ -362,6 +462,7 @@ mod tests {
             title: "Workspace".into(),
             created_at: 10,
             updated_at: 20,
+            state_json: r#"{"activeTabId":"second"}"#.into(),
             tabs: vec![
                 TabRecord {
                     id: "second".into(),
@@ -385,6 +486,7 @@ mod tests {
         assert_eq!(loaded.tabs[1].position, 1);
         assert_eq!(loaded.tabs[1].kind, "future-module");
         assert_eq!(loaded.tabs[1].state_version, 42);
+        assert_eq!(loaded.state_json, r#"{"activeTabId":"second"}"#);
 
         workspace.tabs.remove(0);
         workspace.updated_at = 30;
@@ -393,5 +495,58 @@ mod tests {
         assert_eq!(replaced.updated_at, 30);
         assert_eq!(replaced.tabs.len(), 1);
         assert_eq!(replaced.tabs[0].id, "first");
+    }
+
+    #[test]
+    fn session_scope_and_workspace_projection_commit_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = AppStateStore::open(temp.path()).unwrap();
+        store
+            .save_scope(
+                "session",
+                r#"{"version":1,"tabs":[{"id":"a","type":"browser","url":"https://example.com"}],"groups":[],"activeTabId":"a"}"#,
+            )
+            .unwrap();
+        let workspace = store.load_workspace(DEFAULT_WORKSPACE_ID).unwrap().unwrap();
+        assert_eq!(workspace.tabs.len(), 1);
+        assert_eq!(workspace.tabs[0].id, "a");
+        assert_eq!(workspace.tabs[0].kind, "browser");
+        assert_eq!(workspace.tabs[0].state_version, 1);
+        assert_eq!(
+            workspace.tabs[0].state_json,
+            r#"{"id":"a","type":"browser","url":"https://example.com"}"#
+        );
+        assert!(!workspace.state_json.contains("tabs"));
+
+        store.delete_scope("session").unwrap();
+        assert!(store.load_scope("session").unwrap().is_none());
+        assert!(store
+            .load_workspace(DEFAULT_WORKSPACE_ID)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn version_one_database_migrates_existing_session_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let connection = Connection::open(temp.path().join("app.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);\
+                 INSERT INTO schema_migrations VALUES (1, 1);\
+                 CREATE TABLE workspaces (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);\
+                 CREATE TABLE tabs (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, kind TEXT NOT NULL, state_version INTEGER NOT NULL, state_json TEXT NOT NULL, position INTEGER NOT NULL);\
+                 CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at INTEGER NOT NULL);\
+                 CREATE TABLE content_preferences (content_type TEXT PRIMARY KEY, handler_id TEXT NOT NULL, updated_at INTEGER NOT NULL);\
+                 CREATE TABLE state_scopes (scope TEXT PRIMARY KEY, json TEXT NOT NULL, updated_at INTEGER NOT NULL);\
+                 INSERT INTO state_scopes VALUES ('session', '{\"version\":1,\"tabs\":[{\"id\":\"old\",\"type\":\"files\"}]}', 1);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let store = AppStateStore::open(temp.path()).unwrap();
+        let workspace = store.load_workspace(DEFAULT_WORKSPACE_ID).unwrap().unwrap();
+        assert_eq!(workspace.tabs[0].id, "old");
+        assert_eq!(workspace.tabs[0].kind, "files");
     }
 }
