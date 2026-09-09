@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
+pub mod agent_ipc;
+
 const HOST_STALE_AFTER_SECONDS: i64 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
