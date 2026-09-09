@@ -17,6 +17,7 @@ if (catalog.schemaVersion !== 1 || !Array.isArray(catalog.types)) {
 
 const ids = new Set();
 const extensions = new Map();
+const associationExtensions = new Set();
 for (const type of catalog.types ?? []) {
   if (typeof type.id !== "string" || type.id.length === 0) {
     violations.push("every content type must have a non-empty id");
@@ -45,6 +46,18 @@ for (const type of catalog.types ?? []) {
       extensions.set(ext, type.id);
     }
   }
+  const advertised = type.associationExtensions ?? type.extensions;
+  if (!Array.isArray(advertised)) {
+    violations.push(`${type.id} associationExtensions must be an array`);
+  } else {
+    for (const raw of advertised) {
+      const ext = String(raw).toLowerCase();
+      if (!type.extensions.includes(raw) && !type.extensions.includes(ext)) {
+        violations.push(`${type.id} advertises unknown extension .${ext}`);
+      }
+      associationExtensions.add(ext);
+    }
+  }
 }
 
 const declared = new Set(
@@ -52,7 +65,7 @@ const declared = new Set(
     .flatMap((association) => association.ext ?? [])
     .map((ext) => String(ext).toLowerCase()),
 );
-const catalogExtensions = new Set(extensions.keys());
+const catalogExtensions = associationExtensions;
 
 for (const ext of declared) {
   if (!catalogExtensions.has(ext)) {

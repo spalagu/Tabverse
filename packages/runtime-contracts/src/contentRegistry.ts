@@ -9,6 +9,7 @@ export type ContentHandlerId =
   | "image"
   | "markdown"
   | "media"
+  | "notebook"
   | "office"
   | "pdf"
   | "sqlite"
@@ -19,6 +20,8 @@ export type ContentHandlerId =
 export interface ContentTypeDefinition {
   readonly id: string;
   readonly extensions: readonly string[];
+  /** Optional safe subset advertised to the OS. Internal handling may be broader. */
+  readonly associationExtensions?: readonly string[];
   readonly handler: ContentHandlerId;
   readonly view: boolean;
   readonly edit: boolean;

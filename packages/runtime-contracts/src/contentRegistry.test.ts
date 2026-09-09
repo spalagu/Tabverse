@@ -8,6 +8,8 @@ describe("ContentRegistry", () => {
     ["C:\\work\\data.sqlite3", "sqlite", "sqlite"],
     ["photo.HEIC", "image", "image"],
     ["report.xlsx", "office", "office"],
+    ["analysis.ipynb", "notebook", "notebook"],
+    ["private.key", "certificate", "certificate"],
     ["bundle.tar.gz", "archive", "archive"],
     ["Dockerfile", "source-code", "code"],
   ])("routes %s to %s", (path, id, handler) => {
@@ -20,6 +22,11 @@ describe("ContentRegistry", () => {
 
   it("normalizes extension lookup", () => {
     expect(CONTENT_REGISTRY.resolveExtension(".JSON")?.id).toBe("json");
+  });
+
+  it("keeps sensitive internal formats out of OS associations", () => {
+    const certificate = CONTENT_REGISTRY.resolveExtension("key");
+    expect(certificate?.associationExtensions).not.toContain("key");
   });
 
   it("rejects ambiguous catalogs", () => {
