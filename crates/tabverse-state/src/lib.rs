@@ -475,7 +475,14 @@ fn project_session(transaction: &Transaction<'_>, json: &str) -> Result<()> {
         let Some(id) = tab_object.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        let Some(kind) = tab_object.get("type").and_then(serde_json::Value::as_str) else {
+        // v0.0.1 called this field `type`; v0.0.2/v0.0.3 renamed it to
+        // `kind`. Accept both historical wire shapes while leaving the
+        // original scope untouched for frontend recovery.
+        let Some(kind) = tab_object
+            .get("kind")
+            .or_else(|| tab_object.get("type"))
+            .and_then(serde_json::Value::as_str)
+        else {
             continue;
         };
         validate_identifier("tab", id)?;
@@ -618,6 +625,90 @@ mod tests {
             Some(r#"{"new":true}"#)
         );
         assert!(legacy.join("files%3Aabc.json").exists());
+    }
+
+    #[test]
+    fn released_session_fixtures_migrate_without_mutating_the_source() {
+        let fixtures = [
+            (
+                "v0.0.1",
+                include_str!("../tests/fixtures/v0.0.1/session.json"),
+                &["terminal", "browser"][..],
+            ),
+            (
+                "v0.0.2",
+                include_str!("../tests/fixtures/v0.0.2/session.json"),
+                &["files", "agent"][..],
+            ),
+            (
+                "v0.0.3",
+                include_str!("../tests/fixtures/v0.0.3/session.json"),
+                &["browser", "terminal"][..],
+            ),
+        ];
+
+        for (release, fixture, expected_kinds) in fixtures {
+            let temp = tempfile::tempdir().unwrap();
+            let legacy = temp.path().join("state");
+            std::fs::create_dir(&legacy).unwrap();
+            let source = legacy.join("session.json");
+            std::fs::write(&source, fixture).unwrap();
+
+            let store = AppStateStore::open(temp.path()).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&source).unwrap(),
+                fixture,
+                "{release}"
+            );
+            assert_eq!(
+                store.load_scope("session").unwrap().as_deref(),
+                Some(fixture)
+            );
+            let workspace = store.load_workspace(DEFAULT_WORKSPACE_ID).unwrap().unwrap();
+            let kinds = workspace
+                .tabs
+                .iter()
+                .map(|tab| tab.kind.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(kinds, expected_kinds, "{release}");
+
+            store
+                .save_scope("session", r#"{"version":99,"tabs":[]}"#)
+                .unwrap();
+            drop(store);
+            let reopened = AppStateStore::open(temp.path()).unwrap();
+            assert_eq!(
+                reopened.load_scope("session").unwrap().as_deref(),
+                Some(r#"{"version":99,"tabs":[]}"#),
+                "{release} was imported more than once"
+            );
+            assert_eq!(
+                std::fs::read_to_string(source).unwrap(),
+                fixture,
+                "{release}"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_legacy_projection_rolls_back_and_keeps_the_fixture() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = temp.path().join("state");
+        std::fs::create_dir(&legacy).unwrap();
+        let source = legacy.join("session.json");
+        let invalid =
+            r#"{"version":2,"tabs":[{"id":"ok","kind":"terminal"},{"id":"","kind":"browser"}]}"#;
+        std::fs::write(&source, invalid).unwrap();
+
+        assert!(AppStateStore::open(temp.path()).is_err());
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), invalid);
+
+        let valid = include_str!("../tests/fixtures/v0.0.3/session.json");
+        std::fs::write(&source, valid).unwrap();
+        let store = AppStateStore::open(temp.path()).unwrap();
+        let workspace = store.load_workspace(DEFAULT_WORKSPACE_ID).unwrap().unwrap();
+        assert_eq!(workspace.tabs.len(), 2);
+        assert_eq!(std::fs::read_to_string(source).unwrap(), valid);
     }
 
     #[test]
