@@ -1,9 +1,7 @@
-//! Authenticated loopback server and helper-owned session dispatch.
+//! Authenticated local IPC server and helper-owned session dispatch.
 
 use std::{
-    collections::HashMap,
     io,
-    net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
@@ -12,7 +10,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use interprocess::local_socket::{
+    prelude::*, GenericNamespaced, ListenerNonblockingMode, ListenerOptions,
+};
 use serde::{Deserialize, Serialize};
+use tabverse_runtime::RuntimeStore;
 
 use crate::{
     backend::{HelperRuntime, SessionMeta, SessionSink},
@@ -36,7 +38,6 @@ struct SpawnRequest {
     #[serde(default)]
     shell_integration: bool,
     run_on_start: Option<String>,
-    owner_key: Option<String>,
 }
 
 fn default_cols() -> u16 {
@@ -76,8 +77,6 @@ struct SessionWire {
     id: [u8; 16],
     generation: u64,
     cwd: Option<String>,
-    #[serde(rename = "ownerKey")]
-    owner_key: Option<String>,
     exited: Option<Option<u32>>,
     attached: bool,
 }
@@ -88,7 +87,6 @@ impl From<SessionMeta> for SessionWire {
             id: value.id.0,
             generation: value.generation,
             cwd: value.cwd,
-            owner_key: value.owner_key,
             exited: value.exited,
             attached: value.attached,
         }
@@ -96,67 +94,81 @@ impl From<SessionMeta> for SessionWire {
 }
 
 pub struct HelperServer {
-    endpoint: SocketAddr,
+    endpoint: String,
     runtime: Arc<HelperRuntime>,
     shutdown: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
-#[derive(Clone, Copy)]
-enum DisconnectPolicy {
-    Terminate,
-    Detach,
-}
-
 impl HelperServer {
-    /// Start a short-lived helper owned by one GUI process. If that GUI
-    /// disappears without an explicit detach, its attached shells must not
-    /// become orphaned background processes.
     pub fn start(
         token: AuthToken,
         helper_nonce: [u8; 32],
         capabilities: u64,
         idle_timeout: Duration,
     ) -> io::Result<Self> {
-        Self::start_with_policy(
+        Self::start_runtime(
             token,
             helper_nonce,
             capabilities,
             idle_timeout,
-            DisconnectPolicy::Terminate,
+            Arc::new(HelperRuntime::new()),
+            Arc::new(|| false),
         )
     }
 
-    /// Start a helper whose process is owned by ResidentSupervisor rather
-    /// than the GUI. A lost GUI connection detaches its shells so a
-    /// replacement GUI can replay and take them over.
-    pub fn start_resident(
+    pub fn start_persistent(
         token: AuthToken,
         helper_nonce: [u8; 32],
         capabilities: u64,
         idle_timeout: Duration,
+        store: RuntimeStore,
+        host_instance: String,
     ) -> io::Result<Self> {
-        Self::start_with_policy(
+        Self::start_runtime(
             token,
             helper_nonce,
             capabilities,
             idle_timeout,
-            DisconnectPolicy::Detach,
+            Arc::new(HelperRuntime::persistent(store, host_instance)),
+            Arc::new(|| false),
         )
     }
 
-    fn start_with_policy(
+    pub fn start_persistent_guarded(
         token: AuthToken,
         helper_nonce: [u8; 32],
         capabilities: u64,
         idle_timeout: Duration,
-        disconnect_policy: DisconnectPolicy,
+        store: RuntimeStore,
+        host_instance: String,
+        keep_alive: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> io::Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(true)?;
-        let endpoint = listener.local_addr()?;
-        let runtime = Arc::new(HelperRuntime::new());
+        Self::start_runtime(
+            token,
+            helper_nonce,
+            capabilities,
+            idle_timeout,
+            Arc::new(HelperRuntime::persistent(store, host_instance)),
+            keep_alive,
+        )
+    }
+
+    fn start_runtime(
+        token: AuthToken,
+        helper_nonce: [u8; 32],
+        capabilities: u64,
+        idle_timeout: Duration,
+        runtime: Arc<HelperRuntime>,
+        keep_alive: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> io::Result<Self> {
+        let endpoint = format!("tabverse-terminal-{}", uuid::Uuid::new_v4());
+        let name = endpoint.as_str().to_ns_name::<GenericNamespaced>()?;
+        let listener = ListenerOptions::new()
+            .name(name)
+            .nonblocking(ListenerNonblockingMode::Both)
+            .create_sync()?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let alive = Arc::new(AtomicBool::new(true));
         let clients = Arc::new(AtomicUsize::new(0));
@@ -172,10 +184,7 @@ impl HelperServer {
             .spawn(move || {
                 while !thread_shutdown.load(Ordering::Acquire) {
                     match listener.accept() {
-                        Ok((stream, peer)) => {
-                            if !peer.ip().is_loopback() {
-                                continue;
-                            }
+                        Ok(stream) => {
                             thread_clients.fetch_add(1, Ordering::AcqRel);
                             *thread_activity.lock().unwrap() = Instant::now();
                             let client_count = Arc::clone(&thread_clients);
@@ -191,7 +200,6 @@ impl HelperServer {
                                         capabilities,
                                         runtime,
                                         &activity,
-                                        disconnect_policy,
                                     );
                                     client_count.fetch_sub(1, Ordering::AcqRel);
                                     *activity.lock().unwrap() = Instant::now();
@@ -203,6 +211,7 @@ impl HelperServer {
                     }
                     let idle = thread_clients.load(Ordering::Acquire) == 0
                         && thread_runtime.list().is_empty()
+                        && !keep_alive()
                         && thread_activity.lock().unwrap().elapsed() >= idle_timeout;
                     if idle {
                         break;
@@ -221,8 +230,8 @@ impl HelperServer {
         })
     }
 
-    pub fn endpoint(&self) -> SocketAddr {
-        self.endpoint
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
     }
 
     pub fn runtime(&self) -> Arc<HelperRuntime> {
@@ -235,7 +244,9 @@ impl HelperServer {
 
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        let _ = TcpStream::connect(self.endpoint);
+        if let Ok(name) = self.endpoint.as_str().to_ns_name::<GenericNamespaced>() {
+            let _ = LocalSocketStream::connect(name);
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -263,17 +274,16 @@ fn session_sink(id: SessionId, generation: u64, sender: FrameSender) -> SessionS
 }
 
 fn handle_client(
-    stream: TcpStream,
+    stream: LocalSocketStream,
     token: AuthToken,
     helper_nonce: [u8; 32],
     capabilities: u64,
     runtime: Arc<HelperRuntime>,
     last_activity: &Mutex<Instant>,
-    disconnect_policy: DisconnectPolicy,
 ) {
     // Accepted sockets inherit O_NONBLOCK from the listener on macOS.
     let _ = stream.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_recv_timeout(Some(Duration::from_secs(5)));
     let mut framed = FramedStream::new(stream);
     if framed
         .authenticate_server(token, helper_nonce, capabilities)
@@ -286,7 +296,6 @@ fn handle_client(
         Err(_) => return,
     };
     let _ = framed.set_read_timeout(None);
-    let mut owned = HashMap::<SessionId, u64>::new();
     loop {
         let request = match framed.recv() {
             Ok(request) => request,
@@ -297,7 +306,7 @@ fn handle_client(
             }
         };
         *last_activity.lock().unwrap() = Instant::now();
-        if let Err(error) = dispatch(&runtime, &sender, &request, &mut owned) {
+        if let Err(error) = dispatch(&runtime, &sender, &request) {
             let _ = sender.send(&Frame::new(
                 Kind::Error,
                 request.session_id,
@@ -306,43 +315,19 @@ fn handle_client(
             ));
         }
     }
-    release_owned_sessions(&runtime, disconnect_policy, owned);
 }
 
-fn release_owned_sessions(
-    runtime: &HelperRuntime,
-    policy: DisconnectPolicy,
-    owned: HashMap<SessionId, u64>,
-) {
-    for (id, generation) in owned {
-        match policy {
-            DisconnectPolicy::Terminate => {
-                let _ = runtime.terminate(id, generation);
-            }
-            DisconnectPolicy::Detach => {
-                let _ = runtime.detach(id, generation);
-            }
-        }
-    }
-}
-
-fn dispatch(
-    runtime: &HelperRuntime,
-    sender: &FrameSender,
-    request: &Frame,
-    owned: &mut HashMap<SessionId, u64>,
-) -> anyhow::Result<()> {
+fn dispatch(runtime: &HelperRuntime, sender: &FrameSender, request: &Frame) -> anyhow::Result<()> {
     match request.kind {
         Kind::Spawn => {
             let spawn: SpawnRequest = serde_json::from_slice(&request.payload)?;
-            let owner_key = spawn.owner_key.clone();
             let buffered = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
             let active = Arc::new(AtomicBool::new(false));
             let output_sender = sender.clone();
             let output_buffer = Arc::clone(&buffered);
             let output_active = Arc::clone(&active);
             let exit_sender = sender.clone();
-            let id = runtime.spawn_with_sink_owned(spawn.into(), owner_key, move |id| {
+            let id = runtime.spawn_with_sink(spawn.into(), move |id| {
                 SessionSink::new(
                     move |bytes| {
                         if output_active.load(Ordering::Acquire) {
@@ -362,10 +347,6 @@ fn dispatch(
                     },
                 )
             })?;
-            // Record ownership before touching the socket again. If the peer
-            // vanished while Spawn was running, disconnect cleanup still
-            // applies the server's lifetime policy to the new shell.
-            owned.insert(id, 1);
             sender.send(&Frame::new(Kind::Spawn, id, 1, Vec::new()))?;
             active.store(true, Ordering::Release);
             for bytes in buffered.lock().unwrap().drain(..) {
@@ -379,7 +360,6 @@ fn dispatch(
         }
         Kind::Detach => {
             let next = runtime.detach(request.session_id, request.generation)?;
-            owned.remove(&request.session_id);
             sender.send(&Frame::new(
                 Kind::Detach,
                 request.session_id,
@@ -389,10 +369,6 @@ fn dispatch(
         }
         Kind::Attach => {
             let generation = runtime.begin_attach(request.session_id)?;
-            // A takeover supersedes any older generation this client may
-            // have held. Record it before replay writes can discover a dead
-            // socket.
-            owned.insert(request.session_id, generation);
             let sink = session_sink(request.session_id, generation, sender.clone());
             runtime.complete_attach(request.session_id, generation, sink, |batch| {
                 sender.send(&Frame::new(
@@ -423,7 +399,6 @@ fn dispatch(
         }
         Kind::Terminate => {
             runtime.terminate(request.session_id, request.generation)?;
-            owned.remove(&request.session_id);
             sender.send(&Frame::new(
                 Kind::Terminate,
                 request.session_id,
@@ -433,7 +408,6 @@ fn dispatch(
         }
         Kind::KillAll => {
             runtime.kill_all();
-            owned.clear();
             sender.send(&Frame::new(
                 Kind::KillAll,
                 SessionId::default(),
@@ -453,7 +427,7 @@ mod tests {
 
     const TOKEN: AuthToken = AuthToken::new([0x44; 32]);
 
-    fn connect(endpoint: SocketAddr) -> FramedStream {
+    fn connect(endpoint: &str) -> FramedStream {
         let framed = FramedStream::connect(endpoint, Duration::from_secs(2)).unwrap();
         framed
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -469,32 +443,6 @@ mod tests {
             }
         }
         panic!("helper never sent {wanted:?}");
-    }
-
-    #[cfg(unix)]
-    fn spawn_shell(client: &mut FramedStream) -> Frame {
-        let spawn = serde_json::json!({
-            "shell": "/bin/sh", "cols": 80, "rows": 24,
-            "shell_integration": false
-        });
-        client
-            .send(&Frame::new(
-                Kind::Spawn,
-                SessionId::default(),
-                0,
-                serde_json::to_vec(&spawn).unwrap(),
-            ))
-            .unwrap();
-        recv_kind(client, Kind::Spawn)
-    }
-
-    #[cfg(unix)]
-    fn wait_until(mut predicate: impl FnMut() -> bool, message: &str) {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !predicate() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(predicate(), "{message}");
     }
 
     #[test]
@@ -553,13 +501,59 @@ mod tests {
         server.stop();
     }
 
+    #[test]
+    fn another_runtime_driver_keeps_the_shared_supervisor_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RuntimeStore::open(dir.path(), "shared-helper").unwrap();
+        let agent_live = Arc::new(AtomicBool::new(true));
+        let guard = Arc::clone(&agent_live);
+        let mut server = HelperServer::start_persistent_guarded(
+            TOKEN,
+            [0x14; 32],
+            0,
+            Duration::from_millis(40),
+            store,
+            "shared-helper".into(),
+            Arc::new(move || guard.load(Ordering::Acquire)),
+        )
+        .unwrap();
+
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            server.is_alive(),
+            "the Agent driver still needs the process"
+        );
+        agent_live.store(false, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.is_alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !server.is_alive(),
+            "the final idle driver releases the process"
+        );
+        server.stop();
+    }
+
     #[cfg(unix)]
     #[test]
     fn protocol_spawns_detaches_lists_and_terminates_a_helper_owned_shell() {
         let mut server = HelperServer::start(TOKEN, [5; 32], 0, Duration::from_secs(5)).unwrap();
         let mut client = connect(server.endpoint());
         client.authenticate_client(TOKEN, [6; 32]).unwrap();
-        let spawned = spawn_shell(&mut client);
+        let spawn = serde_json::json!({
+            "shell": "/bin/sh", "cols": 80, "rows": 24,
+            "shell_integration": false
+        });
+        client
+            .send(&Frame::new(
+                Kind::Spawn,
+                SessionId::default(),
+                0,
+                serde_json::to_vec(&spawn).unwrap(),
+            ))
+            .unwrap();
+        let spawned = recv_kind(&mut client, Kind::Spawn);
         assert_ne!(spawned.session_id, SessionId::default());
         assert_eq!(spawned.generation, 1);
         client
@@ -592,88 +586,85 @@ mod tests {
         server.stop();
     }
 
-    #[cfg(unix)]
     #[test]
-    fn legacy_helper_terminates_sessions_when_its_gui_disconnects() {
-        let mut server = HelperServer::start(TOKEN, [7; 32], 0, Duration::from_secs(5)).unwrap();
-        let runtime = server.runtime();
-        let mut client = connect(server.endpoint());
-        client.authenticate_client(TOKEN, [8; 32]).unwrap();
-        let spawned = spawn_shell(&mut client);
-        assert_eq!(runtime.list().len(), 1);
-
-        drop(client);
-
-        wait_until(
-            || runtime.list().is_empty(),
-            "a legacy GUI disconnect must terminate its attached shell",
-        );
-        assert!(runtime.replay_snapshot(spawned.session_id).is_err());
-        server.stop();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn resident_helper_detaches_and_allows_takeover_after_gui_disconnect() {
-        let mut server =
-            HelperServer::start_resident(TOKEN, [9; 32], 0, Duration::from_secs(5)).unwrap();
-        let runtime = server.runtime();
-        let mut first = connect(server.endpoint());
-        first.authenticate_client(TOKEN, [10; 32]).unwrap();
-        let spawned = spawn_shell(&mut first);
-        first
+    fn a_new_gui_connection_reattaches_the_same_running_terminal() {
+        let mut server = HelperServer::start(TOKEN, [8; 32], 0, Duration::from_secs(5)).unwrap();
+        let endpoint = server.endpoint().to_string();
+        let mut first_gui = connect(&endpoint);
+        first_gui.authenticate_client(TOKEN, [9; 32]).unwrap();
+        let (shell, before_command, after_command): (&str, &[u8], &[u8]) = if cfg!(windows) {
+            (
+                "powershell.exe",
+                b"Write-Output BEFORE-GUI-EXIT\r\n",
+                b"Write-Output AFTER-GUI-START\r\n",
+            )
+        } else {
+            (
+                "/bin/sh",
+                b"printf 'BEFORE-GUI-EXIT\\n'\n",
+                b"printf 'AFTER-GUI-START\\n'\n",
+            )
+        };
+        let spawn = serde_json::json!({
+            "shell": shell, "cols": 80, "rows": 24,
+            "shell_integration": false
+        });
+        first_gui
+            .send(&Frame::new(
+                Kind::Spawn,
+                SessionId::default(),
+                0,
+                serde_json::to_vec(&spawn).unwrap(),
+            ))
+            .unwrap();
+        let spawned = recv_kind(&mut first_gui, Kind::Spawn);
+        first_gui
             .send(&Frame::new(
                 Kind::Input,
                 spawned.session_id,
-                spawned.generation,
-                b"sleep 0.1; printf 'RESIDENT-DETACHED\\n'\n".to_vec(),
+                1,
+                before_command.to_vec(),
             ))
             .unwrap();
-
-        drop(first);
-
-        wait_until(
-            || {
-                let sessions = runtime.list();
-                sessions.len() == 1 && !sessions[0].attached && sessions[0].generation == 2
-            },
-            "a resident GUI disconnect must detach rather than terminate its shell",
-        );
-        wait_until(
-            || {
-                runtime
-                    .replay_snapshot(spawned.session_id)
-                    .is_ok_and(|bytes| {
-                        bytes
-                            .windows(17)
-                            .any(|window| window == b"RESIDENT-DETACHED")
-                    })
-            },
-            "detached terminal output must enter the resident replay ring",
-        );
-
-        let mut replacement = connect(server.endpoint());
-        replacement.authenticate_client(TOKEN, [11; 32]).unwrap();
-        replacement
-            .send(&Frame::new(Kind::Attach, spawned.session_id, 2, Vec::new()))
+        let before = recv_kind(&mut first_gui, Kind::Output);
+        assert!(before.payload.windows(15).any(|w| w == b"BEFORE-GUI-EXIT"));
+        first_gui
+            .send(&Frame::new(Kind::Detach, spawned.session_id, 1, vec![]))
             .unwrap();
-        let snapshot = recv_kind(&mut replacement, Kind::Snapshot);
-        assert_eq!(snapshot.generation, 3);
-        replacement
-            .send(&Frame::new(
-                Kind::Input,
-                spawned.session_id,
-                snapshot.generation,
-                b"printf 'RESIDENT-TAKEOVER\\n'\n".to_vec(),
-            ))
+        assert_eq!(recv_kind(&mut first_gui, Kind::Detach).generation, 2);
+        drop(first_gui);
+
+        let mut second_gui = connect(&endpoint);
+        second_gui.authenticate_client(TOKEN, [10; 32]).unwrap();
+        second_gui
+            .send(&Frame::new(Kind::Attach, spawned.session_id, 0, vec![]))
             .unwrap();
-        let output = recv_kind(&mut replacement, Kind::Output);
-        assert!(output
+        let replay = recv_kind(&mut second_gui, Kind::Snapshot);
+        assert_eq!(replay.generation, 3);
+        assert!(replay
             .payload
-            .windows(17)
-            .any(|window| window == b"RESIDENT-TAKEOVER"));
-
-        runtime.terminate(spawned.session_id, 3).unwrap();
+            .windows(15)
+            .any(|window| window == b"BEFORE-GUI-EXIT"));
+        second_gui
+            .send(&Frame::new(
+                Kind::Input,
+                spawned.session_id,
+                3,
+                after_command.to_vec(),
+            ))
+            .unwrap();
+        let mut after = Vec::new();
+        for _ in 0..30 {
+            after.extend(recv_kind(&mut second_gui, Kind::Output).payload);
+            if after.windows(15).any(|w| w == b"AFTER-GUI-START") {
+                break;
+            }
+        }
+        assert!(after.windows(15).any(|w| w == b"AFTER-GUI-START"));
+        second_gui
+            .send(&Frame::new(Kind::Terminate, spawned.session_id, 3, vec![]))
+            .unwrap();
+        recv_kind(&mut second_gui, Kind::Terminate);
         server.stop();
     }
 }

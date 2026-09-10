@@ -1,10 +1,9 @@
 use std::io::{Read, Write};
-use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::http::{self, DnsPolicy};
-use crate::network_broker::{self, DnsCache, TargetPolicy};
 
 /// The greeting a CONNECT waits for before its first tunneled byte.
 const CONNECT_ESTABLISHED: &str = "HTTP/1.1 200 Connection Established\r\n\r\n";
@@ -59,7 +58,7 @@ pub struct PageProxy {
 impl PageProxy {
     /// Bind 127.0.0.1 on a port the OS picks, and start accepting.
     ///
-    /// Binding before returning is deliberate: if
+    /// Binding before returning is deliberate — the agent_login.rs rule: if
     /// the port cannot be had, the caller finds out now, while it can still
     /// say so, rather than after pointing pages at a proxy that is not
     /// there. A dynamic port, because nothing upstream may depend on a
@@ -145,9 +144,6 @@ struct Shared {
     /// write that calls `http::forget()` is picked up by the next connection
     /// without this module hearing about it.
     doh: Mutex<Option<(String, Arc<http::DohResolver>)>>,
-    /// A short, bounded answer cache. Its key includes the active policy,
-    /// while every connection still re-reads that policy before lookup.
-    dns: DnsCache,
 }
 
 /// The accept thread's own record of its ending, dropped wherever the
@@ -220,7 +216,7 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
 /// proxy to imply it. RFC 9110 lets a server insist on origin-form, and
 /// the real ones do — the echo stub this proxy was born against accepted
 /// anything, which is exactly how a verbatim forwarder shipped green.
-/// Shared with the remote-proxy entry (remote_proxy.rs), which speaks
+/// Shared with the remote data-plane gateway, which speaks
 /// the same rewrite frame-side.
 pub(crate) fn origin_form_head(head: &str, authority: &str) -> String {
     let mut lines = head.lines();
@@ -306,8 +302,9 @@ enum Prelude<'a> {
     Target(&'a str),
 }
 
-/// Resolve `host` under the policy in force, race address families, deliver
-/// the prelude to its owner, then move bytes in both directions.
+/// Resolve `host` under the policy in force, connect to the first address
+/// that accepts, deliver the prelude to its owner, then move bytes in both
+/// directions.
 fn carry(mut client: TcpStream, host: &str, port: u16, prelude: Prelude<'_>, shared: &Shared) {
     let addresses = match resolve(host, port, shared) {
         Ok(addresses) => addresses,
@@ -316,14 +313,13 @@ fn carry(mut client: TcpStream, host: &str, port: u16, prelude: Prelude<'_>, sha
             return;
         }
     };
-    let mut target =
-        match network_broker::connect_happy_eyeballs(&addresses, http::DEFAULT_CONNECT_TIMEOUT) {
-            Some(target) => target,
-            None => {
-                refuse(&mut client, Refusal::ConnectFailed);
-                return;
-            }
-        };
+    let mut target = match connect_first(&addresses) {
+        Some(target) => target,
+        None => {
+            refuse(&mut client, Refusal::ConnectFailed);
+            return;
+        }
+    };
     let _ = target.set_nodelay(true);
     // Both directions may go quiet without either side ending — a tunnel
     // whose client vanished mid-TLS. The idle deadline turns that into a
@@ -381,7 +377,7 @@ fn refuse(client: &mut TcpStream, refusal: Refusal) {
     let _ = client.write_all(refusal.as_response());
 }
 
-/// One name's cached addresses, port attached, under the policy in force.
+/// One name's addresses, port attached, under the policy in force.
 ///
 /// This is the seam the module exists for: the DoH arm resolves through
 /// http.rs's own resolver and nothing else, and its failure is returned, not
@@ -395,33 +391,54 @@ fn resolve(host: &str, port: u16, shared: &Shared) -> Result<Vec<SocketAddr>, Re
     if let Ok(literal) = host.parse::<IpAddr>() {
         return Ok(vec![SocketAddr::new(literal, port)]);
     }
-    let policy = http::policy();
-    let scope = match &policy {
-        DnsPolicy::System => "system".to_string(),
-        DnsPolicy::Doh(url) => format!("doh:{url}"),
-    };
-    let addresses = shared
-        .dns
-        .resolve(&scope, host, port, false, || match policy {
-            DnsPolicy::Doh(url) => {
-                let Some(resolver) = shared.resolver_for(&url) else {
-                    return Err("dns-failed: DoH resolver could not be built".into());
-                };
-                let asked = host.to_string();
-                let answered =
-                    tauri::async_runtime::block_on(
-                        async move { resolver.lookup_host(&asked).await },
-                    );
-                answered.map_err(|error| error.to_string())
+    match http::policy() {
+        DnsPolicy::Doh(url) => {
+            let Some(resolver) = shared.resolver_for(&url) else {
+                return Err(Refusal::NoAddress);
+            };
+            let asked = host.to_string();
+            let answered =
+                tauri::async_runtime::block_on(async move { resolver.lookup_host(&asked).await });
+            match answered {
+                // lookup_host stamps every address with the undecided port;
+                // the port is the client's, attached here where it is known.
+                Ok(addrs) => Ok(addrs
+                    .into_iter()
+                    .map(|a| SocketAddr::new(a.ip(), port))
+                    .collect()),
+                Err(_) => Err(Refusal::NoAddress),
             }
-            DnsPolicy::System => network_broker::system_resolve(host, port),
-        });
-    network_broker::approve_addresses(
-        addresses.map_err(|_| Refusal::NoAddress)?,
-        port,
-        TargetPolicy::LocalNavigation,
-    )
-    .map_err(|_| Refusal::NoAddress)
+        }
+        DnsPolicy::System => resolve_system(host, port).ok_or(Refusal::NoAddress),
+    }
+}
+
+/// One name's addresses through the host's own resolver, port attached —
+/// the policy's System arm on its own, factored out because the remote
+/// remote gateway is built entirely on it: the names it carries
+/// are the host's intranet's, answerable only by the host's system
+/// resolver, so that arm is the whole of its resolution. `None` when the
+/// resolver answered with nothing or not at all.
+///
+/// A literal is not a name (the same rule `resolve` applies before any
+/// policy): there is nothing to resolve, so it connects as written.
+pub(crate) fn resolve_system(host: &str, port: u16) -> Option<Vec<SocketAddr>> {
+    if let Ok(literal) = host.parse::<IpAddr>() {
+        return Some(vec![SocketAddr::new(literal, port)]);
+    }
+    (host, port)
+        .to_socket_addrs()
+        .map(|addrs| addrs.collect())
+        .ok()
+}
+
+/// Connect to the first address that accepts, in the order the resolver gave
+/// them — that order is the resolver's preference, and it is the order
+/// reqwest's own connect follows under the same answer.
+fn connect_first(addresses: &[SocketAddr]) -> Option<TcpStream> {
+    addresses
+        .iter()
+        .find_map(|addr| TcpStream::connect(addr).ok())
 }
 
 /// Move bytes in both directions until each side has ended.
@@ -472,7 +489,7 @@ fn pump(mut from: TcpStream, mut to: TcpStream) {
 /// Byte by byte — the house pattern for heads (http.rs's stubs read the same
 /// way) — because a BufReader would quietly hold bytes of what follows, and
 /// the tunnel that follows must see every one of them. Shared with the
-/// remote-proxy entry (remote_proxy.rs), which reads answer heads the same
+/// remote data-plane gateway, which reads answer heads the same
 /// way — one blank line ends them both.
 pub(crate) fn read_head(stream: &mut TcpStream) -> std::io::Result<String> {
     let mut head: Vec<u8> = Vec::new();
@@ -499,7 +516,7 @@ pub(crate) fn read_head(stream: &mut TcpStream) -> std::io::Result<String> {
 
 /// An absolute-form target's authority and the port its scheme defaults to,
 /// or `None` when the target is not absolute (a path, or another scheme).
-/// Shared with the remote-proxy entry (remote_proxy.rs).
+/// Shared with the remote data-plane gateway.
 pub(crate) fn absolute_form(target: &str) -> Option<(&str, u16)> {
     let (rest, default_port) = if let Some(rest) = target.strip_prefix("http://") {
         (rest, 80u16)
@@ -513,7 +530,7 @@ pub(crate) fn absolute_form(target: &str) -> Option<(&str, u16)> {
 
 /// Split an authority into host and port, square brackets understood for
 /// IPv6 literals; `None` when the port is not a number. Shared with the
-/// remote-proxy entry (remote_proxy.rs).
+/// remote data-plane gateway.
 pub(crate) fn split_authority(authority: &str, default_port: u16) -> Option<(String, u16)> {
     if let Some(rest) = authority.strip_prefix('[') {
         let (host, rest) = rest.split_once(']')?;

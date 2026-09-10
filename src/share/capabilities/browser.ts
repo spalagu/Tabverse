@@ -1,9 +1,9 @@
 import { registerShareCapability } from "../framework/capability";
 
-// Semantic state plus host-network requests; never a picture/video stream.
+// Ruled out for good, not merely unbuilt: sharing a browser tab is sharing
+// a picture of a page, and picture-class sharing was rejected in the
+// remote-control capability contract.
 registerShareCapability("browser", {
-  shareable: true,
-  levels: ["view", "steer"],
-  defaultLevel: "steer",
-  payload: "dom",
+  shareable: false,
+  reason: "browser tabs cannot be shared",
 });

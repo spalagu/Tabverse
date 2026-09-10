@@ -1,6 +1,13 @@
 name: Publish release
 
 on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or commit to build as a release candidate
+        required: true
+        default: main
+        type: string
   push:
     tags:
       - "v*"
@@ -15,61 +22,25 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
           fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 22.23.2
-          cache: npm
-      - run: git fetch --no-tags origin main:refs/remotes/origin/main
-      - run: node tools/check-release-source.mjs
-
-  sbom:
-    needs: verify
-    name: Source dependency SBOMs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 22.23.2
+          node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: . -> target
-          key: release-sbom-cargo-cyclonedx-0.5.9
+          key: release-verify
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: npm ci
-      - name: Generate source and runtime-specific CycloneDX SBOMs
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
-          test "v${version}" = "$GITHUB_REF_NAME"
-          npm sbom --sbom-format cyclonedx --omit=dev > "Tabverse_${version}_source-npm.cdx.json"
-          cargo install cargo-cyclonedx --version 0.5.9 --locked
-          cargo cyclonedx \
-            --manifest-path src-tauri/Cargo.toml \
-            --format json \
-            --all \
-            --no-default-features \
-            --features runtime-wry \
-            --target aarch64-apple-darwin \
-            --override-filename "Tabverse_${version}_source-rust-macos-arm64-wry.cdx"
-          cargo cyclonedx \
-            --manifest-path src-tauri/Cargo.toml \
-            --format json \
-            --all \
-            --no-default-features \
-            --features runtime-cef \
-            --target aarch64-apple-darwin \
-            --override-filename "Tabverse_${version}_source-rust-macos-arm64-cef.cdx"
-          mv "src-tauri/Tabverse_${version}_source-rust-macos-arm64-wry.cdx.json" .
-          mv "src-tauri/Tabverse_${version}_source-rust-macos-arm64-cef.cdx.json" .
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-sbom
-          path: Tabverse_*.cdx.json
-          if-no-files-found: error
+      - if: github.event_name == 'push'
+        run: git fetch --no-tags origin main:refs/remotes/origin/main
+      - run: npm run check:release-source
+      - run: npm run check:quality
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
 
   build:
     needs: verify
@@ -82,12 +53,14 @@ jobs:
           - label: macOS x64 installer
             os: macos-26-intel
             target: x86_64-apple-darwin
+            binary_arch: x86_64
             bundle: dmg
             extension: dmg
             asset_suffix: x64.dmg
           - label: macOS ARM64 installer
             os: macos-26
             target: aarch64-apple-darwin
+            binary_arch: arm64
             bundle: dmg
             extension: dmg
             asset_suffix: aarch64.dmg
@@ -117,9 +90,11 @@ jobs:
             asset_suffix: linux-arm64.AppImage
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 22.23.2
+          node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
@@ -131,204 +106,82 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
       - run: npm ci
-      - name: Build signed Resident artifacts
-        run: npm run build:resident-artifacts
-        env:
-          TABVERSE_BUILD_TARGET: ${{ matrix.target }}
-          TABVERSE_RESIDENT_SIGNING_KEY_HEX: ${{ secrets.TABVERSE_RESIDENT_SIGNING_KEY_HEX }}
-      - name: Build installer without signing key in the process environment
-        run: >-
-          node -e "if (process.env.TABVERSE_RESIDENT_SIGNING_KEY_HEX) throw new Error('Resident signing key leaked past the signing step')"
-          && npm run tauri build --
-          --config '{"build":{"beforeBuildCommand":"npm run build"}}'
-          --target ${{ matrix.target }}
-          --bundles ${{ matrix.bundle }}
-        env:
-          TABVERSE_RESIDENT_SIGNING_KEY_HEX: ""
-          # Preserve the byte-exact signed Resident workers in Linux AppImages.
-          NO_STRIP: "1"
+      - run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
       - name: Name release asset
         id: asset
         shell: bash
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
-          test "v${version}" = "$GITHUB_REF_NAME"
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            test "v${version}" = "$GITHUB_REF_NAME"
+          fi
           source="$(find . -path "*/${{ matrix.target }}/release/bundle/${{ matrix.bundle }}/*.${{ matrix.extension }}" -type f -print -quit)"
           test -n "$source"
           asset="Tabverse_${version}_${{ matrix.asset_suffix }}"
           cp "$source" "$asset"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          checksum="SHA256SUMS-${{ matrix.target }}"
+          if [[ '${{ runner.os }}' == 'macOS' ]]; then
+            shasum -a 256 "$asset" > "$checksum"
+            shasum -a 256 -c "$checksum"
+          else
+            sha256sum "$asset" > "$checksum"
+            sha256sum -c "$checksum"
+          fi
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+
+          if [[ '${{ matrix.target }}' == *-apple-darwin ]]; then
+            mount_point="$(mktemp -d "${RUNNER_TEMP}/tabverse-release.XXXXXX")"
+            device=""
+            cleanup() {
+              if [[ -n "$device" ]]; then hdiutil detach "$device" -force >/dev/null 2>&1 || true; fi
+              rmdir "$mount_point" >/dev/null 2>&1 || true
+            }
+            trap cleanup EXIT
+            device="$(hdiutil attach "$asset" -nobrowse -readonly -mountpoint "$mount_point" | awk '/^\/dev\// { print $1; exit }')"
+            app="$(find "$mount_point" -maxdepth 2 -name 'Tabverse.app' -type d -print -quit)"
+            test -n "$app"
+            executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
+            binary="$app/Contents/MacOS/$executable"
+            test -x "$binary"
+            lipo -archs "$binary" | tr ' ' '\n' | grep -Fx '${{ matrix.binary_arch }}'
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign --display --verbose=2 "$app" 2>&1 | grep -Fx 'Signature=adhoc'
+          fi
+
+          info="build-info-${{ matrix.target }}.txt"
+          {
+            printf 'version=%s\n' "$version"
+            printf 'commit=%s\n' "$(git rev-parse HEAD)"
+            printf 'target=%s\n' '${{ matrix.target }}'
+            if [[ '${{ matrix.target }}' == *-apple-darwin ]]; then
+              printf 'signing=ad-hoc\n'
+              printf 'notarized=no\n'
+            else
+              printf 'paid_code_signing=no\n'
+            fi
+          } > "$info"
+          echo "info=$info" >> "$GITHUB_OUTPUT"
+      - name: Stage distribution notice
+        shell: bash
+        run: cp docs/distribution.md distribution.md
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.target }}
-          path: ${{ steps.asset.outputs.asset }}
+          path: |
+            ${{ steps.asset.outputs.asset }}
+            ${{ steps.asset.outputs.checksum }}
+            ${{ steps.asset.outputs.info }}
+            distribution.md
           if-no-files-found: error
-
-  build-cef:
-    needs: verify
-    name: macOS ARM64 CEF installer
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 22.23.2
-          cache: npm
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          # The pinned CEF bundler prebuilds both helper architectures so it
-          # can embed one universal helper in either macOS installer.
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: . -> target
-          key: release-macos-26-aarch64-apple-darwin-cef
-      - run: npm ci
-      - name: Install the pinned CEF-aware Tauri CLI
-        run: >-
-          cargo install tauri-cli
-          --git https://github.com/spalagu/tauri.git
-          --rev a639cadd9df0949ae20cbf8b29da66fc0cbf8d14
-          --locked
-      - name: Prepare the pinned CEF distribution and license resources
-        shell: bash
-        run: |
-          set -euo pipefail
-          cef_path="$(find target -path '*/build/cef-dll-sys-*/out/cef_macos_aarch64' -type d -print -quit)"
-          test -n "$cef_path"
-          node tools/prepare-cef-release.mjs \
-            --distribution "$cef_path" \
-            --output target/cef-release-config.json
-          echo "CEF_PATH=$PWD/target/cef-release-cache" >> "$GITHUB_ENV"
-      - name: Build signed Resident artifacts
-        run: npm run build:resident-artifacts
-        env:
-          TABVERSE_BUILD_TARGET: aarch64-apple-darwin
-          TABVERSE_RESIDENT_SIGNING_KEY_HEX: ${{ secrets.TABVERSE_RESIDENT_SIGNING_KEY_HEX }}
-      - name: Build CEF installer without signing key in the process environment
-        run: |
-          set -euo pipefail
-          node -e "if (process.env.TABVERSE_RESIDENT_SIGNING_KEY_HEX) throw new Error('Resident signing key leaked past the signing step')"
-          cargo tauri build \
-            --config target/cef-release-config.json \
-            --features runtime-cef \
-            --target aarch64-apple-darwin \
-            --bundles dmg \
-            -- --no-default-features
-        env:
-          TABVERSE_RESIDENT_SIGNING_KEY_HEX: ""
-      - name: Name CEF release asset
-        id: asset
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(node -p "require('./package.json').version")"
-          test "v${version}" = "$GITHUB_REF_NAME"
-          source="$(find . -path '*/aarch64-apple-darwin/release/bundle/dmg/*.dmg' -type f -print -quit)"
-          test -n "$source"
-          asset="Tabverse_${version}_aarch64-cef.dmg"
-          cp "$source" "$asset"
-          echo "asset=$asset" >> "$GITHUB_OUTPUT"
-      - name: Verify CEF architecture, runtime payload, and license material
-        run: node tools/verify-macos-release.mjs "${{ steps.asset.outputs.asset }}" cef arm64
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: release-aarch64-apple-darwin-cef
-          path: ${{ steps.asset.outputs.asset }}
-          if-no-files-found: error
-
-  macos-arm64-artifacts:
-    needs: [build, build-cef]
-    name: macOS ARM64 Wry and CEF artifact verification
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 22.23.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-aarch64-apple-darwin
-          path: candidate-wry
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-aarch64-apple-darwin-cef
-          path: candidate-cef
-      - name: Verify both macOS ARM64 artifacts
-        run: |
-          set -euo pipefail
-          wry="$(find candidate-wry -name 'Tabverse_*_aarch64.dmg' -type f -print -quit)"
-          cef="$(find candidate-cef -name 'Tabverse_*_aarch64-cef.dmg' -type f -print -quit)"
-          test -n "$wry" && test -n "$cef"
-          node tools/verify-macos-release.mjs "$wry" wry arm64 | tee macos-arm64-wry.json
-          node tools/verify-macos-release.mjs "$cef" cef arm64 | tee macos-arm64-cef.json
-      - if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: acceptance-macos-arm64-artifacts
-          path: macos-arm64-*.json
-          if-no-files-found: error
-
-  cef-performance-observation:
-    needs: build-cef
-    name: Observe macOS ARM64 CEF performance
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 22.23.2
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: release-aarch64-apple-darwin-cef
-          path: candidate-cef
-      - name: Measure the CEF release candidate without a visible window
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          cef="$(find candidate-cef -name 'Tabverse_*_aarch64-cef.dmg' -type f -print -quit)"
-          test -n "$cef"
-          mount_point="$(mktemp -d "${RUNNER_TEMP}/tabverse-cef-performance.XXXXXX")"
-          device="$(hdiutil attach "$cef" -nobrowse -readonly -mountpoint "$mount_point" | awk '/^\/dev\// { print $1; exit }')"
-          cleanup() {
-            if [[ -n "$device" ]]; then hdiutil detach "$device" -force >/dev/null 2>&1 || true; fi
-            rmdir "$mount_point" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-          app="$(find "$mount_point" -maxdepth 2 -name 'Tabverse.app' -type d -print -quit)"
-          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")"
-          binary="$app/Contents/MacOS/$executable"
-          test -x "$binary"
-          mkdir -p rc-performance/raw
-          printf 'runtime\ttabs\tsample\texit_code\tforced\tsetup_ms\tfirst_create_ms\tfirst_ready_ms\tsecond_create_ms\tsecond_ready_ms\tall_ready_ms\trequest_exit_ms\texit_ms\twall_ms\tsecond_rss_delta_kb\tpeak_rss_kb\tidle_cpu_percent\n' > rc-performance/samples.tsv
-          for tabs in 1 2 20; do
-            idle_ms=1500
-            if [[ "$tabs" == 20 ]]; then idle_ms=30000; fi
-            for sample in $(seq -w 1 10); do
-              bash tools/run-rc-performance-sample.sh \
-                "$binary" "$tabs" "$sample" "$idle_ms" rc-performance/raw \
-                >> rc-performance/samples.tsv
-            done
-          done
-          node tools/check-rc-performance.mjs \
-            --input rc-performance/samples.tsv \
-            --output rc-performance/result.json
-      - if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: observation-macos-arm64-cef-performance
-          path: rc-performance/
-          if-no-files-found: warn
 
   publish:
-    needs: [build, build-cef, sbom, macos-arm64-artifacts]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -338,10 +191,7 @@ jobs:
           path: release-assets
       - name: Write release checksums
         working-directory: release-assets
-        run: sha256sum * > SHA256SUMS
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: release-assets/*
+        run: find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
       - name: Write release notes
         shell: bash
         run: |
@@ -351,11 +201,12 @@ jobs:
           if [ "$version" = "0.0.1" ]; then
             cat >> release-notes.md <<'EOF'
 
-          Tabverse is a cross-platform workspace that brings terminals, files, web pages, and session management into one tabbed experience. It also lets you securely join a shared terminal from another device.
+          Tabverse is a cross-platform workspace that brings terminals, AI agents, files, web pages, and session management into one tabbed experience. It also lets you securely join a shared terminal from another device.
 
           ### Included in the first public release
 
           - **Real terminals and command blocks** — run a shell through a PTY, retain commands, exit status, duration, and output, then find, copy, or rerun them.
+          - **Agent tabs** — follow an agent conversation, tool calls, permission decisions, and turn cancellation in the same workspace.
           - **Secure remote collaboration** — share terminals peer-to-peer with end-to-end encryption through iroh. Multiple collaborators can view or type, and a self-contained browser client joins without installation.
           - **File workspace** — browse files and Git status, compare edits with HEAD, and preview images, PDFs, media, DOCX, and XLSX inline.
           - **Built-in browser tabs** — use native web views rather than iframes, with a focused address bar plus navigation, reload, and open-in-default-browser actions.
@@ -364,6 +215,19 @@ jobs:
           ### Quality checks
 
           Every commit is verified by GitHub Actions with frontend and Rust tests, cross-platform builds, security scanning, browser UI checks, and interaction checks through a browser debugging channel.
+          EOF
+          elif [ "$version" = "0.1.0" ]; then
+            cat >> release-notes.md <<'EOF'
+
+          Tabverse V3 将桌面工作区、可恢复 Runtime、统一内容系统和语义 Remote 能力整合到一套跨平台架构中。Remote Browser 在 viewer 端渲染，并通过 Host 网络访问 localhost、LAN、VPN、内部 DNS 和 Host 信任的 HTTPS；不会同步 Host Browser 的 cookie、localStorage、DOM 或历史。
+
+          ### macOS 安装提示
+
+          macOS DMG 使用 ad-hoc 签名，**没有 Apple Developer ID，也没有 notarize**。首次打开时，请在 Finder 中右键 `Tabverse.app` 选择“打开”，或在“系统设置 → 隐私与安全性”中仅允许 Tabverse。不要全局关闭 Gatekeeper。详细步骤见 release 中的 `distribution.md`。
+
+          ### 产物校验
+
+          下载与设备架构匹配的安装包，并使用本 release 的 `SHA256SUMS` 校验文件。
           EOF
           else
             cat >> release-notes.md <<'EOF'
@@ -376,13 +240,12 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release-assets/* \
-              --repo "$GITHUB_REPOSITORY" --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" release-assets/* \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "Tabverse ${GITHUB_REF_NAME#v}" \
-              --notes-file release-notes.md \
-              --generate-notes \
-              --verify-tag
+            echo "Refusing to overwrite existing release $GITHUB_REF_NAME" >&2
+            exit 1
           fi
+          gh release create "$GITHUB_REF_NAME" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Tabverse ${GITHUB_REF_NAME#v}" \
+            --notes-file release-notes.md \
+            --generate-notes \
+            --verify-tag

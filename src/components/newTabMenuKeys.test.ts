@@ -3,6 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { NewTabMenu, DIRECT_KEYS, directIndex } from "./NewTabMenu";
+import { WorkbenchRuntimeProvider } from "@tabverse/workbench/runtime";
+import { desktopRuntime } from "@tabverse/runtime-desktop";
 import { useGlobalKeys } from "../keys";
 import { keyBindings, parseChord } from "../shortcuts";
 import { useStore } from "../state/store";
@@ -72,7 +74,10 @@ function terminalListener(e: KeyboardEvent) {
  */
 function Harness({ open }: { open: boolean }) {
   useGlobalKeys();
-  return open ? createElement(NewTabMenu) : null;
+  return createElement(
+    WorkbenchRuntimeProvider,
+    { runtime: desktopRuntime, children: open ? createElement(NewTabMenu) : null },
+  );
 }
 
 let root: Root | null = null;
@@ -149,8 +154,8 @@ describe("the picker's number keys, while it is open", () => {
 
   it("opens a terminal under the profile a digit names", async () => {
     await show(true);
-    // Five fixed entries, then the profiles: `deploy` is the sixth.
-    expect(await press("6")).toBe(true);
+    // Six fixed entries, then the profiles: `deploy` is the seventh.
+    expect(await press("7")).toBe(true);
     const [tab] = tabs();
     expect(tab.type).toBe("terminal");
     // THE POINT OF THE WHOLE STRAND: the profile's NAME is on the tab, which
@@ -161,8 +166,8 @@ describe("the picker's number keys, while it is open", () => {
 
   it("opens a saved layout the digit names, as the layout it is", async () => {
     await show(true);
-    // Five fixed entries, two profiles, then the layouts: `work` is the eighth.
-    expect(await press("8")).toBe(true);
+    // Six fixed entries, two profiles, then the layouts: `work` is the ninth.
+    expect(await press("9")).toBe(true);
     const [tab] = tabs();
     expect(tab.type).toBe("terminal");
     // THE POINT: what opens is the declared tree, not one terminal — the

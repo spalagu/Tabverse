@@ -94,16 +94,11 @@ export interface ConfigTerminal {
   templates?: ConfigTemplate[];
 }
 
-export interface ConfigResident {
-  default: boolean;
-}
-
 export interface ConfigValues {
   appearance: ConfigAppearance;
   browser: ConfigBrowser;
   network?: ConfigNetwork;
   terminal?: ConfigTerminal;
-  resident?: ConfigResident;
   files?: Record<string, unknown>;
   keys?: Record<string, unknown>;
 }
@@ -130,6 +125,8 @@ export interface ConfigSnapshot {
   warnings: ConfigWarning[];
   /** The files that contributed, in reading order. Empty = no file exists. */
   sources: string[];
+  /** A declarative config error; app.db settings are still returned. */
+  error?: string | null;
 }
 
 /**
@@ -215,10 +212,6 @@ export const TERMINAL_KEYS = {
   imageMemoryMb: "terminal.image_memory_mb",
   pasteGuard: "terminal.paste_guard",
   completionsUrl: "terminal.completions_url",
-} as const;
-
-export const RESIDENT_KEYS = {
-  default: "resident.default",
 } as const;
 
 // --------------------------------------------------------------- mapping
@@ -496,12 +489,6 @@ export function terminalBackgroundTasksOf(
   values: ConfigValues | null
 ): boolean | null {
   const on = values?.terminal?.background_tasks;
-  return typeof on === "boolean" ? on : null;
-}
-
-/** App-wide resident default; null means an older core has not declared it. */
-export function residentDefaultOf(values: ConfigValues | null): boolean | null {
-  const on = values?.resident?.default;
   return typeof on === "boolean" ? on : null;
 }
 

@@ -1,0 +1,25 @@
+[package]
+name = "tabverse-agent"
+version = "0.1.0"
+edition = "2021"
+description = "The agent runtime: the turn loop, its session events, and the permission point tools pass through."
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+# PKCE challenge only; already in the lock file via the existing tree.
+sha2 = "0.10"
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tabverse-agent-tools = { path = "../tabverse-agent-tools" }
+# Where the elided middle of an oversized tool result is parked so a later turn
+# can still read it (branch.rs).
+tempfile = "3.23.0"
+# Decoding the JWT payload to read which account a token belongs to
+# (codex/auth.rs). Already in the tree through tabverse-remote's framing.
+data-encoding = "2"
+
+[dev-dependencies]
+tempfile = "3.23.0"

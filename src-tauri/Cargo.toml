@@ -1,6 +1,6 @@
 [package]
 name = "tabverse"
-version = "0.0.3"
+version = "0.1.0"
 edition = "2021"
 description = "Tabverse: a cross-platform terminal that can replace most of your desktop."
 license.workspace = true
@@ -11,28 +11,14 @@ repository.workspace = true
 name = "tabverse_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-[features]
-default = ["runtime-wry"]
-runtime-wry = ["tauri/wry"]
-runtime-cef = ["tauri/cef", "dep:tauri-runtime-cef"]
-
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-# build.rs reads tauri.conf.json to bake the claimed file types into the
+# build.rs reads the content catalog to bake claimed file types into the
 # binary — the runtime config does not carry them (see build.rs).
 serde_json = { workspace = true }
 
 [dependencies]
-tauri = { version = "2.11.5", default-features = false, features = [
-  "common-controls-v6",
-  "compression",
-  "dbus",
-  "dynamic-acl",
-  "macos-proxy",
-  "unstable",
-  "x11",
-] }
-tauri-runtime-cef = { git = "https://github.com/spalagu/tauri.git", rev = "a639cadd9df0949ae20cbf8b29da66fc0cbf8d14", optional = true }
+tauri = { version = "2", features = ["unstable", "macos-proxy"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
@@ -40,10 +26,15 @@ base64 = "0.22"
 rand = "0.10.2"
 # For the PKCE challenge only. Already in the lock file by way of the existing
 # tree, so declaring it adds no download and no compilation unit.
+sha2 = "0.10"
 tabverse-proto = { path = "../crates/tabverse-proto" }
 tabverse-term = { path = "../crates/tabverse-term" }
+tabverse-agent = { path = "../crates/tabverse-agent" }
+tabverse-agent-tools = { path = "../crates/tabverse-agent-tools" }
 tabverse-remote = { path = "../crates/tabverse-remote" }
-tabverse-resident = { path = "../crates/tabverse-resident" }
+tabverse-network = { path = "../crates/tabverse-network" }
+tabverse-state = { path = "../crates/tabverse-state" }
+tabverse-runtime = { path = "../crates/tabverse-runtime" }
 tabverse-fs = { version = "0.1.0", path = "../crates/tabverse-fs" }
 toml = "1"
 toml_edit = { version = "0.25", features = ["serde"] }
@@ -53,10 +44,16 @@ tauri-plugin-dialog = "2"
 aes-gcm = "0.10"
 argon2 = "0.5"
 zeroize = "1"
-hex = "0.4"
-sha2 = "0.10"
 percent-encoding = "2"
 reqwest = { version = "0.13", default-features = false }
+# Reading the agent's SSE body as it arrives (agent_http.rs). Already compiled
+# into the tree through reqwest itself; naming it adds zero new units.
+futures-util = { version = "0.3", default-features = false }
+# The Codex socket transport (agent_http.rs). Already compiled into the tree by
+# iroh-relay with the same client + rustls-ring features; naming it adds no new
+# units and no new TLS stack.
+tokio-websockets = { version = "0.13", default-features = false, features = ["client", "rustls-webpki-roots", "ring"] }
+http = "1"
 # The header timeout around that request. Tauri's async runtime is tokio, so
 # this names what the tree already builds.
 tokio = { version = "1", default-features = false, features = ["time"] }
@@ -70,6 +67,12 @@ notify = "6"
 # so declaring it adds no download and no compilation unit.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Freedesktop Secret Service is implemented by GNOME Keyring and KWallet.
+# Only the machine master-key bundle lives there; credential records remain
+# encrypted in app.db like the macOS and Windows implementations.
+secret-service = { version = "5.2.0", default-features = false, features = ["rt-tokio-crypto-rust"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
@@ -108,9 +111,10 @@ windows-future = "0.2"
 windows-core = "0.61"
 
 [dev-dependencies]
+# The agent session tests need a real directory to run tools in and a real
+# place to write a session log, both thrown away afterwards.
 tempfile = "3.23.0"
-rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 # The app-share action seam test needs an AppHandle without a GUI: the
 # mock runtime runs the real event system in-process. Same crate, one
 # more feature, tests only — the shipped binary never sees it.
-tauri = { version = "2.11.5", default-features = false, features = ["test"] }
+tauri = { version = "2", features = ["test"] }

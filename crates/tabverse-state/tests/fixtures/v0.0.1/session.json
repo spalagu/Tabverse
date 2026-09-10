@@ -1,0 +1,1 @@
+{"version":1,"zones":3,"tabs":[{"id":"v001-terminal","type":"terminal","title":"Terminal","groupId":null,"cwd":"/tmp"},{"id":"v001-browser","type":"browser","title":"Browser","groupId":null,"url":"http://localhost:3000"}],"groups":[],"activeTabId":"v001-terminal"}

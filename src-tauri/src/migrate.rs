@@ -245,8 +245,13 @@ fn seal(
 /// Gather the live state directory and the credential vault, seal them, and
 /// write the archive to `path`. This is the one place export touches the
 /// keychain (through `credentials::export_vault`).
-pub fn export_to_path(state_dir: &Path, path: &Path, passphrase: &str) -> Result<Summary, String> {
-    let files = collect_files(state_dir)?;
+pub fn export_to_path(
+    state_dir: &Path,
+    scopes: &[(String, String)],
+    path: &Path,
+    passphrase: &str,
+) -> Result<Summary, String> {
+    let files = collect_export_files(state_dir, scopes)?;
     let passwords = crate::credentials::export_vault()?;
     let (bytes, summary) = seal(files, passwords, passphrase)?;
     std::fs::write(path, &bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
@@ -255,6 +260,22 @@ pub fn export_to_path(state_dir: &Path, path: &Path, passphrase: &str) -> Result
         summary.scopes, summary.passwords
     );
     Ok(summary)
+}
+
+fn collect_export_files(
+    state_dir: &Path,
+    scopes: &[(String, String)],
+) -> Result<BTreeMap<String, String>, String> {
+    let mut files = collect_files(state_dir)?;
+    // Top-level JSON used to be the state database. Remove stale legacy
+    // copies, then serialize authoritative app.db scopes into the same
+    // migration wire format so existing archives remain readable.
+    files.retain(|relative, _| relative.contains('/') || !relative.ends_with(".json"));
+    for (scope, json) in scopes {
+        let name = tabverse_fs::state::scope_file_name(scope).map_err(|e| format!("{e:#}"))?;
+        files.insert(name, b64(json.as_bytes()));
+    }
+    Ok(files)
 }
 
 /// Read, version-gate, decrypt and parse an archive — and touch nothing else.
@@ -532,6 +553,28 @@ mod tests {
         std::fs::create_dir_all(dir.join("favicons")).unwrap();
         std::fs::write(dir.join("favicons").join("x.dataurl"), b"icon").unwrap();
         std::fs::write(dir.join("session.json.tmp"), b"half").unwrap();
+    }
+
+    #[test]
+    fn export_uses_app_db_scopes_instead_of_stale_json_mirrors() {
+        let dir = scratch("database-scopes");
+        std::fs::write(dir.join("session.json"), br#"{"stale":true}"#).unwrap();
+        std::fs::create_dir(dir.join("userscripts")).unwrap();
+        std::fs::write(dir.join("userscripts/site.js"), b"keep auxiliary state").unwrap();
+        let scopes = vec![
+            ("session".to_string(), r#"{"tabs":[]}"#.to_string()),
+            ("files:abc".to_string(), r#"{"root":"/work"}"#.to_string()),
+        ];
+
+        let files = collect_export_files(&dir, &scopes).unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(files.get("session.json").unwrap())
+                .unwrap(),
+            br#"{"tabs":[]}"#
+        );
+        assert!(files.contains_key("files%3Aabc.json"));
+        assert!(files.contains_key("userscripts/site.js"));
     }
 
     /// A couple of vault entries to stand in for the keychain-backed store,

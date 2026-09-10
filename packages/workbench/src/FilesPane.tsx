@@ -69,14 +69,19 @@ function FolderList({ dir, rpc }: { dir: string; rpc: HostRpc }) {
     </div>
   );
 }
-/** The fs_read answer's shape, the fields this pane reads. */
-interface ReadMeta {
+/** Selected-file metadata consumed by the shared pane. */
+export interface ReadMeta {
   name: string;
   size: number;
   text: string | null;
   truncated: boolean;
   read_only_reason: string | null;
 }
+
+export type RemoteFileReader = (
+  path: string,
+  signal: AbortSignal,
+) => Promise<ReadMeta>;
 
 type PaneState =
   | { kind: "idle" }
@@ -89,6 +94,7 @@ export function FilesPane({
   dir,
   rpc,
   readOnly,
+  readFile,
 }: {
   /** The file the host's files tab fronts, or null when none does. */
   path: string | null;
@@ -98,6 +104,9 @@ export function FilesPane({
   rpc: HostRpc;
   /** View level: the editor is inert and Save is absent. */
   readOnly: boolean;
+  /** App-share data-plane reader. When present, selected file bytes never
+   * travel through the semantic fs_read RPC. */
+  readFile?: RemoteFileReader;
 }) {
   const [state, setState] = useState<PaneState>({ kind: "idle" });
   // The working copy; reset whenever a new file's read lands.
@@ -110,9 +119,10 @@ export function FilesPane({
       return;
     }
     let cancelled = false;
+    const abort = new AbortController();
     setState({ kind: "loading", path });
     setSaveState("idle");
-    rpc("fs_read", { path })
+    (readFile ? readFile(path, abort.signal) : rpc("fs_read", { path }))
       .then((raw) => {
         if (cancelled) return;
         const meta = raw as ReadMeta;
@@ -125,11 +135,12 @@ export function FilesPane({
       });
     return () => {
       cancelled = true;
+      abort.abort();
     };
     // The pane reads by path: a new file is a new read, an rpc identity
     // change mid-path would only duplicate the same call.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path]);
+  }, [path, readFile]);
 
   if (path === null) {
     if (dir !== null && dir !== "") return <FolderList dir={dir} rpc={rpc} />;

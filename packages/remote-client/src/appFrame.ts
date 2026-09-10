@@ -1,7 +1,7 @@
 /**
  * The v3 frame plumbing an app-level join speaks: multiplexed RPC over the
  * iroh stream, plus the incoming-frame dispatch the mirrored store and the
- * clipboard/proxy owners hang off.
+ * clipboard owner hangs off.
  *
  * SEPARATION. This module knows frames and ids; it knows nothing about React,
  * the store, or what any command does. The wasm seam (`WasmSession`) gained
@@ -16,70 +16,16 @@ export type AppHostFrame =
   | { type: "rpcResult"; id: number; ok?: unknown; err?: string }
   | { type: "actionApplied"; name: string; args: unknown }
   | { type: "appSnapshot"; state: unknown }
-  | { type: "clipSync"; seq: number; text: string }
-  | { type: "proxyRes"; id: number; head: string; body?: string }
-  | {
-      type: "browserResponseHead";
-      streamId: number;
-      status: number;
-      headers: Array<[string, string]>;
-      finalUrl: string;
-    }
-  | { type: "browserResponseChunk"; streamId: number; seq: number; b64: string }
-  | { type: "browserResponseEnd"; streamId: number }
-  | { type: "browserResponseError"; streamId: number; code: string; message: string }
-  | {
-      type: "contributionSnapshot";
-      tabId: string;
-      kind: string;
-      epoch: string;
-      snapshotRevision: number;
-      lastFrameSeq: number;
-      state: unknown;
-    }
-  | {
-      type: "contributionFrame";
-      tabId: string;
-      kind: string;
-      epoch: string;
-      frameSeq: number;
-      payload: unknown;
-    }
-  | {
-      type: "intentResult";
-      attachmentId: string;
-      attachmentGeneration: number;
-      intentId: string;
-      ok?: unknown;
-      err?: string;
-    }
-  | {
-      type: "privateStream";
-      attachmentId: string;
-      attachmentGeneration: number;
-      streamId: string;
-      seq: number;
-      fin: boolean;
-      payloadB64: string;
-    };
+  | { type: "clipSync"; seq: number; text: string };
 
 /** The frame families this dispatcher can be handed wholesale; non-v3
  * frames pass through untouched (the caller's v1/v2 handling stays). */
-export function isAppFrame(frame: { type: string }): frame is AppHostFrame {
+export function isAppFrame(frame: { type: string }): boolean {
   return (
     frame.type === "rpcResult" ||
     frame.type === "actionApplied" ||
     frame.type === "appSnapshot" ||
-    frame.type === "clipSync" ||
-    frame.type === "proxyRes" ||
-    frame.type === "browserResponseHead" ||
-    frame.type === "browserResponseChunk" ||
-    frame.type === "browserResponseEnd" ||
-    frame.type === "browserResponseError" ||
-    frame.type === "contributionSnapshot" ||
-    frame.type === "contributionFrame" ||
-    frame.type === "intentResult" ||
-    frame.type === "privateStream"
+    frame.type === "clipSync"
   );
 }
 
@@ -87,11 +33,6 @@ export interface AppFrameSinks {
   onAction(name: string, args: unknown): void;
   onSnapshot(state: unknown): void;
   onClip(seq: number, text: string): void;
-  onProxy(id: number, head: string, body?: string): void;
-  onContributionSnapshot?(frame: Extract<AppHostFrame, { type: "contributionSnapshot" }>): void;
-  onContributionFrame?(frame: Extract<AppHostFrame, { type: "contributionFrame" }>): void;
-  onIntentResult?(frame: Extract<AppHostFrame, { type: "intentResult" }>): void;
-  onPrivateStream?(frame: Extract<AppHostFrame, { type: "privateStream" }>): void;
 }
 
 /** Milliseconds before an rpc() rejects: a host that never answers must
@@ -170,8 +111,8 @@ export function createAppChannel(sendRpc: (id: number, cmd: string, args: unknow
 
 /**
  * Split one incoming frame into the sinks. The store mirror hears actions
- * and snapshots; the clipboard owner hears clipSync; the proxy owner hears
- * proxyRes. Frames neither sink claims are ignored here — the terminal
+ * and snapshots; the clipboard owner hears clipSync. Frames no sink claims
+ * are ignored here — the terminal
  * families (output/snapshot/...) belong to the tab-level renderers the page
  * already runs.
  */
@@ -187,26 +128,6 @@ export function dispatchAppFrame(frame: unknown, sinks: AppFrameSinks): boolean 
       return true;
     case "clipSync":
       sinks.onClip(Number(f.seq), String(f.text));
-      return true;
-    case "proxyRes":
-      sinks.onProxy(Number(f.id), String(f.head), f.body === undefined ? undefined : String(f.body));
-      return true;
-    case "browserResponseHead":
-    case "browserResponseChunk":
-    case "browserResponseEnd":
-    case "browserResponseError":
-      return true;
-    case "contributionSnapshot":
-      sinks.onContributionSnapshot?.(f as unknown as Extract<AppHostFrame, { type: "contributionSnapshot" }>);
-      return true;
-    case "contributionFrame":
-      sinks.onContributionFrame?.(f as unknown as Extract<AppHostFrame, { type: "contributionFrame" }>);
-      return true;
-    case "intentResult":
-      sinks.onIntentResult?.(f as unknown as Extract<AppHostFrame, { type: "intentResult" }>);
-      return true;
-    case "privateStream":
-      sinks.onPrivateStream?.(f as unknown as Extract<AppHostFrame, { type: "privateStream" }>);
       return true;
     default:
       return false;

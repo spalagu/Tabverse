@@ -75,7 +75,6 @@ describe("the app frame dispatch", () => {
     onAction: vi.fn(),
     onSnapshot: vi.fn(),
     onClip: vi.fn(),
-    onProxy: vi.fn(),
   });
 
   it("routes each family to its sink", () => {
@@ -89,10 +88,6 @@ describe("the app frame dispatch", () => {
     expect(dispatchAppFrame({ type: "clipSync", seq: 3, text: "hi" }, sinks)).toBe(true);
     expect(sinks.onClip).toHaveBeenCalledWith(3, "hi");
 
-    expect(
-      dispatchAppFrame({ type: "proxyRes", id: 4, head: "HTTP/1.1 200", body: "x" }, sinks)
-    ).toBe(true);
-    expect(sinks.onProxy).toHaveBeenCalledWith(4, "HTTP/1.1 200", "x");
   });
 
   it("unknown and non-object frames are not consumed", () => {
@@ -102,10 +97,11 @@ describe("the app frame dispatch", () => {
     expect(dispatchAppFrame("welcome", sinks)).toBe(false);
   });
 
-  it("isAppFrame names exactly the five the dispatcher claims", () => {
-    for (const type of ["rpcResult", "actionApplied", "appSnapshot", "clipSync", "proxyRes"]) {
+  it("isAppFrame names exactly the four the dispatcher claims", () => {
+    for (const type of ["rpcResult", "actionApplied", "appSnapshot", "clipSync"]) {
       expect(isAppFrame({ type })).toBe(true);
     }
+    expect(isAppFrame({ type: "proxyRes" })).toBe(false);
     expect(isAppFrame({ type: "mode" })).toBe(false);
   });
 });

@@ -6,6 +6,8 @@
 //! serializes its state for a joining viewer). Keeping this out of the GUI
 //! layer is what makes remote control verifiable without a webview.
 
+pub mod data_stream;
+
 use std::sync::{Arc, Mutex};
 
 use crate::{RemoteHub, Share};

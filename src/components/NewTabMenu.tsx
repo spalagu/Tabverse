@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { TabContribution } from "@tabverse/tab-contracts";
+import { useCallback, useEffect, useMemo } from "react";
+import { tabDefinitionsForRuntime } from "@tabverse/workbench/tabs";
+import { useWorkbenchRuntime } from "@tabverse/workbench/runtime";
 import { TabKindOptionPresentation } from "@tabverse/workbench/new-tab";
 import { keysShownFor } from "../shortcuts";
 import { STR } from "../strings";
@@ -11,7 +12,6 @@ import { useProfiles } from "./useProfiles";
 import { useTemplates } from "./useTemplates";
 import { templateLeaves } from "../terminalTemplates";
 import { TAB_ICONS } from "./icons";
-import { desktopPluginComposition } from "../pluginComposition";
 
 const shortcuts: Partial<Record<TabType, string>> = {
   terminal: keysShownFor("new-terminal"),
@@ -21,30 +21,17 @@ const shortcuts: Partial<Record<TabType, string>> = {
 };
 const M = STR.browser.newTabMenu;
 
-/** The enabled PluginCatalog contribution list is the only New Tab registry. */
-function optionsFor(contributions: readonly TabContribution<unknown>[]) {
-  return contributions
-    .map(({ manifest }) => ({
-      type: manifest.kind,
-      ...manifest.presentation,
-      kbd: shortcuts[manifest.kind] ?? "",
-    }))
-    .sort((left, right) =>
-      (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER) ||
-      left.type.localeCompare(right.type),
-    );
+/** One registry drives both desktop and Join pickers. A newly registered
+ * tab cannot silently appear in one entry point but not the other. */
+function optionsFor(runtime: ReturnType<typeof useWorkbenchRuntime>) {
+  return tabDefinitionsForRuntime(runtime).map((definition) => ({
+    ...definition,
+    kbd: shortcuts[definition.type] ?? "",
+  }));
 }
 
 type Entry =
-  | {
-      kind: "type";
-      type: TabType;
-      label: string;
-      hint: string;
-      icon: string;
-      launch?: "tab" | "dialog";
-      kbd: string;
-    }
+  | { kind: "type"; type: TabType; label: string; hint: string; kbd: string }
   | { kind: "profile"; profile: ConfigProfile }
   | { kind: "template"; template: ConfigTemplate };
 
@@ -71,8 +58,7 @@ export function directIndex(
 }
 
 export function NewTabMenu() {
-  const composition = desktopPluginComposition();
-  const [contributions, setContributions] = useState<readonly TabContribution<unknown>[]>([]);
+  const runtime = useWorkbenchRuntime();
   const addTab = useStore((s) => s.addTab);
   const openTemplateTab = useStore((s) => s.openTemplateTab);
   const setJoinDialog = useStore((s) => s.setJoinDialog);
@@ -80,28 +66,13 @@ export function NewTabMenu() {
   const { list: profileList } = useProfiles();
   const { list: templateList } = useTemplates();
 
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = () => {
-      void composition.tabContributions().then((next) => {
-        if (!cancelled) setContributions(next);
-      });
-    };
-    refresh();
-    const unsubscribe = composition.subscribe(refresh);
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, [composition]);
-
   const entries = useMemo<Entry[]>(
     () => [
-      ...optionsFor(contributions).map((o) => ({ kind: "type" as const, ...o })),
+      ...optionsFor(runtime).map((o) => ({ kind: "type" as const, ...o })),
       ...profileList.map((profile) => ({ kind: "profile" as const, profile })),
       ...templateList.map((template) => ({ kind: "template" as const, template })),
     ],
-    [contributions, profileList, templateList]
+    [profileList, runtime, templateList]
   );
 
   const open = useCallback(
@@ -114,7 +85,7 @@ export function NewTabMenu() {
         openTemplateTab(entry.template);
         return;
       }
-      if (entry.launch === "dialog") setJoinDialog(true);
+      if (entry.type === "remote") setJoinDialog(true);
       else addTab({ type: entry.type });
     },
     [addTab, openTemplateTab, setJoinDialog]
@@ -153,7 +124,7 @@ export function NewTabMenu() {
         <div className="newtab-menu-title">{M.title}</div>
         {entries.map((entry, at) => {
           if (entry.kind !== "type") return null;
-          const Icon = TAB_ICONS[entry.icon];
+          const Icon = TAB_ICONS[entry.type];
           return (
             <TabKindOptionPresentation
               key={entry.type}

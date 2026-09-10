@@ -10,7 +10,6 @@ repository.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 # Build libgit2 from the crate's reproducible source bundle instead of linking
 # the developer machine's Homebrew dylib. This keeps the app self-contained on
 # macOS and uses the same Cargo-managed native dependency on every platform.
@@ -32,7 +31,7 @@ flate2 = "1.1"
 plist = "1.10"
 # Bundled engine: the preview must behave identically on every platform, and
 # Windows ships no system sqlite to link against.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { workspace = true }
 # No default features: only naming (name table), glyph count, and the
 # variable-font flag are queried — the layout/glyph-name tables never are.
 skrifa = "0.46.2"
@@ -57,3 +56,4 @@ filetime = "0.2"
 # ring backend instead of the default aws-lc-rs: same test coverage, much
 # lighter native build.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+serde_json = { workspace = true }

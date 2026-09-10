@@ -1,0 +1,1 @@
+{"version":2,"zones":3,"tabs":[{"id":"v002-files","kind":"files","title":"Files","groupId":null,"cwd":"/tmp","residentPolicy":"inherit"},{"id":"v002-agent","kind":"agent","title":"Agent","groupId":null,"cwd":"/tmp","pluginState":{"version":1,"state":{"model":"default"}}}],"groups":[],"activeTabId":"v002-files"}

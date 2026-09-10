@@ -4,8 +4,6 @@ import { createRoot, type Root } from "react-dom/client";
 import { App } from "./App";
 import { b64encode } from "@tabverse/remote-client/b64";
 import { CLIP_MAX_BYTES, resetHostClip } from "@tabverse/remote-client/clipboard";
-import { startJoinPluginComposition } from "./pluginComposition";
-import { useRemoteMirrorStore } from "@tabverse/runtime-remote/app-mirror";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -18,7 +16,11 @@ const h = vi.hoisted(() => {
   const events: Array<(json: string) => void> = [];
   const tickets: string[] = [];
   const calls: Array<{ fn: string; args: unknown[] }> = [];
-  return { termInstances, onDataHandlers, events, tickets, calls };
+  const httpStarts: Array<(value: unknown) => void> = [];
+  const httpBodies: Uint8Array[][] = [];
+  const fileStarts: Array<(value: unknown) => void> = [];
+  const fileBodies: Uint8Array[][] = [];
+  return { termInstances, onDataHandlers, events, tickets, calls, httpStarts, httpBodies, fileStarts, fileBodies };
 });
 
 vi.mock("@tabverse/runtime-remote/wasm-loader", () => ({
@@ -47,22 +49,30 @@ vi.mock("@tabverse/runtime-remote/wasm-loader", () => ({
           h.calls.push({ fn: "sendRpc", args: [id, cmd, args] }),
         sendClipPush: (text: string) =>
           h.calls.push({ fn: "sendClipPush", args: [text] }),
-        sendProxyReq: (id: bigint, head: string, body?: string) =>
-          h.calls.push({ fn: "sendProxyReq", args: [id, head, body] }),
-        sendBrowserOpen: (...args: unknown[]) =>
-          h.calls.push({ fn: "sendBrowserOpen", args }),
-        sendBrowserRequestChunk: (...args: unknown[]) =>
-          h.calls.push({ fn: "sendBrowserRequestChunk", args }),
-        sendBrowserRequestEnd: (...args: unknown[]) =>
-          h.calls.push({ fn: "sendBrowserRequestEnd", args }),
-        sendBrowserCredit: (...args: unknown[]) =>
-          h.calls.push({ fn: "sendBrowserCredit", args }),
-        sendBrowserCancel: (...args: unknown[]) =>
-          h.calls.push({ fn: "sendBrowserCancel", args }),
-        sendRemoteAck: (tabId: string, epoch: string, frameSeq: bigint) =>
-          h.calls.push({ fn: "sendRemoteAck", args: [tabId, epoch, frameSeq] }),
-        requestRemoteSnapshot: (tabId: string, epoch?: string) =>
-          h.calls.push({ fn: "requestRemoteSnapshot", args: [tabId, epoch] }),
+        openHttpStream: async (contextId: string, method: string, url: string, headers: unknown[]) => {
+          h.calls.push({ fn: "openHttpStream", args: [contextId, method, url, headers] });
+          const bodyIndex = h.httpBodies.length;
+          h.httpBodies.push([]);
+          const start = new Promise((resolve) => h.httpStarts.push(resolve));
+          return {
+            cancel: () => h.calls.push({ fn: "cancelHttpStream", args: [bodyIndex] }),
+            writeRequestChunk: async (bytes: Uint8Array) => { h.httpBodies[bodyIndex].push(bytes); },
+            finishRequest: () => {},
+            responseStart: () => start,
+            readResponseChunk: async () => h.httpBodies[bodyIndex].shift() ?? new Uint8Array(),
+          };
+        },
+        openFileStream: async (contextId: string, path: string, offset: bigint, length?: bigint) => {
+          h.calls.push({ fn: "openFileStream", args: [contextId, path, offset, length] });
+          const bodyIndex = h.fileBodies.length;
+          h.fileBodies.push([]);
+          const start = new Promise((resolve) => h.fileStarts.push(resolve));
+          return {
+            cancel: () => h.calls.push({ fn: "cancelFileStream", args: [path] }),
+            responseStart: () => start,
+            readResponseChunk: async () => h.fileBodies[bodyIndex].shift() ?? new Uint8Array(),
+          };
+        },
       };
     },
   }),
@@ -128,12 +138,10 @@ vi.mock("@tabverse/workbench/terminal/scale-to-fit", () => ({
 function welcome(extra?: Record<string, unknown>) {
   return {
     type: "welcome",
-    proto: 4,
+    proto: 2,
     tabTitle: "host tab",
     cols: 80,
     rows: 24,
-    attachmentId: "attachment-7",
-    attachmentGeneration: 1,
     ...extra,
   };
 }
@@ -145,7 +153,7 @@ const APP_SNAPSHOT = {
   version: 1,
   tabs: [
     { id: "t1", type: "terminal", title: "zsh" },
-    { id: "f1", type: "files", title: "Files" },
+    { id: "a1", type: "agent", title: "Agent" },
   ],
   groups: [],
   activeTabId: "t1",
@@ -166,6 +174,10 @@ beforeEach(() => {
   h.events.length = 0;
   h.tickets.length = 0;
   h.calls.length = 0;
+  h.httpStarts.length = 0;
+  h.httpBodies.length = 0;
+  h.fileStarts.length = 0;
+  h.fileBodies.length = 0;
   location.hash = "#tabv-test-ticket";
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -188,7 +200,6 @@ const flush = () =>
 /** Mount the page; the hash ticket auto-connects. Returns the host→viewer
  * event callback, driven by hand from the tests. */
 async function mountJoined() {
-  await startJoinPluginComposition();
   await act(async () => {
     root.render(createElement(App));
   });
@@ -222,7 +233,69 @@ describe("join page renderer dispatch", () => {
     expect(h.tickets).toEqual(["tabv-test-ticket"]);
     expect(h.termInstances).toHaveLength(0);
     expect(host.querySelector(".xterm")).toBeNull();
+    expect(host.querySelector(".agent-view")).toBeNull();
     expect(host.querySelector(".remote-connecting")).not.toBeNull();
+  });
+
+  it("an agent welcome never constructs a Terminal and renders the transcript", async () => {
+    const send = await mountJoined();
+    await send(welcome({ tabType: "agent" }));
+    expect(h.termInstances).toHaveLength(0);
+    expect(host.querySelector(".xterm")).toBeNull();
+    expect(host.querySelector(".agent-view")).not.toBeNull();
+    // Agent frames flow into the same fold the app uses.
+    await send({
+      type: "agentSnapshot",
+      events: [
+        { type: "user_prompt", text: "hello from the host" },
+        { type: "turn_started", turn: 1 },
+        { type: "assistant_text", delta: "hi there" },
+      ],
+    });
+    expect(h.termInstances).toHaveLength(0);
+    expect(host.textContent).toContain("hello from the host");
+    expect(host.textContent).toContain("hi there");
+  });
+
+  it("agent composer and approvals drive the wasm session's agent methods", async () => {
+    const send = await mountJoined();
+    await send(welcome({ tabType: "agent" }));
+    await send({ type: "mode", readOnly: false, access: "approve" });
+
+    // Steer: the composer sends a prompt through sendPrompt.
+    const input = host.querySelector<HTMLTextAreaElement>(".agent-input")!;
+    expect(input).not.toBeNull();
+    await act(async () => {
+      const proto = Object.getPrototypeOf(input) as object;
+      const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
+      setter.call(input, "run the tests");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const sendBtn = [...host.querySelectorAll("button")].find(
+      (b) => b.textContent === "Send"
+    )!;
+    await act(async () => sendBtn.click());
+    expect(sent("sendPrompt")).toEqual([
+      { fn: "sendPrompt", args: ["run the tests"] },
+    ]);
+
+    // Approve: a pending permission renders Allow/Deny wired to sendAnswer.
+    await send({
+      type: "agentEvent",
+      event: {
+        type: "permission_requested",
+        call_id: "call-1",
+        name: "bash",
+        input: { command: "rm -rf build" },
+      },
+    });
+    const allow = [...host.querySelectorAll("button")].find(
+      (b) => b.textContent === "Allow"
+    )!;
+    await act(async () => allow.click());
+    expect(sent("sendAnswer")).toEqual([
+      { fn: "sendAnswer", args: ["call-1", true] },
+    ]);
   });
 
   it("a terminal welcome constructs exactly one Terminal and feeds it the snapshot", async () => {
@@ -231,6 +304,7 @@ describe("join page renderer dispatch", () => {
     await flush();
     expect(h.termInstances).toHaveLength(1);
     expect(host.querySelector(".xterm")).not.toBeNull();
+    expect(host.querySelector(".agent-view")).toBeNull();
     await send({
       type: "snapshot",
       b64: btoa("hello grid"),
@@ -253,28 +327,6 @@ describe("join page renderer dispatch", () => {
     await flush();
     expect(h.termInstances).toHaveLength(1);
     expect(host.querySelector(".xterm")).not.toBeNull();
-  });
-
-  it("a v4 contribution welcome mounts a one-tab app shell from its semantic snapshot", async () => {
-    const send = await mountJoined();
-    await send(welcome({ proto: 4, tabType: "contribution", cols: 0, rows: 0 }));
-    await send({
-      type: "contributionSnapshot",
-      tabId: "browser-1",
-      kind: "browser",
-      epoch: "epoch-1",
-      snapshotRevision: 1,
-      lastFrameSeq: 0,
-      state: { title: "Intranet", url: "http://intranet/" },
-    });
-    await flush();
-
-    expect(host.querySelector(".app-shell")).not.toBeNull();
-    expect(host.querySelectorAll(".app-tab-row")).toHaveLength(1);
-    expect(host.querySelector(".app-tab-row")?.textContent).toContain("Intranet");
-    expect(sent("sendRemoteAck")).toEqual([
-      { fn: "sendRemoteAck", args: ["browser-1", "epoch-1", 0n] },
-    ]);
   });
 
   it("typed input reaches the wire base64-encoded; sticky Ctrl turns c into 0x03", async () => {
@@ -360,43 +412,13 @@ describe("join page renderer dispatch", () => {
     expect(rows[0].getAttribute("aria-selected")).toBe("true");
   });
 
-  it("drops Settings before the viewer store and rendered app shell", async () => {
-    const send = await mountAppShare(false);
-    await send({
-      type: "appSnapshot",
-      state: {
-        ...APP_SNAPSHOT,
-        tabs: [
-          ...APP_SNAPSHOT.tabs,
-          {
-            id: "settings-private",
-            type: "settings",
-            title: "PRIVATE_SETTINGS_TITLE",
-            secret: "PRIVATE_SETTINGS_VALUE",
-          },
-        ],
-        activeTabId: "settings-private",
-      },
-    });
-    await flush();
-
-    expect(host.querySelectorAll(".app-tab-row")).toHaveLength(2);
-    expect(host.textContent).not.toContain("PRIVATE_SETTINGS_TITLE");
-    expect(host.innerHTML).not.toContain("PRIVATE_SETTINGS_VALUE");
-    expect(useRemoteMirrorStore.getState().tabs.map((tab) => tab.id)).toEqual([
-      "t1",
-      "f1",
-    ]);
-    expect(useRemoteMirrorStore.getState().activeTabId).toBe("t1");
-  });
-
   it("an app share in steer mode sends tab selection to the host and replays it locally", async () => {
     await mountAppShare(false);
     await act(async () =>
       host.querySelectorAll<HTMLButtonElement>(".app-tab-row")[1].click()
     );
     expect(sent("sendAction")).toEqual([
-      { fn: "sendAction", args: ["activateTab", "f1"] },
+      { fn: "sendAction", args: ["activateTab", "a1"] },
     ]);
     // The optimistic replay answered the click before the host's
     // actionApplied broadcast confirms it.
@@ -437,6 +459,25 @@ describe("join page renderer dispatch", () => {
     });
   });
 
+  it("switching the app share to an agent row mounts the agent pane with the session's transcript", async () => {
+    const send = await mountAppShare(false);
+    await flush();
+    expect(host.querySelector(".xterm")).not.toBeNull();
+    // The host fronts the agent row: the terminal's mount goes, the
+    // agent pane arrives (its events fold into agentState the same way
+    // a tab-level agent share's do), and no second Terminal is built.
+    await send({ type: "actionApplied", name: "activateTab", args: "a1" });
+    await flush();
+    expect(host.querySelector(".xterm")).toBeNull();
+    expect(host.querySelector(".agent-view")).not.toBeNull();
+    expect(host.querySelector(".app-share-content")).toBeNull();
+    expect(h.termInstances).toHaveLength(1);
+    // A session event the host streams lands in the pane.
+    await send({ type: "agentEvent", event: { type: "turn_started", turn: 1 } });
+    await flush();
+    expect(host.querySelector(".agent-view")).not.toBeNull();
+  });
+
   it("a mode frame from view to steer re-enables the app share's selector", async () => {
     const send = await mountAppShare(true);
     await act(async () =>
@@ -455,7 +496,7 @@ describe("join page renderer dispatch", () => {
       host.querySelectorAll<HTMLButtonElement>(".app-tab-row")[1].click()
     );
     expect(sent("sendAction")).toEqual([
-      { fn: "sendAction", args: ["activateTab", "f1"] },
+      { fn: "sendAction", args: ["activateTab", "a1"] },
     ]);
   });
 
@@ -524,7 +565,56 @@ describe("join page renderer dispatch", () => {
     expect(writeText).toHaveBeenCalledTimes(1);
   });
 
-  it("a fronting browser tab mounts the proxied pane; the document round-trips through http-stream-v2", async () => {
+  it("a fronting Files tab reads raw bytes on a cancellable file stream, not fs_read RPC", async () => {
+    const send = await mountAppShare(false);
+    await send({
+      type: "appSnapshot",
+      state: {
+        ...APP_SNAPSHOT,
+        tabs: [
+          ...APP_SNAPSHOT.tabs,
+          { id: "f1", type: "files", title: "notes.txt", cwd: "/work" },
+        ],
+        activeTabId: "f1",
+        filesOpenPath: { f1: "/work/notes.txt" },
+        filesOpenDir: { f1: "/work" },
+      },
+    });
+    await flush();
+    expect(sent("openFileStream")).toEqual([
+      { fn: "openFileStream", args: ["f1", "/work/notes.txt", 0n, 4n * 1024n * 1024n] },
+    ]);
+    expect(
+      sent("sendRpc").some((call) => call.args[1] === "fs_read"),
+    ).toBe(false);
+
+    const body = new TextEncoder().encode("read from Host bytes");
+    h.fileBodies[0].push(body);
+    h.fileStarts[0]({
+      type: "file",
+      head: {
+        path: "/work/notes.txt",
+        name: "notes.txt",
+        mime: "text/plain",
+        total: BigInt(body.byteLength),
+        offset: 0n,
+        length: BigInt(body.byteLength),
+      },
+    });
+    await flush();
+    expect(host.querySelector<HTMLTextAreaElement>(".files-pane-text")?.value)
+      .toBe("read from Host bytes");
+
+    await send({ type: "actionApplied", name: "activateTab", args: "t1" });
+    await send({ type: "actionApplied", name: "activateTab", args: "f1" });
+    await flush();
+    expect(sent("openFileStream")).toHaveLength(2);
+    await send({ type: "actionApplied", name: "activateTab", args: "t1" });
+    await flush();
+    expect(sent("cancelFileStream").at(-1)?.args).toEqual(["/work/notes.txt"]);
+  });
+
+  it("a fronting browser tab mounts the proxied pane over an independent HTTP stream", async () => {
     const send = await mountAppShare(false);
     // The host fronts a browser row carrying its address.
     await send({
@@ -540,61 +630,34 @@ describe("join page renderer dispatch", () => {
     });
     await flush();
 
-    // The pane asked the host's network through one attachment-bound Open.
-    const reqs = sent("sendBrowserOpen");
+    const reqs = sent("openHttpStream");
     expect(reqs).toHaveLength(1);
-    expect(reqs[0].args.slice(1, 7)).toEqual([
-      "b1",
-      "browser-grant-v1:attachment-7:1:b1",
-      "attachment-7",
-      1n,
-      "GET",
-      "http://intranet.local/wiki/Home",
+    expect(reqs[0].args.slice(0, 3)).toEqual([
+      "b1", "GET", "http://intranet.local/wiki/Home",
     ]);
-    expect(typeof reqs[0].args[0]).toBe("bigint");
 
     // The host's answer lands and the mirrored document is on screen;
     // the placeholder the other tab kinds keep is gone.
-    // The frame body is base64 now (the host encodes bytes; TLS-terminated
-    // https answers ride the same shape).
-    const streamId = Number(reqs[0].args[0]);
-    await send({
-      type: "browserResponseHead",
-      streamId,
-      status: 200,
-      headers: [["content-type", "text/html"]],
-      finalUrl: "http://intranet.local/wiki/Home",
-    });
-    await send({
-      type: "browserResponseChunk",
-      streamId,
-      seq: 0,
-      b64: btoa(
-        "<html><head><title>Wiki</title></head><body><h1>Intranet wiki</h1></body></html>"
-      ),
-    });
-    await send({ type: "browserResponseEnd", streamId });
+    h.httpBodies[0].push(new TextEncoder().encode(
+      "<html><head><title>Wiki</title></head><body><h1>Intranet wiki</h1></body></html>"
+    ));
+    h.httpStarts[0]({ type: "response", head: { status: 200, finalUrl: "http://intranet.local/wiki/Home", headers: [{ name: "content-type", value: "text/html" }] } });
     await flush();
     const frame = host.querySelector(".browser-pane-frame");
     expect(frame).not.toBeNull();
     expect(frame!.getAttribute("srcdoc")).toContain("<h1>Intranet wiki</h1>");
     expect(frame!.getAttribute("srcdoc")).toContain(
-      '<base href="/__tabverse_proxy/http/intranet.local/wiki/">'
+      '<base href="/__tabverse_proxy/b1/http/intranet.local/wiki/">'
     );
     expect(host.querySelector(".app-share-content")).toBeNull();
 
-    // The stream's structured error flips a re-asked pane to the link.
+    // A data-stream failure flips a re-asked pane to the link.
     await send({ type: "actionApplied", name: "activateTab", args: "t1" });
     await send({ type: "actionApplied", name: "activateTab", args: "b1" });
     await flush();
-    const second = sent("sendBrowserOpen")[1];
+    const second = sent("openHttpStream")[1];
     expect(second).toBeDefined();
-    await send({
-      type: "browserResponseError",
-      streamId: Number(second.args[0]),
-      code: "network-error",
-      message: "the request named no forwardable host",
-    });
+    h.httpStarts[1]({ type: "error", error: { code: "denied", message: "the request named no forwardable host", retryable: false } });
     await flush();
     expect(host.querySelector(".browser-pane-unmirrored")).not.toBeNull();
     expect(host.querySelector(".browser-pane-frame")).toBeNull();

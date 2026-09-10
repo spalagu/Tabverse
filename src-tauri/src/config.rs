@@ -206,8 +206,6 @@ pub struct Config {
     #[serde(default)]
     pub terminal: Terminal,
     #[serde(default)]
-    pub resident: Resident,
-    #[serde(default)]
     pub files: Files,
     #[serde(default)]
     pub keys: Keys,
@@ -264,11 +262,6 @@ impl Default for Config {
                 // Same kind of fact, same recognition (see
                 // [`crate::templates`]).
                 templates: Vec::new(),
-            },
-            resident: Resident {
-                // Preserve current lifecycle until the user opts in. A
-                // Tab-level `on` may still override this app-wide default.
-                default: false,
             },
             // Files::default() and not a struct literal, for the same
             // reason as `keys` one line down with the polarity reversed:
@@ -373,14 +366,6 @@ pub struct Terminal {
     pub templates: Vec<crate::templates::Template>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Resident {
-    /// Per-Tab inherit/on/off lives with session state; this is only the
-    /// device-wide value inherited by those tabs.
-    #[serde(default)]
-    pub default: bool,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Files {
@@ -429,12 +414,6 @@ impl Default for Network {
 impl Default for Terminal {
     fn default() -> Self {
         Config::default().terminal
-    }
-}
-
-impl Default for Resident {
-    fn default() -> Self {
-        Config::default().resident
     }
 }
 
@@ -997,12 +976,6 @@ pub static SETTINGS: &[Setting] = &[
         section: "terminal-completions",
         str_key: "settings.completions.url",
     },
-    Setting {
-        key: "resident.default",
-        kind: Kind::Toggle,
-        section: "background-tasks",
-        str_key: "settings.backgroundTasks.residentDefault",
-    },
 ];
 
 /// The file sections that exist, including the three reserved ones. A table
@@ -1013,7 +986,6 @@ pub static SECTIONS: &[&str] = &[
     "browser",
     "network",
     "terminal",
-    "resident",
     "files",
     "keys",
 ];
@@ -1789,16 +1761,160 @@ pub struct ConfigSnapshot {
     pub values: Config,
     pub warnings: Vec<Warning>,
     pub sources: Vec<String>,
+    pub error: Option<String>,
 }
 
-#[tauri::command]
-pub async fn config_get() -> Result<ConfigSnapshot, String> {
+const SETTINGS_IMPORT_MARKER: &str = "_migration.config-toml-v1";
+
+fn explicit_legacy_settings(sources: &[String]) -> Result<Vec<(String, String)>, String> {
+    let mut values = BTreeMap::<String, String>::new();
+    for source in sources {
+        let text = std::fs::read_to_string(source)
+            .map_err(|e| format!("cannot read {source} while importing settings: {e}"))?;
+        let table: toml::Table = toml::from_str(&text)
+            .map_err(|e| format!("cannot parse {source} while importing settings: {e}"))?;
+        for setting in SETTINGS {
+            let (section, leaf) = split_key(setting.key)?;
+            let Some(value) = table.get(section).and_then(|v| v.get(leaf)) else {
+                continue;
+            };
+            let json = serde_json::to_string(value)
+                .map_err(|e| format!("cannot import {} from {source}: {e}", setting.key))?;
+            values.insert(setting.key.to_string(), json);
+        }
+    }
+    Ok(values.into_iter().collect())
+}
+
+fn put_json_path(
+    root: &mut serde_json::Value,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let (section, leaf) = split_key(key)?;
+    let object = root
+        .get_mut(section)
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| format!("configuration has no object section `{section}`"))?;
+    object.insert(leaf.to_string(), value);
+    Ok(())
+}
+
+pub fn snapshot_with_store(
+    store: &tabverse_state::AppStateStore,
+) -> Result<ConfigSnapshot, String> {
+    match load() {
+        Ok(loaded) => {
+            let legacy = explicit_legacy_settings(&loaded.sources)?;
+            store
+                .import_settings_once(SETTINGS_IMPORT_MARKER, &legacy)
+                .map_err(|e| format!("app.db settings import: {e:#}"))?;
+            let config = apply_store_settings(store, declarative_file_config(loaded.config))?;
+            Ok(ConfigSnapshot {
+                values: config,
+                warnings: loaded.warnings,
+                sources: loaded.sources,
+                error: None,
+            })
+        }
+        Err(error) => Ok(ConfigSnapshot {
+            values: apply_store_settings(store, Config::default())?,
+            warnings: Vec::new(),
+            sources: vec![error.path.clone()],
+            error: Some(error.to_string()),
+        }),
+    }
+}
+
+/// After migration, config.toml contributes only the structures that are
+/// deliberately still file-authored. Every registered scalar starts at the
+/// shipped default and is then overlaid exclusively from app.db.
+fn declarative_file_config(file: Config) -> Config {
+    let defaults = Config::default();
+    Config {
+        terminal: Terminal {
+            profiles: file.terminal.profiles,
+            templates: file.terminal.templates,
+            ..defaults.terminal
+        },
+        files: file.files,
+        keys: file.keys,
+        ..defaults
+    }
+}
+
+fn apply_store_settings(
+    store: &tabverse_state::AppStateStore,
+    config: Config,
+) -> Result<Config, String> {
+    let mut values = serde_json::to_value(config).map_err(|e| e.to_string())?;
+    for (key, value_json) in store
+        .load_settings()
+        .map_err(|e| format!("app.db settings read: {e:#}"))?
+    {
+        if key == SETTINGS_IMPORT_MARKER {
+            continue;
+        }
+        setting_for(&key)?;
+        let value = serde_json::from_str(&value_json)
+            .map_err(|e| format!("app.db setting `{key}` is invalid: {e}"))?;
+        put_json_path(&mut values, &key, value)?;
+    }
+    serde_json::from_value(values)
+        .map_err(|e| format!("app.db settings do not form valid configuration: {e}"))
+}
+
+pub fn set_with_store(
+    store: &tabverse_state::AppStateStore,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let setting = setting_for(key)?;
+    let (section, leaf) = split_key(setting.key)?;
+    let candidate = to_toml_value(key, value)?;
+    check_value(section, leaf, &candidate)?;
+    store
+        .save_setting(
+            key,
+            &serde_json::to_string(value).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("app.db setting `{key}`: {e:#}"))?;
+    note_written(key);
+    Ok(())
+}
+
+pub fn reset_with_store(store: &tabverse_state::AppStateStore, key: &str) -> Result<(), String> {
+    setting_for(key)?;
+    store
+        .delete_setting(key)
+        .map_err(|e| format!("app.db setting `{key}`: {e:#}"))?;
+    note_written(key);
+    Ok(())
+}
+
+/// Keep the early-start network factory supplied before Tauri can open
+/// app.db. This file entry is a derived boot projection; config_get and all
+/// writes remain database-authoritative after the one-time import.
+pub fn project_network_setting(key: &str, value: Option<&serde_json::Value>) -> Result<(), String> {
+    if key.split('.').next() != Some(SECTION_NETWORK) {
+        return Ok(());
+    }
+    let path = write_target(current_platform(), &EnvVars::from_process())?;
+    match value {
+        Some(value) => set_in_file(&path, key, value),
+        None => reset_in_file(&path, key),
+    }
+}
+
+#[cfg(test)]
+pub async fn config_file_get() -> Result<ConfigSnapshot, String> {
     // Disk read on the blocking pool, like every other file command here.
     tauri::async_runtime::spawn_blocking(|| match load() {
         Ok(loaded) => Ok(ConfigSnapshot {
             values: loaded.config,
             warnings: loaded.warnings,
             sources: loaded.sources,
+            error: None,
         }),
         Err(e) => Err(e.to_string()),
     })
@@ -1806,8 +1922,8 @@ pub async fn config_get() -> Result<ConfigSnapshot, String> {
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-pub async fn config_set(key: String, value: serde_json::Value) -> Result<(), String> {
+#[cfg(test)]
+pub async fn config_file_set(key: String, value: serde_json::Value) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = write_target(current_platform(), &EnvVars::from_process())?;
         set_in_file(&path, &key, &value)?;
@@ -1838,8 +1954,8 @@ fn note_written(key: &str) {
 
 /// Return one setting to its built-in default by deleting the line that sets
 /// it — see [`reset_in_file`] for why deleting beats writing the default out.
-#[tauri::command]
-pub async fn config_reset(key: String) -> Result<(), String> {
+#[cfg(test)]
+pub async fn config_file_reset(key: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = write_target(current_platform(), &EnvVars::from_process())?;
         reset_in_file(&path, &key)?;
@@ -2551,17 +2667,6 @@ mod tests {
     }
 
     #[test]
-    fn resident_default_is_opt_in_and_round_trips_in_its_own_section() {
-        assert!(!Config::default().resident.default);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = write(dir.path(), "config.toml", "[resident]\ndefault = true\n");
-        let loaded = load_from_paths(&[path]).expect("the resident setting loads");
-        assert!(loaded.config.resident.default);
-        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
-        assert!(SETTINGS.iter().any(|row| row.key == "resident.default"));
-    }
-
-    #[test]
     fn the_ligature_switch_is_off_until_asked_for_and_a_profile_may_differ() {
         assert!(
             !Config::default().terminal.ligatures,
@@ -2773,7 +2878,7 @@ mod tests {
         }
         assert_eq!(
             SETTINGS.len(),
-            18,
+            17,
             "the registry must contain every user-settable preference exactly \
              once; update this count only when adding or removing a registry row"
         );
@@ -4075,18 +4180,23 @@ archive_after = "24h"          # 12h | 24h | 7d | off
         let previous = std::env::var(ENV_CONFIG_FILE).ok();
         std::env::set_var(ENV_CONFIG_FILE, &path);
 
-        tauri::async_runtime::block_on(config_set("appearance.theme".to_string(), json!("dark")))
-            .expect("config_set succeeds");
-        let snapshot = tauri::async_runtime::block_on(config_get()).expect("config_get succeeds");
+        tauri::async_runtime::block_on(config_file_set(
+            "appearance.theme".to_string(),
+            json!("dark"),
+        ))
+        .expect("config_set succeeds");
+        let snapshot =
+            tauri::async_runtime::block_on(config_file_get()).expect("config_get succeeds");
         assert_eq!(
             snapshot.values.appearance.theme,
             ThemePref::Named("dark"),
             "config_get did not see what config_set had just written"
         );
 
-        tauri::async_runtime::block_on(config_reset("appearance.theme".to_string()))
+        tauri::async_runtime::block_on(config_file_reset("appearance.theme".to_string()))
             .expect("config_reset succeeds");
-        let snapshot = tauri::async_runtime::block_on(config_get()).expect("config_get succeeds");
+        let snapshot =
+            tauri::async_runtime::block_on(config_file_get()).expect("config_get succeeds");
         assert_eq!(
             snapshot.values.appearance.theme,
             Config::default().appearance.theme,
@@ -4101,7 +4211,7 @@ archive_after = "24h"          # 12h | 24h | 7d | off
             snapshot.warnings
         );
 
-        let e = match tauri::async_runtime::block_on(config_set(
+        let e = match tauri::async_runtime::block_on(config_file_set(
             "appearance.thme".to_string(),
             json!("dark"),
         )) {
@@ -4215,7 +4325,7 @@ archive_after = "24h"          # 12h | 24h | 7d | off
 
     #[test]
     fn the_walk_commands_read_the_files_config_from_the_real_file() {
-        use crate::{fs_grep, fs_walk};
+        use crate::fs_commands::{fs_grep, fs_walk};
         let _guard = ENV_LOCK.lock().expect("env lock");
         let dir = tempfile::tempdir().expect("tempdir");
         let tree = dir.path().join("tree");
@@ -4279,5 +4389,92 @@ archive_after = "24h"          # 12h | 24h | 7d | off
             Some(v) => std::env::set_var(ENV_CONFIG_FILE, v),
             None => std::env::remove_var(ENV_CONFIG_FILE),
         }
+    }
+
+    #[test]
+    fn app_db_overrides_registered_settings_and_reset_restores_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = tabverse_state::AppStateStore::open(dir.path()).unwrap();
+        set_with_store(&store, "appearance.theme", &json!("dark")).unwrap();
+        set_with_store(&store, "terminal.font_size", &json!(18)).unwrap();
+
+        let configured = apply_store_settings(&store, Config::default()).unwrap();
+        assert_eq!(configured.appearance.theme, ThemePref::Named("dark"));
+        assert_eq!(configured.terminal.font_size, 18);
+
+        reset_with_store(&store, "appearance.theme").unwrap();
+        let reset = apply_store_settings(&store, Config::default()).unwrap();
+        assert_eq!(reset.appearance.theme, Config::default().appearance.theme);
+        assert_eq!(reset.terminal.font_size, 18);
+    }
+
+    #[test]
+    fn migrated_file_scalars_stop_overriding_database_resets() {
+        let mut file = Config::default();
+        file.appearance.theme = ThemePref::Named("dark");
+        file.terminal.font_size = 18;
+        file.files.exclude = vec!["vendor".into()];
+        file.keys.bindings.insert("new-tab".into(), "Cmd+N".into());
+
+        let projected = declarative_file_config(file);
+        assert_eq!(
+            projected.appearance.theme,
+            Config::default().appearance.theme
+        );
+        assert_eq!(
+            projected.terminal.font_size,
+            Config::default().terminal.font_size
+        );
+        assert_eq!(projected.files.exclude, ["vendor"]);
+        assert_eq!(
+            projected.keys.bindings.get("new-tab").map(String::as_str),
+            Some("Cmd+N")
+        );
+    }
+
+    #[test]
+    fn broken_declarative_file_does_not_hide_app_db_settings() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "config.toml", "[appearance\ntheme = ???\n");
+        let previous = std::env::var(ENV_CONFIG_FILE).ok();
+        std::env::set_var(ENV_CONFIG_FILE, &path);
+        let store = tabverse_state::AppStateStore::open(&dir.path().join("data")).unwrap();
+        set_with_store(&store, "appearance.theme", &json!("dark")).unwrap();
+
+        let snapshot = snapshot_with_store(&store).unwrap();
+        assert_eq!(snapshot.values.appearance.theme, ThemePref::Named("dark"));
+        assert!(snapshot
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("config.toml")));
+        assert_eq!(snapshot.sources, [path.display().to_string()]);
+
+        match previous {
+            Some(value) => std::env::set_var(ENV_CONFIG_FILE, value),
+            None => std::env::remove_var(ENV_CONFIG_FILE),
+        }
+    }
+
+    #[test]
+    fn legacy_import_reads_only_explicit_registered_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = write(
+            dir.path(),
+            "first.toml",
+            "[appearance]\ntheme = \"dark\"\n[keys]\nnew-tab = \"Cmd+N\"\n",
+        );
+        let second = write(
+            dir.path(),
+            "second.toml",
+            "[appearance]\ntheme = \"light\"\n[files]\nrespect_gitignore = true\n",
+        );
+        let values =
+            explicit_legacy_settings(&[first.display().to_string(), second.display().to_string()])
+                .unwrap();
+        assert_eq!(
+            values,
+            [("appearance.theme".to_string(), r#""light""#.to_string())]
+        );
     }
 }

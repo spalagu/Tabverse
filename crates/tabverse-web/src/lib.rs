@@ -8,6 +8,11 @@
 
 use iroh::{endpoint::presets, Endpoint, EndpointAddr};
 use serde::{Deserialize, Serialize};
+use tabverse_network::{
+    read_file_read_start, read_http_response_start, write_data_stream_preface,
+    write_file_read_request, write_http_request_head, DataStreamPreface, FileReadRequest,
+    HeaderPair, HttpRequestHead,
+};
 use tabverse_proto::{announce_proto, RemoteClientMsg, RemoteHostMsg, REMOTE_ALPN};
 use wasm_bindgen::prelude::*;
 
@@ -42,7 +47,107 @@ const MAX_FRAME: u32 = 16 * 1024 * 1024;
 #[wasm_bindgen]
 pub struct WebJoin {
     endpoint: Endpoint,
+    connection: iroh::endpoint::Connection,
     input_tx: async_channel::Sender<RemoteClientMsg>,
+}
+
+/// One streamed HTTP exchange beside the semantic control stream.
+#[wasm_bindgen]
+pub struct WebHttpStream {
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
+    request_finished: bool,
+}
+
+#[wasm_bindgen]
+pub struct WebFileStream {
+    recv: iroh::endpoint::RecvStream,
+}
+
+#[wasm_bindgen]
+impl WebFileStream {
+    pub fn cancel(&mut self) {
+        let _ = self.recv.stop(0u32.into());
+    }
+
+    #[wasm_bindgen(js_name = responseStart)]
+    pub async fn response_start(&mut self) -> Result<JsValue, JsValue> {
+        let start = read_file_read_start(&mut self.recv)
+            .await
+            .map_err(|error| JsValue::from_str(&format!("read file response head: {error:#}")))?;
+        serde_wasm_bindgen::to_value(&start)
+            .map_err(|error| JsValue::from_str(&format!("encode file response head: {error}")))
+    }
+
+    #[wasm_bindgen(js_name = readResponseChunk)]
+    pub async fn read_response_chunk(&mut self, limit: u32) -> Result<Vec<u8>, JsValue> {
+        let mut bytes = vec![0; limit.clamp(1, 1024 * 1024) as usize];
+        let read = self
+            .recv
+            .read(&mut bytes)
+            .await
+            .map_err(|error| JsValue::from_str(&format!("read file bytes: {error}")))?;
+        bytes.truncate(read.unwrap_or(0));
+        Ok(bytes)
+    }
+}
+
+#[wasm_bindgen]
+impl WebHttpStream {
+    /// Abort both halves of an exchange that the page no longer consumes.
+    pub fn cancel(&mut self) {
+        let _ = self.send.reset(0u32.into());
+        let _ = self.recv.stop(0u32.into());
+    }
+
+    /// Send one raw request-body chunk. No JSON/base64 envelope is involved.
+    #[wasm_bindgen(js_name = writeRequestChunk)]
+    pub async fn write_request_chunk(&mut self, bytes: Vec<u8>) -> Result<(), JsValue> {
+        if self.request_finished {
+            return Err(JsValue::from_str(
+                "the HTTP request stream is already finished",
+            ));
+        }
+        self.send
+            .write_all(&bytes)
+            .await
+            .map_err(|error| JsValue::from_str(&format!("write request body: {error}")))
+    }
+
+    /// Half-close the request while keeping the streamed response alive.
+    #[wasm_bindgen(js_name = finishRequest)]
+    pub fn finish_request(&mut self) -> Result<(), JsValue> {
+        if !self.request_finished {
+            self.send
+                .finish()
+                .map_err(|error| JsValue::from_str(&format!("finish request body: {error}")))?;
+            self.request_finished = true;
+        }
+        Ok(())
+    }
+
+    /// Read the bounded response metadata frame.
+    #[wasm_bindgen(js_name = responseStart)]
+    pub async fn response_start(&mut self) -> Result<JsValue, JsValue> {
+        let start = read_http_response_start(&mut self.recv)
+            .await
+            .map_err(|error| JsValue::from_str(&format!("read response head: {error:#}")))?;
+        serde_wasm_bindgen::to_value(&start)
+            .map_err(|error| JsValue::from_str(&format!("encode response head: {error}")))
+    }
+
+    /// Read at most `limit` raw response bytes. An empty array is EOF.
+    #[wasm_bindgen(js_name = readResponseChunk)]
+    pub async fn read_response_chunk(&mut self, limit: u32) -> Result<Vec<u8>, JsValue> {
+        let mut bytes = vec![0; limit.clamp(1, 1024 * 1024) as usize];
+        let read = self
+            .recv
+            .read(&mut bytes)
+            .await
+            .map_err(|error| JsValue::from_str(&format!("read response body: {error}")))?;
+        bytes.truncate(read.unwrap_or(0));
+        Ok(bytes)
+    }
 }
 
 #[wasm_bindgen]
@@ -67,6 +172,30 @@ impl WebJoin {
             .try_send(RemoteClientMsg::Resize { cols, rows });
     }
 
+    /// Say something to a shared agent. The host enforces Steer; this client
+    /// only relays, same as `send_input` for a terminal.
+    #[wasm_bindgen(js_name = sendPrompt)]
+    pub fn send_prompt(&self, text: String) {
+        let _ = self
+            .input_tx
+            .try_send(RemoteClientMsg::AgentPrompt { text });
+    }
+
+    /// Answer an agent permission request. The host enforces Approve.
+    #[wasm_bindgen(js_name = sendAnswer)]
+    pub fn send_answer(&self, call_id: String, allow: bool, reason: Option<String>) {
+        let _ = self.input_tx.try_send(RemoteClientMsg::AgentAnswer {
+            call_id,
+            allow,
+            reason,
+        });
+    }
+
+    /// Stop the agent turn in progress. The host enforces Steer.
+    #[wasm_bindgen(js_name = sendCancel)]
+    pub fn send_cancel(&self) {
+        let _ = self.input_tx.try_send(RemoteClientMsg::AgentCancel);
+    }
     /// Invoke a host command over an app share. The host enforces Steer and
     /// answers with an rpcResult carrying the same id.
     #[wasm_bindgen(js_name = sendRpc)]
@@ -97,115 +226,74 @@ impl WebJoin {
         let _ = self.input_tx.try_send(RemoteClientMsg::ClipPush { text });
     }
 
-    /// One HTTP request for the remote proxy (app share). Steer-gated; the
-    /// answer is a proxyRes with the same id.
-    #[wasm_bindgen(js_name = sendProxyReq)]
-    pub fn send_proxy_req(&self, id: u64, head: String, body: Option<String>) {
-        let _ = self
-            .input_tx
-            .try_send(RemoteClientMsg::ProxyReq { id, head, body });
-    }
-
-    #[wasm_bindgen(js_name = sendBrowserOpen)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn send_browser_open(
+    /// Open one Host-network HTTP stream on this authenticated connection.
+    /// The Host rechecks current viewer access before starting network I/O.
+    #[wasm_bindgen(js_name = openHttpStream)]
+    pub async fn open_http_stream(
         &self,
-        stream_id: u64,
-        tab_id: String,
-        grant_id: String,
-        attachment_id: String,
-        attachment_generation: u64,
+        context_id: String,
         method: String,
         url: String,
         headers: JsValue,
-        body_len: Option<u64>,
-    ) {
-        let Ok(headers) = serde_wasm_bindgen::from_value(headers) else {
-            return;
-        };
-        let _ = self.input_tx.try_send(RemoteClientMsg::BrowserOpen {
-            stream_id,
-            tab_id,
-            grant_id,
-            attachment_id,
-            attachment_generation,
-            method,
-            url,
-            headers,
-            body_len,
-        });
+    ) -> Result<WebHttpStream, JsValue> {
+        let headers: Vec<HeaderPair> = serde_wasm_bindgen::from_value(headers)
+            .map_err(|error| JsValue::from_str(&format!("invalid HTTP headers: {error}")))?;
+        let (mut send, recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|error| JsValue::from_str(&format!("open HTTP data stream: {error}")))?;
+        write_data_stream_preface(&mut send, &DataStreamPreface::http(context_id))
+            .await
+            .map_err(|error| JsValue::from_str(&format!("write data-stream preface: {error:#}")))?;
+        write_http_request_head(
+            &mut send,
+            &HttpRequestHead {
+                method,
+                url,
+                headers,
+            },
+        )
+        .await
+        .map_err(|error| JsValue::from_str(&format!("write HTTP request head: {error:#}")))?;
+        Ok(WebHttpStream {
+            send,
+            recv,
+            request_finished: false,
+        })
     }
 
-    #[wasm_bindgen(js_name = sendBrowserRequestChunk)]
-    pub fn send_browser_request_chunk(&self, stream_id: u64, seq: u64, b64: String) {
-        let _ = self
-            .input_tx
-            .try_send(RemoteClientMsg::BrowserRequestChunk {
-                stream_id,
-                seq,
-                b64,
-            });
-    }
-
-    #[wasm_bindgen(js_name = sendBrowserRequestEnd)]
-    pub fn send_browser_request_end(&self, stream_id: u64) {
-        let _ = self
-            .input_tx
-            .try_send(RemoteClientMsg::BrowserRequestEnd { stream_id });
-    }
-
-    #[wasm_bindgen(js_name = sendBrowserCredit)]
-    pub fn send_browser_credit(&self, stream_id: u64, bytes: u64) {
-        let _ = self
-            .input_tx
-            .try_send(RemoteClientMsg::BrowserCredit { stream_id, bytes });
-    }
-
-    #[wasm_bindgen(js_name = sendBrowserCancel)]
-    pub fn send_browser_cancel(&self, stream_id: u64, reason: Option<String>) {
-        let _ = self
-            .input_tx
-            .try_send(RemoteClientMsg::BrowserCancel { stream_id, reason });
-    }
-
-    #[wasm_bindgen(js_name = sendRemoteAck)]
-    pub fn send_remote_ack(&self, tab_id: String, epoch: String, frame_seq: u64) {
-        let _ = self.input_tx.try_send(RemoteClientMsg::RemoteAck {
-            tab_id,
-            epoch,
-            frame_seq,
-        });
-    }
-
-    #[wasm_bindgen(js_name = requestRemoteSnapshot)]
-    pub fn request_remote_snapshot(&self, tab_id: String, epoch: Option<String>) {
-        let _ = self
-            .input_tx
-            .try_send(RemoteClientMsg::RemoteResnapshot { tab_id, epoch });
-    }
-
-    #[wasm_bindgen(js_name = sendRemoteIntent)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn send_remote_intent(
+    /// Read local file bytes beside the control stream. The Host accepts this
+    /// for a current App-share viewer and rechecks access for every stream.
+    #[wasm_bindgen(js_name = openFileStream)]
+    pub async fn open_file_stream(
         &self,
-        tab_id: String,
-        attachment_id: String,
-        attachment_generation: u64,
-        intent_id: String,
-        name: String,
-        args: JsValue,
-    ) {
-        let Ok(args) = serde_wasm_bindgen::from_value(args) else {
-            return;
-        };
-        let _ = self.input_tx.try_send(RemoteClientMsg::RemoteIntent {
-            tab_id,
-            attachment_id,
-            attachment_generation,
-            intent_id,
-            name,
-            args,
-        });
+        context_id: String,
+        path: String,
+        offset: u64,
+        length: Option<u64>,
+    ) -> Result<WebFileStream, JsValue> {
+        let (mut send, recv) = self
+            .connection
+            .open_bi()
+            .await
+            .map_err(|error| JsValue::from_str(&format!("open file data stream: {error}")))?;
+        write_data_stream_preface(&mut send, &DataStreamPreface::file_read(context_id))
+            .await
+            .map_err(|error| JsValue::from_str(&format!("write file preface: {error:#}")))?;
+        write_file_read_request(
+            &mut send,
+            &FileReadRequest {
+                path,
+                offset,
+                length,
+            },
+        )
+        .await
+        .map_err(|error| JsValue::from_str(&format!("write file request: {error:#}")))?;
+        send.finish()
+            .map_err(|error| JsValue::from_str(&format!("finish file request: {error}")))?;
+        Ok(WebFileStream { recv })
     }
 
     /// Close the connection. The close handshake is best-effort: the page may
@@ -260,10 +348,7 @@ pub async fn join_share(
     .await
     .map_err(|e| JsValue::from_str(&e))?;
 
-    // One maximum-size Browser A upload is 256 chunks plus Open/Credit/End.
-    // TCX802 caps one attachment at four concurrent requests; 2048 keeps all
-    // four ordered frames lossless while the writer drains between turns.
-    let (input_tx, input_rx) = async_channel::bounded::<RemoteClientMsg>(2048);
+    let (input_tx, input_rx) = async_channel::bounded::<RemoteClientMsg>(256);
 
     // Writer: our input towards the host.
     wasm_bindgen_futures::spawn_local(async move {
@@ -310,6 +395,7 @@ pub async fn join_share(
 
     Ok(WebJoin {
         endpoint: ep,
+        connection: conn,
         input_tx,
     })
 }

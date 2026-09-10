@@ -1,10 +1,8 @@
 //! Resident terminal helper process mode and lazy GUI connection.
 
 use std::{
-    collections::HashMap,
     fs,
     io::{self, Read, Write},
-    net::SocketAddr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -12,42 +10,32 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::AppHandle;
 use serde::{Deserialize, Serialize};
 use tabverse_term::{
     client::{HelperClient, HelperEventCallback},
     helper::HelperServer,
     protocol::AuthToken,
 };
+use tauri::AppHandle;
 use zeroize::Zeroizing;
 
 const ENDPOINT_FILE: &str = "terminal-helper.json";
 const CONNECT_DEADLINE: Duration = Duration::from_secs(5);
 const DEFAULT_IDLE: Duration = Duration::from_secs(30);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const CAPABILITIES: u64 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EndpointRecord {
     version: u8,
     pid: u32,
-    port: u16,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ResidentEndpointRecord {
-    schema_version: u16,
-    runtime_id: String,
-    tab_id: String,
-    pid: u32,
-    port: u16,
-    token_hex: String,
+    name: String,
+    #[serde(default)]
+    agent_name: Option<String>,
 }
 
 pub struct TerminalHelper {
     client: Mutex<Option<Arc<HelperClient>>>,
-    resident_clients: Mutex<HashMap<String, Arc<HelperClient>>>,
-    session_clients: Mutex<HashMap<String, Arc<HelperClient>>>,
 }
 
 impl Default for TerminalHelper {
@@ -60,8 +48,6 @@ impl TerminalHelper {
     pub fn new() -> Self {
         Self {
             client: Mutex::new(None),
-            resident_clients: Mutex::new(HashMap::new()),
-            session_clients: Mutex::new(HashMap::new()),
         }
     }
 
@@ -127,116 +113,27 @@ impl TerminalHelper {
         ))
     }
 
-    pub fn ensure_resident(
-        &self,
-        app: &AppHandle,
-        runtime_id: &str,
-        on_event: HelperEventCallback,
-    ) -> Result<Arc<HelperClient>, String> {
-        validate_runtime_id(runtime_id)?;
-        if let Some(client) = self.resident_clients.lock().unwrap().get(runtime_id) {
-            if client.is_alive() {
-                return Ok(Arc::clone(client));
-            }
-        }
-        let path = crate::state_dir(app)?
-            .join("resident/runtime-endpoints")
-            .join(format!("{runtime_id}.json"));
-        let deadline = Instant::now() + CONNECT_DEADLINE;
-        let mut last_error = "resident terminal endpoint did not appear".to_string();
-        while Instant::now() < deadline {
-            match connect_resident_record(&path, runtime_id, Arc::clone(&on_event)) {
-                Ok(client) => {
-                    let client = Arc::new(client);
-                    self.resident_clients
-                        .lock()
-                        .unwrap()
-                        .insert(runtime_id.to_string(), Arc::clone(&client));
-                    return Ok(client);
-                }
-                Err(error) => last_error = error,
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-        Err(format!(
-            "resident terminal worker did not become ready: {last_error}"
-        ))
-    }
-
-    pub fn register_session(&self, id: &str, client: Arc<HelperClient>) {
-        self.session_clients
+    pub fn current(&self) -> Option<Arc<HelperClient>> {
+        self.client
             .lock()
             .unwrap()
-            .insert(id.to_string(), client);
-    }
-
-    pub fn session(&self, id: &str) -> Option<Arc<HelperClient>> {
-        self.session_clients
-            .lock()
-            .unwrap()
-            .get(id)
+            .as_ref()
             .filter(|client| client.is_alive())
             .cloned()
     }
 
-    pub fn forget_session(&self, id: &str) {
-        self.session_clients.lock().unwrap().remove(id);
+    /// Agent endpoint published by the same windowless Supervisor process.
+    pub fn agent_endpoint(&self, app: &AppHandle) -> Result<String, String> {
+        let state = crate::state_dir(app)?;
+        let record: EndpointRecord = serde_json::from_slice(
+            &fs::read(state.join(ENDPOINT_FILE))
+                .map_err(|e| format!("read runtime endpoint: {e}"))?,
+        )
+        .map_err(|e| format!("parse runtime endpoint: {e}"))?;
+        record
+            .agent_name
+            .ok_or_else(|| "runtime endpoint predates Agent IPC; restart Tabverse".to_string())
     }
-}
-
-fn connect_resident_record(
-    path: &Path,
-    expected_runtime_id: &str,
-    on_event: HelperEventCallback,
-) -> Result<HelperClient, String> {
-    owner_only(path)?;
-    let bytes = fs::read(path).map_err(|e| format!("read resident terminal endpoint: {e}"))?;
-    let record: ResidentEndpointRecord = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("parse resident terminal endpoint: {e}"))?;
-    if record.schema_version != 1 || record.runtime_id != expected_runtime_id {
-        return Err("resident terminal endpoint has a different identity".into());
-    }
-    let token: [u8; 32] = hex::decode(&record.token_hex)
-        .map_err(|_| "resident terminal token is invalid".to_string())?
-        .try_into()
-        .map_err(|_| "resident terminal token has the wrong length".to_string())?;
-    let endpoint = SocketAddr::from(([127, 0, 0, 1], record.port));
-    let (client, _, _) =
-        HelperClient::connect(endpoint, AuthToken::new(token), rand::random(), on_event)
-            .map_err(|e| e.to_string())?;
-    Ok(client)
-}
-
-fn validate_runtime_id(value: &str) -> Result<(), String> {
-    if value.is_empty()
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        return Err("resident terminal runtime id is invalid".into());
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn owner_only(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = fs::metadata(path)
-        .map_err(|e| format!("inspect resident terminal endpoint: {e}"))?
-        .permissions()
-        .mode()
-        & 0o777;
-    if mode & 0o077 != 0 {
-        return Err("resident terminal endpoint permissions are not owner-only".into());
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn owner_only(path: &Path) -> Result<(), String> {
-    fs::metadata(path)
-        .map(|_| ())
-        .map_err(|e| format!("inspect resident terminal endpoint: {e}"))
 }
 
 fn connect_record(
@@ -251,8 +148,7 @@ fn connect_record(
     if record.version != tabverse_term::protocol::VERSION {
         return Err("helper endpoint has a different protocol version".into());
     }
-    let endpoint = SocketAddr::from(([127, 0, 0, 1], record.port));
-    let (client, _, _) = HelperClient::connect(endpoint, token, rand::random(), on_event)
+    let (client, _, _) = HelperClient::connect(&record.name, token, rand::random(), on_event)
         .map_err(|e| e.to_string())?;
     Ok(client)
 }
@@ -288,21 +184,58 @@ pub fn from_args(mut args: impl Iterator<Item = String>) -> Option<i32> {
         Err(_) => return Some(3),
     };
     let token = AuthToken::new(*token_bytes);
-    Some(run_helper(&state, token, DEFAULT_IDLE).unwrap_or(4))
+    crate::credentials::set_app_data_dir(state.parent().unwrap_or(&state).to_path_buf());
+    crate::http::ensure_crypto_provider();
+    let agent_token = tabverse_runtime::agent_ipc::AuthToken::new(*token_bytes);
+    Some(run_helper(&state, token, agent_token, DEFAULT_IDLE).unwrap_or(4))
 }
 
-fn run_helper(state: &Path, token: AuthToken, idle: Duration) -> io::Result<i32> {
+fn run_helper(
+    state: &Path,
+    token: AuthToken,
+    agent_token: tabverse_runtime::agent_ipc::AuthToken,
+    idle: Duration,
+) -> io::Result<i32> {
     fs::create_dir_all(state)?;
-    let server = HelperServer::start(token, rand::random(), CAPABILITIES, idle)?;
+    let host_instance = format!("{}-{:016x}", std::process::id(), rand::random::<u64>());
+    let runtime_dir = state.parent().unwrap_or(state);
+    let store = tabverse_runtime::RuntimeStore::open(runtime_dir, &host_instance)
+        .map_err(io::Error::other)?;
+    let heartbeat_store = store.clone();
+    let agent = crate::agent_supervisor::AgentSupervisor::start_persistent(
+        agent_token,
+        Some(state.to_path_buf()),
+        store.clone(),
+        host_instance.clone(),
+    )?;
+    let server = HelperServer::start_persistent_guarded(
+        token,
+        rand::random(),
+        CAPABILITIES,
+        idle,
+        store,
+        host_instance,
+        agent.keep_alive(),
+    )?;
     let record = EndpointRecord {
         version: tabverse_term::protocol::VERSION,
         pid: std::process::id(),
-        port: server.endpoint().port(),
+        name: server.endpoint().to_string(),
+        agent_name: Some(agent.endpoint().to_string()),
     };
     write_endpoint(state, &record)?;
+    let mut last_heartbeat = Instant::now();
     while server.is_alive() {
         thread::sleep(Duration::from_millis(25));
+        if !agent.is_alive() {
+            return Err(io::Error::other("Agent Supervisor listener stopped"));
+        }
+        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+            heartbeat_store.heartbeat().map_err(io::Error::other)?;
+            last_heartbeat = Instant::now();
+        }
     }
+    heartbeat_store.release().map_err(io::Error::other)?;
     remove_own_endpoint(state, record.pid);
     Ok(0)
 }
@@ -356,16 +289,6 @@ mod tests {
     }
 
     #[test]
-    fn resident_runtime_id_cannot_escape_the_endpoint_directory() {
-        for invalid in ["", "../runtime", "nested/runtime", "/runtime", "has space"] {
-            assert!(validate_runtime_id(invalid).is_err(), "{invalid}");
-        }
-        for valid in ["runtime-1", "runtime_2", "runtime.3"] {
-            validate_runtime_id(valid).unwrap();
-        }
-    }
-
-    #[test]
     fn gui_is_the_only_helper_token_reader_and_the_child_stdin_is_piped() {
         let source = include_str!("terminal_helper.rs");
         let credential_read = ["credentials::", "helper_token()"].concat();
@@ -384,7 +307,8 @@ mod tests {
             .split("fn run_helper")
             .next()
             .unwrap();
-        assert!(!helper_mode.contains("credentials::"));
+        assert!(!helper_mode.contains(&credential_read));
+        assert!(helper_mode.contains("credentials::set_app_data_dir"));
         assert!(helper_mode.contains("read_helper_token(io::stdin().lock())"));
     }
 
@@ -393,9 +317,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().to_path_buf();
         let token = AuthToken::new([0x77; 32]);
+        let agent_token = tabverse_runtime::agent_ipc::AuthToken::new([0x77; 32]);
         let helper_state = state.clone();
-        let helper =
-            thread::spawn(move || run_helper(&helper_state, token, Duration::from_millis(80)));
+        let helper = thread::spawn(move || {
+            run_helper(&helper_state, token, agent_token, Duration::from_millis(80))
+        });
         let endpoint = state.join(ENDPOINT_FILE);
         let deadline = Instant::now() + Duration::from_secs(2);
         while !endpoint.exists() && Instant::now() < deadline {

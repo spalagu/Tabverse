@@ -5,6 +5,10 @@ import { ImageAddon } from "@xterm/addon-image";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import {
+  RemoteAgentPane,
+  type RemoteAgentPaneProps,
+} from "../agent/RemoteAgentPane";
+import {
   subscribeTerminalFont,
   terminalFont,
   xtermFontOptions,
@@ -18,7 +22,7 @@ import "./remote-session.css";
 
 const REMOTE_THEME = remoteMirrorTheme();
 
-export type RemoteRendererKind = "terminal" | null;
+export type RemoteRendererKind = "terminal" | "agent" | null;
 
 export interface RemoteViewportHint {
   readonly cols: number;
@@ -47,6 +51,7 @@ export interface RemoteTerminalPaneProps {
 export interface RemoteSessionPaneProps {
   readonly kind: RemoteRendererKind;
   readonly terminal: RemoteTerminalPaneProps;
+  readonly agent: RemoteAgentPaneProps;
   readonly readOnly: boolean;
   readonly reconnectAttempt: number;
   readonly viewport: RemoteViewportHint | null;
@@ -57,11 +62,14 @@ export interface RemoteSessionPaneProps {
 export function RemoteSessionPane({
   kind,
   terminal,
+  agent,
   readOnly,
   reconnectAttempt,
   viewport,
   showViewport,
 }: RemoteSessionPaneProps) {
+  if (kind === "agent") return <RemoteAgentPane {...agent} />;
+
   return (
     <div className="term-pane">
       {kind === "terminal" ? (

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use crate::AppHandle;
+use tauri::AppHandle;
 
 const FILE_NAME: &str = "trusted-certificate-hosts.json";
 
@@ -40,7 +40,6 @@ fn store(app: &AppHandle, set: &HashSet<String>) {
 }
 
 #[cfg_attr(target_os = "linux", allow(dead_code))]
-#[cfg_attr(feature = "runtime-cef", allow(dead_code))]
 pub fn is_trusted(app: &AppHandle, host: &str) -> bool {
     !host.is_empty() && load(app).contains(host)
 }

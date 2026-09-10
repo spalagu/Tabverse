@@ -35,7 +35,6 @@ import "@tabverse/workbench/files/workspace-layout.css";
 import "@tabverse/workbench/files/workspace.css";
 import "@tabverse/workbench/state/loading.css";
 import "./join.css";
-import { startJoinPluginComposition } from "./pluginComposition";
 
 /**
  * The no-install remote-control page.
@@ -49,11 +48,7 @@ import { startJoinPluginComposition } from "./pluginComposition";
 
 applyThemeVars(document.documentElement, "dark");
 
-void startJoinPluginComposition().then(() => {
-  ReactDOM.createRoot(document.getElementById("root")!).render(<App />);
-}).catch((error: unknown) => {
-  console.error("Join plugin composition failed to start", error);
-});
+ReactDOM.createRoot(document.getElementById("root")!).render(<App />);
 
 // Pages build only: the service worker gives the second open its app shell
 // and wasm from cache (assets are content-hashed, so cache-first is safe

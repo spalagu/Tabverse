@@ -55,19 +55,20 @@ describe("the shipped declarations (src/share/capabilities)", () => {
     });
   });
 
-  it("uses semantic sharing for Browser and Files while Settings and Remote remain unshareable", async () => {
+  it("agent: all three levels, with View as the floor", async () => {
     const { shareCapability } = await shippedRegistry();
-    expect(shareCapability("browser")).toMatchObject({
+    const cap = shareCapability("agent");
+    expect(cap).toMatchObject({
       shareable: true,
-      levels: ["view", "steer"],
+      levels: ["view", "steer", "approve"],
+      defaultLevel: "view",
       payload: "dom",
     });
-    expect(shareCapability("files")).toMatchObject({
-      shareable: true,
-      levels: ["view", "steer"],
-      payload: "dom",
-    });
-    for (const type of ["settings", "remote"] as const) {
+  });
+
+  it("browser, files, settings and remote each declare themselves unshareable", async () => {
+    const { shareCapability } = await shippedRegistry();
+    for (const type of ["browser", "files", "settings", "remote"] as const) {
       const cap = shareCapability(type);
       expect(cap.shareable, type).toBe(false);
       if (!cap.shareable) expect(cap.reason, type).toBeTruthy();

@@ -1,6 +1,5 @@
 import { create, type StoreApi } from "zustand";
 import type { TabType as WorkbenchTabType } from "@tabverse/runtime-contracts";
-import type { TabStateEnvelope } from "@tabverse/tab-contracts";
 import { rootGroups } from "@tabverse/workbench/sidebar";
 export { rootGroups, subtreeTabs } from "@tabverse/workbench/sidebar";
 import { coreLog } from "../errlog";
@@ -11,7 +10,6 @@ import {
   listScopes,
   loadState,
   loadStateResult,
-  migrateSessionStateV2,
   saveState,
   scopeTabId,
 } from "../persist";
@@ -67,7 +65,7 @@ import {
 
 export type TabType = WorkbenchTabType;
 
-/** The three access levels a viewer can hold. */
+/** The three access levels a viewer can hold (= backend/types.ts AgentAccess). */
 export type ShareAccess = "view" | "steer" | "approve";
 
 /** One connected viewer, from the host presence event. */
@@ -108,11 +106,7 @@ export interface Tab {
   id: string;
   type: TabType;
   title: string;
-  /** Preserved verbatim when the owning plugin is missing or incompatible. */
-  pluginState?: TabStateEnvelope;
   groupId: string | null;
-  /** Per-Tab override of the app-wide resident default. */
-  residentPolicy?: "inherit" | "on" | "off";
   cwd?: string;
   url?: string;
   exited?: boolean;
@@ -150,9 +144,9 @@ export interface Tab {
    */
   openPath?: string;
   /**
-   * Where a files tab should jump next. Unlike `openPath` this is not
-   * one-shot: each request has to land even when the same file is already
-   * open and mounted.
+   * Where a files tab should jump next (ch. agent tab). Unlike `openPath` this
+   * is not one-shot: the agent references the same file repeatedly, and each
+   * reference has to land even though the tab is already open and mounted.
    * `nonce` is what makes a repeat observable — the path alone would look
    * unchanged to an effect that already ran for it.
    */
@@ -414,12 +408,13 @@ export function hydrateGroup(g: PersistedGroup): Group {
   };
 }
 
-const TYPE_TITLES: Readonly<Record<string, string>> = {
+const TYPE_TITLES: Record<TabType, string> = {
   terminal: "Terminal",
   files: "Files",
   browser: "Browser",
   settings: "Settings",
   remote: "Remote",
+  agent: "Agent",
 };
 
 /** The overlay title for a browser peek: the host, a placeholder until the
@@ -436,6 +431,29 @@ function peekHostTitle(url: string): string {
 function peekFileTitle(path: string): string {
   const base = path.split("/").filter(Boolean).pop();
   return base ?? path;
+}
+
+/**
+ * Where a new agent tab should work.
+ *
+ * The menu offers "a coding agent working in a folder" but never asks which
+ * one, and falling back to the home directory made the agent's first `glob`
+ * walk the entire home tree — minutes of work over files the user never meant
+ * to expose. So it inherits the folder the user is already in: the active tab
+ * first, then the most recently used one, counting only tabs that stand for a
+ * directory. Returns undefined when nothing does, and the caller keeps its own
+ * fallback.
+ */
+export function inheritedCwd(
+  tabs: Pick<Tab, "id" | "type" | "cwd" | "lastActiveAt">[],
+  activeTabId: string | null,
+): string | undefined {
+  const rooted = tabs.filter(
+    (t) => (t.type === "files" || t.type === "terminal" || t.type === "agent") && t.cwd,
+  );
+  const active = rooted.find((t) => t.id === activeTabId);
+  if (active) return active.cwd;
+  return [...rooted].sort((a, b) => (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0))[0]?.cwd;
 }
 
 let terminalCounter = 0;
@@ -463,7 +481,6 @@ export type SessionRestoreResult =
   | "missing"
   | "read-failed"
   | "invalid-json"
-  | "migration-failed"
   | "unsupported-version"
   | "invalid-shape"
   | "empty-tabs";
@@ -512,8 +529,22 @@ const requestTrafficLightReapply = () => {
 };
 
 /** What survives a restart. Live handles (PTY ids, shares) never do. */
-interface PersistedStateBase {
+export interface PersistedState {
+  version: 1;
   zones?: 2 | 3;
+  tabs: {
+    id: string;
+    type: TabType;
+    title: string;
+    groupId: string | null;
+    cwd?: string;
+    url?: string;
+    renamed?: boolean;
+    pinnedUrl?: string;
+    lastActiveAt?: number;
+    panes?: PaneNode;
+    dormant?: true;
+  }[];
   groups: PersistedGroup[];
   activeTabId: string | null;
   sidebarWidth?: number;
@@ -525,27 +556,6 @@ interface PersistedStateBase {
   split?: SplitGroup;
   splitPair?: { leftId: string; rightId: string; ratio: number };
 }
-
-interface PersistedTabBase {
-    id: string;
-    title: string;
-    pluginState?: TabStateEnvelope;
-    groupId: string | null;
-    residentPolicy?: "inherit" | "on" | "off";
-    cwd?: string;
-    url?: string;
-    renamed?: boolean;
-    pinnedUrl?: string;
-    lastActiveAt?: number;
-    panes?: PaneNode;
-    dormant?: true;
-}
-
-export type PersistedState = PersistedStateBase &
-  (
-    | { version: 1; tabs: Array<PersistedTabBase & { type: TabType }> }
-    | { version: 2; tabs: Array<PersistedTabBase & { kind: string }> }
-  );
 
 /**
  * Is anything drawn on top of the tab content right now?
@@ -799,6 +809,7 @@ export interface AppStore {
     tabId: string,
     reveal: { path: string; line?: number; nonce: number }
   ) => void;
+  showCommand: (text: string, cwd?: string) => void;
   closeTab: (id: string) => void;
   closeTabs: (
     ids: string[],
@@ -819,10 +830,6 @@ export interface AppStore {
   setTabBusy: (id: string, busy: boolean) => void;
   setTabOutputAt: (id: string, at: number) => void;
   setTabDirty: (id: string, dirty: boolean) => void;
-  setTabResidentPolicy: (
-    id: string,
-    policy: "inherit" | "on" | "off"
-  ) => void;
 
   filesOpenPath: Record<string, string>;
   setFilesOpenPath: (tabId: string, path: string | null) => void;
@@ -1037,16 +1044,12 @@ export async function sweepOrphanTabState(): Promise<void> {
  */
 export function sessionSnapshot(state: AppStore): PersistedState {
   const savedTabs = state.tabs
-    .filter(
-      (t) => t.type !== "remote" && t.peek !== true
-    )
+    .filter((t) => t.type !== "remote" && t.peek !== true)
     .map((t) => ({
       id: t.id,
-      kind: t.type,
+      type: t.type,
       title: t.title,
-      pluginState: t.pluginState,
       groupId: t.groupId,
-      residentPolicy: t.residentPolicy,
       cwd: t.cwd,
       url: t.url,
       renamed: t.renamed,
@@ -1063,7 +1066,7 @@ export function sessionSnapshot(state: AppStore): PersistedState {
       // restart would reopen a document or re-run a command nobody asked for.
     }));
   return {
-    version: 2,
+    version: 1,
     zones: 3,
     tabs: savedTabs,
     groups: state.groups.filter((g) =>
@@ -1241,8 +1244,7 @@ function isRecoverableSessionPayload(
     typeof value === "object" &&
     value !== null &&
     !Array.isArray(value) &&
-    ((value as { version?: unknown }).version === 1 ||
-      (value as { version?: unknown }).version === 2) &&
+    (value as { version?: unknown }).version === 1 &&
     Array.isArray((value as { tabs?: unknown }).tabs) &&
     (value as { tabs: unknown[] }).tabs.length > 0
   );
@@ -1470,10 +1472,14 @@ export function archivableByState(t: Tab): boolean {
       return t.exited === true || t.busy !== true;
     case "files":
       return t.dirty !== true;
-    default:
-      // A plugin-owned Tab is never auto-archived by a policy it did not
-      // declare; its state stays in the workspace/placeholder unchanged.
-      return false;
+    // An agent tab follows the terminal's rule for the same reason: the pane is
+    // the runtime, so shelving one mid-run kills the work. The scan therefore
+    // leaves a running one alone. A user who closes it anyway does get their
+    // way — that path unmounts the pane, which cancels the turn and releases
+    // any approval waiting on them, and the session log is what the tab reads
+    // back when it is woken.
+    case "agent":
+      return t.busy !== true;
   }
 }
 
@@ -2229,7 +2235,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         partial.title ??
         (partial.type === "terminal"
           ? `Terminal ${++terminalCounter}`
-          : TYPE_TITLES[partial.type] ?? partial.type);
+          : TYPE_TITLES[partial.type]);
       if (partial.type === "settings") {
         const existing = get().tabs.find((t) => t.type === "settings");
         if (existing) {
@@ -2242,10 +2248,14 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         id,
         type: partial.type,
         title,
-        pluginState: partial.pluginState,
         groupId,
-        residentPolicy: partial.residentPolicy,
-        cwd: partial.cwd,
+        // An agent with no folder named for it lands in the one the user is
+        // already working in, rather than at the root of everything they own.
+        cwd:
+          partial.cwd ??
+          (partial.type === "agent"
+            ? inheritedCwd(get().tabs, get().activeTabId)
+            : undefined),
         url: partial.url,
         joinTicket: partial.joinTicket,
         renamed: partial.renamed,
@@ -2271,6 +2281,42 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         joinDialogOpen: false,
       }));
       return id;
+    },
+
+    showCommand: (text, cwd) => {
+      const state = get();
+      // The terminal rooted deepest under the agent's folder, same rule the
+      // files side uses: with both ~/work and ~/work/api open, a command run in
+      // the latter belongs there.
+      const host = state.tabs
+        .filter((t) => t.type === "terminal" && isUnder(cwd ?? "", t.cwd))
+        .sort((a, b) => (b.cwd?.length ?? 0) - (a.cwd?.length ?? 0))[0];
+
+      if (host) {
+        commit((s) => ({
+          tabs: s.tabs.map((t) =>
+            t.id === host.id
+              ? {
+                  ...t,
+                  dormant: undefined,
+                  lastActiveAt: Date.now(),
+                  // The nonce is what makes the same command land twice: the
+                  // agent runs `cargo test` over and over, and an effect keyed
+                  // on the text alone would ignore every one after the first.
+                  command: { text, nonce: (t.command?.nonce ?? 0) + 1 },
+                }
+              : t,
+          ),
+          activeTabId: host.id,
+        }));
+        return;
+      }
+
+      get().addTab({
+        type: "terminal",
+        cwd,
+        command: { text, nonce: 1 },
+      });
     },
 
     revealPath: (path, line) => {
@@ -2520,7 +2566,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         // Clearing the tab-level flag clears the per-pane records it is
         // aggregated from, or a pane that went silent would hold `busy`
         // true forever through its own stale entry. Setting it does not
-        // touch them: callers without pane records still use this flag.
+        // touch them: the agent tab's turn has no pane to record.
         if (!busy && s.busyPanes[id] !== undefined) {
           const { [id]: _gone, ...rest } = s.busyPanes;
           if ((t.busy ?? false) === busy) return { busyPanes: rest };
@@ -2599,15 +2645,6 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         if (!t || (t.dirty ?? false) === dirty) return {};
         return { tabs: s.tabs.map((x) => (x.id === id ? { ...x, dirty } : x)) };
       }),
-
-    setTabResidentPolicy: (id, residentPolicy) => {
-      set((s) => ({
-        tabs: s.tabs.map((tab) =>
-          tab.id === id ? { ...tab, residentPolicy } : tab
-        ),
-      }));
-      persist(get());
-    },
 
 
     // A group only exists while it holds tabs, so creating one always takes
@@ -3308,7 +3345,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         // preference would sit in the store while the screen kept the
         // colour the cold-start snapshot resolved to.
         ...themeFanOut(slice.themePreference, s.systemDark),
-        configError: null,
+        configError: snap.error ?? null,
         configWarnings: snap.warnings,
         configWarningsDismissed: false,
         // A load re-reads the whole file, so the store and the file agree
@@ -3482,13 +3519,6 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       })),
 
     restoreSession: async () => {
-      try {
-        await migrateSessionStateV2();
-      } catch (error) {
-        coreLog("error", `session v2 migration failed: ${String(error)}`);
-        set({ sessionRestoreResult: "migration-failed" });
-        return false;
-      }
       const loaded = await loadStateResult<PersistedState>(SESSION_SCOPE);
       if (loaded.kind !== "value") {
         set({ sessionRestoreResult: loaded.kind });
@@ -3499,7 +3529,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         set({ sessionRestoreResult: "invalid-shape" });
         return false;
       }
-      if (data.version !== 1 && data.version !== 2) {
+      if (data.version !== 1) {
         set({ sessionRestoreResult: "unsupported-version" });
         return false;
       }
@@ -3511,31 +3541,11 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         set({ sessionRestoreResult: "empty-tabs" });
         return false;
       }
-      const persistedTabs =
-        data.version === 1
-          ? data.tabs.map((t) => ({ ...t, type: t.type }))
-          : data.tabs.map((t) => ({ ...t, type: t.kind }));
-      if (
-        persistedTabs.some(
-          (tab) =>
-            typeof tab.type !== "string" ||
-            tab.type.length === 0 ||
-            tab.type === "agent"
-        )
-      ) {
-        set({ sessionRestoreResult: "invalid-shape" });
-        return false;
-      }
-      const tabs: Tab[] = persistedTabs.map((t) => ({
+      const tabs: Tab[] = data.tabs.map((t) => ({
         id: t.id,
-        type: t.type as TabType,
+        type: t.type,
         title: t.title,
-        pluginState: t.pluginState,
         groupId: t.groupId ?? null,
-        residentPolicy:
-          t.residentPolicy === "on" || t.residentPolicy === "off"
-            ? t.residentPolicy
-            : "inherit",
         cwd: t.cwd,
         url: t.url,
         renamed: t.renamed,

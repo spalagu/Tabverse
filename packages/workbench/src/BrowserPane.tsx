@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { STR } from "./strings";
-import { mirroredDocument } from "./remoteDocument";
+import { rewriteRemoteHtml, type ProxyUrlResolver } from "./remoteBrowserDocument";
+
+export { rewriteRemoteHtml as mirroredDocument } from "./remoteBrowserDocument";
 
 /** The pane's one route to the host's network — App hands it the proxy
  * client's requestViaProxy. */
-export type HostFetch = (url: string) => Promise<Response>;
+export type HostFetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 const directUrl = (target: string): string => target;
 
@@ -26,25 +28,32 @@ function refusalOf(res: Response): string {
 
 export function BrowserPane({
   url,
+  contextId,
   fetchViaHost,
   resolveProxyUrl = directUrl,
+  networkProxyRoot,
 }: {
   /** The host browser tab's address. */
   url: string;
+  /** Stable routing key for this remote Browser tab; never an authority. */
+  contextId?: string;
   fetchViaHost: HostFetch;
   /** Maps a host URL to the runtime's same-origin proxy endpoint. */
-  resolveProxyUrl?: (target: string) => string;
+  resolveProxyUrl?: ProxyUrlResolver;
+  /** Absolute same-origin root reserved for Host-network requests. */
+  networkProxyRoot?: string;
 }) {
   const [state, setState] = useState<PaneState>({ kind: "loading" });
 
   useEffect(() => {
     let alive = true;
+    const abort = new AbortController();
     setState({ kind: "loading" });
     // http AND https both ride the host's proxy now: the host terminates
-    // TLS itself (remote_proxy.rs's reqwest half), so an https target is
+    // TLS itself (the host gateway's reqwest half), so an https target is
     // fetched on the host's network like any other — its resolver, its
     // certificates, its egress.
-    fetchViaHost(url)
+    fetchViaHost(url, { signal: abort.signal })
       .then(async (res) => {
         const body = res.ok ? await res.text() : "";
         if (!alive) return;
@@ -55,10 +64,15 @@ export function BrowserPane({
           .toLowerCase()
           .includes("text/html");
         if (res.ok && html) {
-          const finalUrl = res.headers.get("x-tabverse-final-url") ?? url;
           setState({
             kind: "mirrored",
-            doc: mirroredDocument(body, finalUrl, resolveProxyUrl),
+            doc: rewriteRemoteHtml(
+              body,
+              res.url || url,
+              resolveProxyUrl,
+              contextId,
+              networkProxyRoot,
+            ),
           });
         } else {
           setState({ kind: "unmirrored", line: refusalOf(res), detail: null });
@@ -76,8 +90,9 @@ export function BrowserPane({
       });
     return () => {
       alive = false;
+      abort.abort();
     };
-  }, [url, fetchViaHost, resolveProxyUrl]);
+  }, [url, contextId, fetchViaHost, resolveProxyUrl, networkProxyRoot]);
 
   if (state.kind === "loading") {
     return (
@@ -109,13 +124,13 @@ export function BrowserPane({
   }
   return (
     <div className="browser-pane browser-pane-mirrored">
-      {/* Empty sandbox: no scripts, forms, popups, downloads, navigation or
-          same-origin authority. Static subresources use rewritten host proxy
-          URLs and the document CSP. */}
+      {/* Scripts run in an opaque sandbox origin. The injected CSP and
+          bootstrap restrict their network access to this tab's Host proxy;
+          no same-origin grant exposes the Join application or ticket. */}
       <iframe
         className="browser-pane-frame"
         title={STR.remote.web.browserPane.frameTitle({ url })}
-        sandbox=""
+        sandbox={networkProxyRoot === undefined ? "allow-forms" : "allow-forms allow-scripts"}
         srcDoc={state.doc}
       />
       <span className="browser-pane-chip">
