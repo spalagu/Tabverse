@@ -31,7 +31,8 @@ if (distinct.size !== 1 || distinct.has(undefined)) {
 
 const [version] = distinct;
 const event = process.env.GITHUB_EVENT_NAME ?? "local";
-if (event === "push") {
+const refType = process.env.GITHUB_REF_TYPE;
+if (event === "push" && refType === "tag") {
   const tag = process.env.GITHUB_REF_NAME;
   const sha = process.env.GITHUB_SHA;
   if (!tag || !sha) throw new Error("release tag and commit SHA are required");
@@ -46,6 +47,7 @@ console.log(
     schema: "tabverse-release-source/v1",
     status: "passed",
     event,
+    refType: refType ?? null,
     version,
     versions,
   }),
