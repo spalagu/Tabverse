@@ -4,6 +4,7 @@ interface IconProps {
 }
 
 export {
+  AgentIcon,
   AlertIcon,
   CloseIcon,
   FilesIcon,

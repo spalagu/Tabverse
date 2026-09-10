@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import type { TabDefinition } from "./tabs";
+import { tabDefinition, tabDefinitionsForRuntime } from "./tabs";
+import { useWorkbenchRuntime } from "./runtime";
 import { TabKindOptionPresentation } from "./newTabPresentation";
 import {
   GroupHeadPresentation,
@@ -81,9 +82,8 @@ export interface AppShareShellProps {
   activeId: string | null;
   onSelect: (id: string) => void;
   readOnly?: boolean;
-  onCreateTab?: (type: AppShareTabType, initial?: Readonly<Record<string, string>>) => void;
-  /** Enabled RemoteContributions projected from Join's PluginCatalog. */
-  tabDefinitions?: readonly TabDefinition[];
+  onCreateTab?: (type: AppShareTabType) => void;
+  onCreateBrowserTab?: (url: string) => void;
   /** Steer-level folder fold (the host sidebar's own click): sends the
  * toggleGroupCollapsed action for the named folder. Omitted at view
  * level — the head renders inert there. */
@@ -261,77 +261,87 @@ function TabList({
  * caller omits the handlers at view level and the button never appears. */
 function NewTabPicker({
   onCreateTab,
-  tabDefinitions,
+  onCreateBrowserTab,
   onClose,
-}: Pick<AppShareShellProps, "onCreateTab" | "tabDefinitions"> & {
-  onClose: () => void;
-}) {
-  const [editing, setEditing] = useState<TabDefinition | null>(null);
-  const [value, setValue] = useState("");
-  const pick = (definition: TabDefinition) => {
-    if (definition.creation !== undefined) {
-      setEditing(definition);
-      return;
-    }
-    onCreateTab?.(definition.type);
+}: Pick<
+  AppShareShellProps,
+  "onCreateTab" | "onCreateBrowserTab"
+> & { onClose: () => void }) {
+  const runtime = useWorkbenchRuntime();
+  const [browserOpen, setBrowserOpen] = useState(false);
+  const [url, setUrl] = useState("");
+  const kinds = tabDefinitionsForRuntime(runtime).filter(
+    (definition) => definition.type !== "browser"
+  );
+  const browser = tabDefinition("browser");
+  const pick = (type: AppShareTabType) => {
+    onCreateTab?.(type);
     onClose();
   };
   return (
     <div className="app-new-menu" role="menu" aria-label="New tab on the host">
       <div className="app-new-menu-head">NEW TAB</div>
-      {(tabDefinitions ?? []).map((definition) => {
-        const creation = definition.creation;
-        if (editing?.type === definition.type && creation !== undefined) {
-          return (
-            <form
-              key={definition.type}
-              className="app-new-menu-creation"
-              data-tab-kind={definition.type}
-              onSubmit={(event) => {
-                event.preventDefault();
-                const raw = value.trim();
-                if (raw === "") return;
-                const normalized =
-                  creation.defaultScheme !== undefined &&
-                  !/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)
-                    ? `${creation.defaultScheme}://${raw}`
-                    : raw;
-                onCreateTab?.(definition.type, { [creation.field]: normalized });
-                setValue("");
-                onClose();
-              }}
-            >
-              <input
-                type="text"
-                autoFocus
-                value={value}
-                placeholder={creation.placeholder}
-                aria-label={creation.fieldLabel}
-                onChange={(event) => setValue(event.target.value)}
-              />
-              <button type="submit">{creation.submitLabel}</button>
-            </form>
-          );
-        }
-        const Icon = TAB_ICONS[definition.icon];
+      {kinds.map((k) => {
+        const Icon = TAB_ICONS[k.type];
         return (
           <TabKindOptionPresentation
-            key={definition.type}
+          key={k.type}
+          role="menuitem"
+          label={k.label}
+          hint={k.hint}
+          Icon={Icon}
+          iconSize={16}
+          onSelect={() => pick(k.type)}
+          className="app-new-menu-row"
+          labelClassName="app-new-menu-label"
+          hintClassName="app-new-menu-hint"
+        />
+        );
+      })}
+      {onCreateBrowserTab !== undefined ? (
+        browserOpen ? (
+          <form
+            className="app-new-menu-browser"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const raw = url.trim();
+              if (raw === "") return;
+              // The host's own normalization shape: no scheme reads as
+              // https, the browser default — and the pane refuses https
+              // honestly, so intranet http must be typed in full.
+              onCreateBrowserTab(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`);
+              setUrl("");
+              onClose();
+            }}
+          >
+            <input
+              type="text"
+              autoFocus
+              value={url}
+              placeholder="http://intranet.example…"
+              aria-label="Address to open as a browser tab on the host"
+              onChange={(e) => setUrl(e.target.value)}
+            />
+            <button type="submit">Open</button>
+          </form>
+        ) : (
+          <TabKindOptionPresentation
             role="menuitem"
-            label={definition.label}
-            hint={definition.hint}
-            Icon={Icon}
+            label={browser.label}
+            hint={browser.hint}
+            Icon={TAB_ICONS.browser}
             iconSize={16}
-            onSelect={() => pick(definition)}
+            onSelect={() => setBrowserOpen(true)}
             className="app-new-menu-row"
             labelClassName="app-new-menu-label"
             hintClassName="app-new-menu-hint"
           />
-        );
-      })}
+        )
+      ) : null}
     </div>
   );
 }
+
 /** The shell itself: rail form on a wide fine-pointer viewport, drawer
  * form everywhere else. The content area and its id are shared by both
  * so the tabs' aria-controls points at something that exists either way. */
@@ -342,7 +352,7 @@ export function AppShareShell({
   onSelect,
   readOnly = false,
   onCreateTab,
-  tabDefinitions,
+  onCreateBrowserTab,
   onToggleGroup,
   children,
 }: AppShareShellProps) {
@@ -361,7 +371,7 @@ export function AppShareShell({
   // The host's own entrance shape (its tab bar's +): a header button that
   // raises the kind picker. Steer-only by the same rule as every creation
   // — at view level neither handler is passed and the button hides.
-  const canCreate = !readOnly && onCreateTab !== undefined;
+  const canCreate = !readOnly && (onCreateTab !== undefined || onCreateBrowserTab !== undefined);
 
   const form = wide
     ? "app-shell-wide"
@@ -388,7 +398,7 @@ export function AppShareShell({
               {menuOpen ? (
                 <NewTabPicker
                   onCreateTab={onCreateTab}
-                  tabDefinitions={tabDefinitions}
+                  onCreateBrowserTab={onCreateBrowserTab}
                   onClose={() => setMenuOpen(false)}
                 />
               ) : null}
@@ -420,8 +430,8 @@ export function AppShareShell({
                 </button>
                 {menuOpen ? (
                   <NewTabPicker
-                  onCreateTab={onCreateTab}
-                  tabDefinitions={tabDefinitions}
+                    onCreateTab={onCreateTab}
+                    onCreateBrowserTab={onCreateBrowserTab}
                     onClose={() => setMenuOpen(false)}
                   />
                 ) : null}

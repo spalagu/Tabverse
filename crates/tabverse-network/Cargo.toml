@@ -1,0 +1,33 @@
+[package]
+name = "tabverse-network"
+version = "0.1.0"
+edition = "2021"
+description = "Host-network delegation primitives for Tabverse Remote."
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = "1"
+# The core gateway only consumes a Host-provided client and streams bodies.
+# DNS, proxy, TLS, redirect, and timeout policy belong to the Host adapter's
+# canonical HTTP client factory, not this Tauri-independent crate.
+tokio = { version = "1.53.1", features = ["io-util"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http = "1"
+httpdate = "1"
+reqwest = { version = "0.13", default-features = false, features = ["cookies", "stream"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tokio = { version = "1.53.1", features = ["net", "time"] }
+
+[dev-dependencies]
+# The real localhost gateway test builds a reqwest client in this standalone
+# crate. Production installs the same ring provider at the Host HTTP factory;
+# keeping this test-only preserves that ownership boundary.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "io-util", "net", "time"] }

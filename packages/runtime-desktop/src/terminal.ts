@@ -25,10 +25,6 @@ export interface CreateTermOpts {
   profile?: string;
   runOnStart?: string;
   tabId?: string;
-  /** Stable identity of the owning Tab or split pane inside its worker. */
-  ownerKey?: string;
-  /** Supervisor-owned runtime selected before this pane asks for a PTY. */
-  residentRuntimeId?: string;
 }
 
 /** Create a terminal backed by the desktop Tauri PTY commands. */
@@ -59,7 +55,6 @@ export async function createTauriTerminal(
     ? await invoke<string>("term_attach", {
         id: options.attachId,
         tabId: options.tabId ?? null,
-        residentRuntimeId: options.residentRuntimeId ?? null,
         cols: options.cols,
         rows: options.rows,
         onEvent: channel,
@@ -68,8 +63,6 @@ export async function createTauriTerminal(
         cols: options.cols,
         rows: options.rows,
         tabId: options.tabId ?? null,
-        ownerKey: options.ownerKey ?? null,
-        residentRuntimeId: options.residentRuntimeId ?? null,
         cwd: options.cwd ?? null,
         profile: options.profile ?? null,
         runOnStart: options.runOnStart ?? null,

@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ShareAccess, RemoteHostMsgPayload } from "@tabverse/runtime-contracts";
+import { WorkbenchRuntimeProvider } from "@tabverse/workbench/runtime";
+import { remoteRuntime } from "@tabverse/runtime-remote";
+import type { AgentAccess, RemoteHostMsgPayload } from "@tabverse/runtime-contracts";
 import { b64decode, b64encode } from "@tabverse/remote-client/b64";
+import {
+  applyViewerFrame,
+  initialViewerAgentState,
+  type ViewerAgentState,
+} from "@tabverse/remote-client/agent-viewer";
+import type { RemoteAgentActions } from "@tabverse/workbench/remote-agent-pane";
 import {
   isDeliberateEnd,
   isPermanentJoinError,
@@ -12,7 +20,9 @@ import {
   errorText,
 } from "@tabverse/workbench/strings/errors";
 import { STR, plural } from "@tabverse/workbench/strings";
-import { type TermSink } from "@tabverse/workbench/terminal/viewer";
+import type { TermSink } from "@tabverse/workbench/terminal/viewer";
+import type { ReadMeta, RemoteFileReader } from "@tabverse/workbench/files-pane";
+import { transformRemoteResponse } from "@tabverse/workbench/remote-browser-document";
 import { Toolbar } from "./Toolbar";
 import { TOOLBAR_BYTES, applyStickyCtrl, type ToolbarKey } from "./toolbarKeys";
 import { ticketFromHash } from "./ticket";
@@ -25,11 +35,13 @@ import {
   useWideForm,
 } from "@tabverse/workbench/app-shell";
 import {
+  RemoteWorkbenchTabView,
+  type RemoteWorkbenchTabModel,
+  type RemoteWorkbenchTabViewContext,
+} from "@tabverse/workbench/remote-tab-view";
+import {
   applyMirrorAction,
-  applyContributionState,
   mirrorSinks,
-  remoteTabDefinitions,
-  remoteTabSupportsPrivateStream,
   resetRemoteMirror,
   useRemoteMirrorStore,
 } from "@tabverse/runtime-remote/app-mirror";
@@ -45,24 +57,16 @@ import {
   dispatchAppFrame,
   isAppFrame,
   type AppFrameSinks,
-  type AppHostFrame,
 } from "@tabverse/remote-client/app-frame";
-import { createContributionChannel } from "@tabverse/remote-client/contribution-channel";
 import {
-  createBrowserStreamClient,
   createProxyClient,
   installProxyFetchPatch,
+  proxyPathRoot,
   proxyUrlFor,
-  targetFromProxyUrl,
+  proxyRouteFromUrl,
   type ProxyClient,
 } from "@tabverse/remote-client/proxy-fetch";
-import { joinPluginComposition } from "./pluginComposition";
-import {
-  JoinPluginTabView,
-  installJoinTabViews,
-  type JoinTabViewContext,
-} from "./pluginViews";
-import type { RemoteMirrorTab } from "@tabverse/runtime-remote/app-mirror";
+import { relayProxyResponse } from "./proxyStreamBridge";
 
 /** The wasm client has no dial timeout of its own (the desktop library uses
  * 20s); race the join against this so a dead relay counts as an unexpected
@@ -76,12 +80,11 @@ const OPTIMISTIC_APP_ACTIONS: Record<string, true> = { activateTab: true };
  * app's RemoteView). */
 type HostMsg =
   | RemoteHostMsgPayload
-  | AppHostFrame
-  | { type: "mode"; readOnly: boolean; access?: ShareAccess };
+  | { type: "mode"; readOnly: boolean; access?: AgentAccess };
 
 /** Which renderer this share gets. Decided by the welcome's tabType; null
  * until the host has said (or the join has failed for good). */
-type RendererKind = "terminal" | "app";
+type RendererKind = "terminal" | "agent" | "app";
 
 type StatusKind = "idle" | "busy" | "live" | "bad";
 
@@ -99,8 +102,6 @@ interface Inst {
   readOnly: boolean;
   ctrlArmed: boolean;
   kind: RendererKind | null;
-  attachmentId: string | null;
-  attachmentGeneration: number | null;
   /** The mounted terminal renderer, once there is one. */
   sink: TermSink | null;
   /** Terminal ops issued before the renderer was known or mounted. */
@@ -129,8 +130,6 @@ function JoinApp() {
       readOnly: false,
       ctrlArmed: false,
       kind: null,
-      attachmentId: null,
-      attachmentGeneration: null,
       sink: null,
       pending: [],
     };
@@ -147,7 +146,10 @@ function JoinApp() {
   const [viewers, setViewers] = useState<number | null>(null);
   const [readOnly, setReadOnly] = useState(false);
   const [kind, setKind] = useState<RendererKind | null>(null);
-  const [, setReconnectAttempt] = useState(0);
+  const [agentState, setAgentState] = useState<ViewerAgentState>(
+    initialViewerAgentState
+  );
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [showGate, setShowGate] = useState(true);
   const [showStage, setShowStage] = useState(false);
   const [connectBusy, setConnectBusy] = useState(false);
@@ -176,52 +178,28 @@ function JoinApp() {
 
   const proxy = useMemo<ProxyClient>(
     () =>
-      createProxyClient((id, head, body) => {
-        inst.session?.sendProxyReq(BigInt(id), head, body);
-      }),
+      createProxyClient(
+        (contextId, method, url, headers) => {
+          const session = inst.session;
+          if (session === null) return Promise.reject(new Error("the session is not connected"));
+          return session.openHttpStream(contextId, method, url, headers);
+        },
+        () => useRemoteMirrorStore.getState().activeTabId ?? "remote-browser",
+      ),
     [inst]
   );
 
-  const browserStream = useMemo(
-    () => createBrowserStreamClient(
-      {
-        open: (frame) => inst.session?.sendBrowserOpen(
-          BigInt(frame.streamId),
-          frame.tabId,
-          frame.grantId,
-          frame.attachmentId,
-          BigInt(frame.attachmentGeneration),
-          frame.method,
-          frame.url,
-          frame.headers,
-          frame.bodyLen === undefined ? undefined : BigInt(frame.bodyLen),
-        ),
-        requestChunk: (streamId, seq, b64) =>
-          inst.session?.sendBrowserRequestChunk(BigInt(streamId), BigInt(seq), b64),
-        requestEnd: (streamId) => inst.session?.sendBrowserRequestEnd(BigInt(streamId)),
-        credit: (streamId, bytes) =>
-          inst.session?.sendBrowserCredit(BigInt(streamId), BigInt(bytes)),
-        cancel: (streamId, reason) =>
-          inst.session?.sendBrowserCancel(BigInt(streamId), reason),
-      },
-      () => inst.attachmentId === null || inst.attachmentGeneration === null
-        ? null
-        : { id: inst.attachmentId, generation: inst.attachmentGeneration },
-    ),
-    [inst],
+  const resolveProxyUrl = useCallback(
+    (target: string, contextId?: string) =>
+      proxyUrlFor(target, import.meta.env.BASE_URL, contextId),
+    [],
+  );
+  const networkProxyRoot = useMemo(
+    () => new URL(proxyPathRoot(import.meta.env.BASE_URL), location.href).href,
+    [],
   );
 
-  /** The app-frame sinks with the proxy owner attached: the mirror
-   * hears actions and snapshots, the clipboard channel hears clipSync,
-   * and proxyRes settles onto the client above (the no-op sink
-   * mirrorSinks ships for terminal-only joins is overridden here). */
-  const appSinks = useMemo<AppFrameSinks>(
-    () => ({
-      ...mirrorSinks(),
-      onProxy: (id, head, body) => proxy.settle(id, head, body),
-    }),
-    [proxy]
-  );
+  const appSinks = useMemo<AppFrameSinks>(() => mirrorSinks(), []);
 
   const appChannel = useMemo(
     () =>
@@ -231,55 +209,72 @@ function JoinApp() {
     [inst]
   );
 
-  const contributionChannel = useMemo(
-    () => createContributionChannel({
-      resolve: async (kind, tabId) => {
-        const instance = await joinPluginComposition().createInstance(kind, `remote:${tabId}`);
-        const contribution = instance.contribution.remote;
-        if (contribution === undefined) {
-          await instance.dispose();
-          throw new Error(`tab contribution is not remote-capable: ${kind}`);
-        }
-        return {
-          contribution,
-          dispose: () => instance.dispose(),
-        };
-      },
-      sendAck: (tabId, epoch, frameSeq) => {
-        inst.session?.sendRemoteAck(tabId, epoch, frameSeq);
-      },
-      requestSnapshot: (tabId, epoch) => {
-        inst.session?.requestRemoteSnapshot(tabId, epoch);
-      },
-      onState: (tabId, tabKind, state) => {
-        applyContributionState(tabId, tabKind, state);
-      },
-    }),
-    [inst],
+  /** The pane's fetch handle — the client above, nothing more. */
+  const fetchViaHost = useCallback(
+    (url: string, init?: RequestInit) => proxy.requestViaProxy(url, init),
+    [proxy]
   );
 
-  useEffect(() => () => {
-    void contributionChannel.dispose();
-  }, [contributionChannel]);
+  const readFileViaHost = useCallback<RemoteFileReader>(async (path, signal) => {
+    const session = inst.session;
+    if (session === null) throw new Error("the session is not connected");
+    const contextId = useRemoteMirrorStore.getState().activeTabId ?? "remote-files";
+    const previewLimit = 4n * 1024n * 1024n;
+    const stream = await session.openFileStream(contextId, path, 0n, previewLimit);
+    const cancel = () => stream.cancel();
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      if (signal.aborted) throw new DOMException("file read aborted", "AbortError");
+      const start = await stream.responseStart();
+      if (start.type === "error") throw new Error(start.message);
+      const total = Number(start.head.total);
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      while (received < Number(previewLimit)) {
+        const chunk = await stream.readResponseChunk(64 * 1024);
+        if (chunk.byteLength === 0) break;
+        chunks.push(chunk);
+        received += chunk.byteLength;
+      }
+      const bytes = new Uint8Array(received);
+      let cursor = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, cursor);
+        cursor += chunk.byteLength;
+      }
+      const textKind = start.head.mime.startsWith("text/") ||
+        ["application/json", "application/xml", "application/javascript"].includes(start.head.mime);
+      let text: string | null = null;
+      let readOnlyReason: string | null = null;
+      if (textKind) {
+        try {
+          text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        } catch {
+          text = new TextDecoder().decode(bytes);
+          readOnlyReason = "This file is not valid UTF-8, so saving could damage it.";
+        }
+      }
+      const truncated = total > received;
+      if (truncated && readOnlyReason === null) {
+        readOnlyReason = "Only the first 4 MB are loaded, so saving would discard the rest.";
+      }
+      return {
+        name: start.head.name,
+        size: total,
+        text,
+        truncated,
+        read_only_reason: readOnlyReason,
+      } satisfies ReadMeta;
+    } finally {
+      signal.removeEventListener("abort", cancel);
+      if (signal.aborted) stream.cancel();
+    }
+  }, [inst]);
 
-  /** The pane's fetch handle — the client above, nothing more. */
   /** The selected host row. Workbench owns dispatch from its type to a View. */
   const activeMirrorTab = useMemo(
     () => mirrorTabs.find((tab) => tab.id === mirrorActiveId) ?? null,
     [mirrorTabs, mirrorActiveId],
-  );
-
-  const fetchViaHost = useCallback(
-    (url: string) => {
-      if (
-        activeMirrorTab === null ||
-        !remoteTabSupportsPrivateStream(activeMirrorTab.type, "browser.http")
-      ) {
-        return Promise.reject(new Error("active Tab has no browser.http stream"));
-      }
-      return browserStream.requestViaHost(activeMirrorTab.id, url);
-    },
-    [activeMirrorTab, browserStream],
   );
 
   const [manualClip, setManualClip] = useState<string | null>(null);
@@ -291,52 +286,84 @@ function JoinApp() {
     [],
   );
 
+  /** The active files tab's directory: the LIVE overlay first (the pane's
+ * current root, updated as it navigates), the spawn-time cwd as the
+ * fallback a plain session snapshot would carry. */
   const filesOpenDir = useRemoteMirrorStore((s) => s.filesOpenDir);
+  const activeFilesDir = useMemo(() => {
+    if (activeMirrorTab?.type !== "files") return null;
+    return filesOpenDir[activeMirrorTab.id] ?? activeMirrorTab.cwd ?? null;
+  }, [activeMirrorTab, filesOpenDir]);
+
+  /** The active tab when it is a files row: the pane mounts with the file
+   * the host fronts (the snapshot overlay's filesOpenPath), read over the
+   * app channel's fs_read rpc. Subscribed, not getState-read: the host
+   * opening another file must re-render the pane. Its body is read through
+   * the independent FileRead stream, not the app RPC channel. */
   const filesOpenPath = useRemoteMirrorStore((s) => s.filesOpenPath);
+  const activeFilesPath = useMemo(() => {
+    return activeMirrorTab?.type === "files"
+      ? (filesOpenPath[activeMirrorTab.id] ?? null)
+      : null;
+  }, [activeMirrorTab, filesOpenPath]);
 
   useEffect(() => {
-    if (!connected || !("serviceWorker" in navigator)) return;
+    if (!("serviceWorker" in navigator)) return;
     const onMessage = (event: MessageEvent) => {
-      const d = event.data as { type?: string; url?: string };
+      const d = event.data as {
+        type?: string;
+        url?: string;
+        method?: string;
+        headers?: [string, string][];
+        hasBody?: boolean;
+      };
       const url = d?.url;
       if (d?.type !== "tabverse-proxy-fetch" || typeof url !== "string") return;
       const port = (event as MessageEvent & { ports: MessagePort[] }).ports[0];
       if (port === undefined) return;
       void (async () => {
         try {
-          const target = targetFromProxyUrl(new URL(url));
-          if (target === null) throw new Error("not a proxy endpoint url");
-          if (
-            activeMirrorTab === null ||
-            !remoteTabSupportsPrivateStream(activeMirrorTab.type, "browser.http")
-          ) {
-            throw new Error("active Tab has no browser.http stream");
-          }
-          const res = await browserStream.requestViaHost(activeMirrorTab.id, target);
-          const buf = new Uint8Array(await res.arrayBuffer());
-          let bin = "";
-          for (let i = 0; i < buf.length; i += 0x8000) {
-            bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-          }
+          const route = proxyRouteFromUrl(new URL(url));
+          if (route === null) throw new Error("not a proxy endpoint url");
+          await relayProxyResponse(
+            port,
+            route.target,
+            (requestUrl, init) =>
+              proxy
+                .requestViaProxy(requestUrl, init, route.contextId ?? undefined)
+                .then((response) =>
+                  transformRemoteResponse(
+                    response,
+                    requestUrl,
+                    resolveProxyUrl,
+                    route.contextId ?? undefined,
+                    networkProxyRoot,
+                  ),
+                ),
+            {
+              method: d.method ?? "GET",
+              headers: d.headers ?? [],
+              hasBody: d.hasBody ?? false,
+            },
+          );
+        } catch (error) {
           port.postMessage({
-            status: res.status,
-            contentType: res.headers.get("content-type") ?? "",
-            finalUrl: res.headers.get("x-tabverse-final-url") ?? target,
-            bodyB64: btoa(bin),
+            type: "error",
+            message: error instanceof Error ? error.message : "proxy failed",
           });
-        } catch {
-          port.postMessage({ status: 502, contentType: "", bodyB64: "" });
+        } finally {
+          port.close();
         }
       })();
     };
     navigator.serviceWorker.addEventListener("message", onMessage);
     return () => navigator.serviceWorker.removeEventListener("message", onMessage);
-  }, [activeMirrorTab, browserStream, connected]);
+  }, [networkProxyRoot, proxy, resolveProxyUrl]);
 
   useEffect(() => {
     if (!connected) return;
-    return installProxyFetchPatch({ requestViaProxy: fetchViaHost });
-  }, [connected, fetchViaHost]);
+    return installProxyFetchPatch(proxy);
+  }, [connected, proxy]);
 
   const [ctrlArmed, setCtrlArmed] = useState(false);
 
@@ -350,6 +377,7 @@ function JoinApp() {
 
   const toTerm = useCallback(
     (op: (sink: TermSink) => void) => {
+      if (inst.kind === "agent") return;
       if (inst.sink) op(inst.sink);
       else inst.pending.push(op);
     },
@@ -380,12 +408,9 @@ function JoinApp() {
     inst.session?.leave();
     inst.session = null;
     proxy.failAll("the session ended");
-    browserStream.failAll("the session ended");
     appChannel.failAll("the session ended");
-    inst.attachmentId = null;
-    inst.attachmentGeneration = null;
     setConnected(false);
-  }, [appChannel, browserStream, inst, proxy]);
+  }, [appChannel, inst, proxy]);
   const cancelRetry = useCallback(() => {
     if (inst.retryTimer) window.clearTimeout(inst.retryTimer);
     inst.retryTimer = 0;
@@ -454,25 +479,18 @@ function JoinApp() {
 
   const handle = useCallback(
     (msg: HostMsg) => {
-      // The app family first: its frames never reach the terminal branch.
-      // The proxy client gets the
-      // first offer — the host answers a ProxyReq it could not run with
-      // an rpcResult carrying the same id, and only the ids it is
-      // waiting on are claimed; every other frame falls to the sinks.
+      // Every frame goes through the same fold the app's RemoteView uses;
+      // it collects what an agent transcript needs and ignores the rest.
+      // The app family first: its frames never reach the terminal/agent
+      // branches below, which never see one. Browser HTTP uses independent
+      // QUIC data streams and therefore never enters this control dispatcher.
       if (isAppFrame(msg)) {
-        if (browserStream.consume(msg)) return;
-        if (
-          msg.type === "contributionSnapshot" ||
-          msg.type === "contributionFrame"
-        ) {
-          void contributionChannel.consume(msg as AppHostFrame);
-          return;
-        }
-        if (!proxy.consumeRpcResult(msg) && !appChannel.consume(msg as Record<string, unknown>)) {
+        if (!appChannel.consume(msg as Record<string, unknown>)) {
           dispatchAppFrame(msg, appSinks);
         }
         return;
       }
+      setAgentState((prev) => applyViewerFrame(prev, msg));
       switch (msg.type) {
         case "welcome": {
           // The host accepted us (again) — a successful rejoin resets the
@@ -480,22 +498,18 @@ function JoinApp() {
           inst.retryAttempt = 0;
           setReconnectAttempt(0);
           setTabTitle(msg.tabTitle);
-          inst.attachmentId = msg.attachmentId ?? null;
-          inst.attachmentGeneration = msg.attachmentGeneration ?? null;
-          // The welcome names the share's kind (absent = terminal). Whole-app
-          // and one-tab contribution shares both mount the app shell; the
-          // contribution snapshot decides whether that shell contains one or
-          // many tabs.
+          // The welcome names the share's kind (absent = terminal, all a v1
+          // host could send). Only now does a renderer mount — an agent
+          // share never constructs xterm at all, and an app share mounts
+          // the full-interface shell instead of any single-tab renderer.
           const k: RendererKind =
-            msg.tabType === "app" || msg.tabType === "contribution"
-              ? "app"
-              : "terminal";
+            msg.tabType === "agent" ? "agent" : msg.tabType === "app" ? "app" : "terminal";
           if (inst.kind !== k) {
             inst.kind = k;
-            if (k === "app") inst.pending = [];
+            if (k === "agent" || k === "app") inst.pending = [];
             setKind(k);
           }
-          // A gridless app share travels 0x0 here: its viewers
+          // A gridless share (agent, app) travels 0x0 here: its viewers
           // lay their own chrome out. xterm refuses a 0x0 resize, so the
           // fit op waits for the terminal-bearing frames that DO carry a
           // real grid (a tab share's welcome, an app share's terminal
@@ -548,7 +562,7 @@ function JoinApp() {
           break;
       }
     },
-    [appChannel, appSinks, browserStream, contributionChannel, inst, proxy, scheduleReconnect, setStatusLine, teardown, toTerm]
+    [appChannel, appSinks, inst, proxy, scheduleReconnect, setStatusLine, teardown, toTerm]
   );
 
   const handleRef = useRef(handle);
@@ -612,9 +626,6 @@ function JoinApp() {
       ]);
       if (gen !== inst.connectGen) return;
       inst.session = fresh;
-      // This channel survives transport reconnects. Existing cursors ask
-      // the new attachment for same-epoch replay; a first join has none.
-      await contributionChannel.resume();
       setConnected(true);
       setShowGate(false);
       setShowStage(true);
@@ -645,7 +656,7 @@ function JoinApp() {
         scheduleReconnect();
       }
     }
-  }, [contributionChannel, inst, scheduleReconnect, setStatusLine, teardown, toTerm]);
+  }, [inst, scheduleReconnect, setStatusLine, teardown, toTerm]);
   useEffect(() => {
     connectRef.current = connect;
   }, [connect]);
@@ -691,6 +702,17 @@ function JoinApp() {
     (cols: number, rows: number) => {
       inst.session?.viewport(cols, rows);
     },
+    [inst]
+  );
+
+  /** The agent pane's send side over the wasm session — the same adapter
+   * shape the desktop builds over its invoke commands. */
+  const agentActions = useMemo<RemoteAgentActions>(
+    () => ({
+      prompt: (text) => inst.session?.sendPrompt(text),
+      answer: (callId, allow) => inst.session?.sendAnswer(callId, allow),
+      cancel: () => inst.session?.sendCancel(),
+    }),
     [inst]
   );
 
@@ -774,12 +796,13 @@ function JoinApp() {
     setKind(null);
     inst.kind = null;
     inst.pending = [];
+    setAgentState(initialViewerAgentState);
     setTabTitle("");
     setViewers(null);
   }, [inst, teardown]);
 
-  /** Transport facts are injected once; each enabled contribution owns its renderer. */
-  const remoteViewContext: JoinTabViewContext = {
+  /** One Workbench-owned view context for direct shares and app mirrors. */
+  const remoteViewContext: RemoteWorkbenchTabViewContext = {
     terminal: {
       attach: attachTerm,
       onInput: onTermInput,
@@ -790,25 +813,43 @@ function JoinApp() {
       onCopy: onMirrorCopy,
       onPaste: onMirrorPaste,
     },
+    agent: {
+      events: agentState.events ?? [],
+      access: agentState.access,
+      notice: agentState.notice,
+      onDismissNotice: () =>
+        setAgentState((state) => ({ ...state, notice: null })),
+      actions:
+        kind === "agent"
+          ? inst.session || replayMode
+            ? agentActions
+            : null
+          : !readOnly && inst.session
+            ? agentActions
+            : null,
+      reconnectAttempt,
+    },
     files: {
-      openPath: filesOpenPath,
-      openDir: filesOpenDir,
+      path: activeFilesPath,
+      dir: activeFilesDir,
       rpc: appChannel.rpc,
       readOnly,
+      readFile: readFileViaHost,
     },
+    settings: { rpc: appChannel.rpc, readOnly },
     browser: {
-      requestViaHost: (tabId, url) => browserStream.requestViaHost(tabId, url),
-      resolveProxyUrl: proxyUrlFor,
+      fetchViaHost,
+      resolveProxyUrl,
+      networkProxyRoot,
     },
   };
 
-  const directShareTab: RemoteMirrorTab | null =
-    kind === "terminal"
+  const directShareTab: RemoteWorkbenchTabModel | null =
+    kind === "terminal" || kind === "agent"
       ? {
           id: `shared-${kind}`,
           type: kind,
           title: tabTitle || `Shared ${kind}`,
-          groupId: null,
         }
       : null;
 
@@ -921,10 +962,9 @@ function JoinApp() {
 
         <section id="stage" hidden={!showStage}>
           {directShareTab !== null ? (
-            <JoinPluginTabView
+            <RemoteWorkbenchTabView
               tab={directShareTab}
               context={remoteViewContext}
-              composition={joinPluginComposition()}
             />
           ) : kind === "app" ? (
             <AppShareShell
@@ -932,21 +972,27 @@ function JoinApp() {
               groups={mirrorGroups}
               activeId={mirrorActiveId}
               readOnly={readOnly}
-              tabDefinitions={remoteTabDefinitions()}
               onSelect={(id) => onAppAction("activateTab", id)}
               onCreateTab={
                 readOnly
                   ? undefined
-                  : (type, initial) => onAppAction("addTab", { type, ...initial })
+                  : (type) => {
+                      if (type === "browser") return;
+                      onAppAction("addTab", { type });
+                    }
+              }
+              onCreateBrowserTab={
+                readOnly
+                  ? undefined
+                  : (url) => onAppAction("addTab", { type: "browser", url })
               }
               onToggleGroup={
                 readOnly ? undefined : (id) => onAppAction("toggleGroupCollapsed", id)
               }
             >
-              <JoinPluginTabView
+              <RemoteWorkbenchTabView
                 tab={activeMirrorTab}
                 context={remoteViewContext}
-                composition={joinPluginComposition()}
               />
             </AppShareShell>
           ) : (
@@ -975,10 +1021,13 @@ function JoinApp() {
   );
 }
 
-installJoinTabViews();
-
+/** Join injects remote capabilities once; shared children do not know its transport. */
 export function App() {
-  return <JoinApp />;
+  return (
+    <WorkbenchRuntimeProvider runtime={remoteRuntime}>
+      <JoinApp />
+    </WorkbenchRuntimeProvider>
+  );
 }
 
 function browserName(): string {

@@ -17,6 +17,12 @@ export interface WasmSession {
   viewport(cols: number, rows: number): void;
   /** Close the connection (best-effort; the page may be navigating away). */
   leave(): void;
+  /** Say something to a shared agent. Host-enforced Steer. */
+  sendPrompt(text: string): void;
+  /** Answer an agent permission request. Host-enforced Approve. */
+  sendAnswer(callId: string, allow: boolean, reason?: string): void;
+  /** Stop the agent turn in progress. Host-enforced Steer. */
+  sendCancel(): void;
   /** A store action for the host to execute (app share). Steer-gated on
    * the host; the confirmation comes back as an actionApplied broadcast. */
   sendAction(name: string, args: unknown): void;
@@ -25,32 +31,38 @@ export interface WasmSession {
    * the watcher then echoes to every viewer. */
   sendClipPush(text: string): void;
   sendRpc(id: bigint, cmd: string, args: unknown): void;
-  sendProxyReq(id: bigint, head: string, body?: string): void;
-  sendBrowserOpen(
-    streamId: bigint,
-    tabId: string,
-    grantId: string,
-    attachmentId: string,
-    attachmentGeneration: bigint,
+  openHttpStream(
+    contextId: string,
     method: string,
     url: string,
-    headers: Array<[string, string]>,
-    bodyLen?: bigint,
-  ): void;
-  sendBrowserRequestChunk(streamId: bigint, seq: bigint, b64: string): void;
-  sendBrowserRequestEnd(streamId: bigint): void;
-  sendBrowserCredit(streamId: bigint, bytes: bigint): void;
-  sendBrowserCancel(streamId: bigint, reason?: string): void;
-  sendRemoteAck(tabId: string, epoch: string, frameSeq: bigint): void;
-  requestRemoteSnapshot(tabId: string, epoch?: string): void;
-  sendRemoteIntent(
-    tabId: string,
-    attachmentId: string,
-    attachmentGeneration: bigint,
-    intentId: string,
-    name: string,
-    args: unknown,
-  ): void;
+    headers: Array<{ name: string; value: string }>
+  ): Promise<WasmHttpStream>;
+  openFileStream(
+    contextId: string,
+    path: string,
+    offset: bigint,
+    length?: bigint
+  ): Promise<WasmFileStream>;
+}
+
+export interface WasmFileStream {
+  cancel(): void;
+  responseStart(): Promise<
+    | { type: "file"; head: { path: string; name: string; mime: string; total: bigint; offset: bigint; length: bigint } }
+    | { type: "error"; code: string; message: string }
+  >;
+  readResponseChunk(limit: number): Promise<Uint8Array>;
+}
+
+export interface WasmHttpStream {
+  cancel(): void;
+  writeRequestChunk(bytes: Uint8Array): Promise<void>;
+  finishRequest(): void;
+  responseStart(): Promise<
+    | { type: "response"; head: { status: number; finalUrl: string; headers: Array<{ name: string; value: string }> } }
+    | { type: "error"; error: { code: string; message: string; retryable: boolean } }
+  >;
+  readResponseChunk(limit: number): Promise<Uint8Array>;
 }
 
 export interface WasmApi {

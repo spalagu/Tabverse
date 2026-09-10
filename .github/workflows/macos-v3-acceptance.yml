@@ -6,7 +6,7 @@ on:
       source_ref:
         description: Branch, tag, or commit to build
         required: true
-        default: architecture-v3-base
+        default: main
         type: string
 
 permissions:

@@ -90,8 +90,10 @@ export function installAppTermBridge(deps: AppTermBridgeDeps): () => void {
       deps.getTerm(liveTabId)?.setViewerCap(null);
     }
     liveTabId = w?.tabId ?? null;
-    // Report the raw active tab id, terminal or not. The terminal tap simply
-    // finds no terminal session under a non-terminal id.
+    // The RAW active tab id, terminal or not: Rust's agent binding keys on
+    // it (an agent tab fronts the same way a terminal does), and the
+    // terminal tap simply finds no terminal session under an agent tab's
+    // id — both halves of "what fronts" from the one fact.
     deps.setActiveTab(s.activeTabId);
     if (!w) return;
     // Cap before serializing: the snapshot must carry the capped grid, or

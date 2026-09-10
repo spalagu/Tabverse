@@ -2,7 +2,9 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  CONTENT_HANDLERS,
   Preview,
+  contentHandlerFor,
   type FilePreviewMeta,
   type FilePreviewRenderers,
   type FilePreviewRuntime,
@@ -63,6 +65,26 @@ async function renderPreview(file: FilePreviewMeta) {
 }
 
 describe("file preview routing", () => {
+  it("registers unique handlers with the binary fallback last", () => {
+    const ids = CONTENT_HANDLERS.map((handler) => handler.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.at(-1)).toBe("binary");
+  });
+
+  it.each([
+    ["image", "image/png", "photo.png", "image"],
+    ["pdf", "application/pdf", "doc.pdf", "pdf"],
+    ["audio", "audio/mpeg", "song.mp3", "audio"],
+    ["video", "video/mp4", "clip.mp4", "video"],
+    ["document", "application/msword", "doc.doc", "office"],
+    ["archive", "application/zip", "data.zip", "archive"],
+    ["binary", "application/vnd.sqlite3", "data.db", "sqlite"],
+    ["binary", "font/ttf", "font.ttf", "font"],
+    ["binary", "application/octet-stream", "blob.bin", "binary"],
+  ] as const)("routes %s/%s to %s", (kind, mime, name, handler) => {
+    expect(contentHandlerFor(meta({ kind, mime, name })).id).toBe(handler);
+  });
+
   it("routes structured binary formats and keeps hex as the fallback", async () => {
     await renderPreview(meta({ mime: "application/vnd.sqlite3" }));
     expect(host?.querySelector("[data-renderer='sqlite']")).not.toBeNull();

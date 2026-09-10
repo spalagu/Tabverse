@@ -1,8 +1,3 @@
-/** Milliseconds one proxied request may take page-side — the same
- * whole-exchange budget the host's proxy enforces (remote_proxy.rs's
- * REQ_DEADLINE). Whichever expires first surfaces as a rejection; the
- * pairing means a viewer never waits on one deadline twice. */
-export const PROXY_TIMEOUT_MS = 30_000;
 
 /**
  * The same-origin path that stands for "the host's network". A URL under
@@ -17,6 +12,17 @@ export const PROXY_TIMEOUT_MS = 30_000;
  * — which a query-parameter form cannot do.
  */
 export const PROXY_PATH_PREFIX = "/__tabverse_proxy/";
+const PROXY_PATH_SEGMENT = "__tabverse_proxy/";
+
+/** Same-origin root beneath which every virtual Browser URL lives. */
+export function proxyPathRoot(basePath = "/"): string {
+  let start = 0;
+  let end = basePath.length;
+  while (start < end && basePath[start] === "/") start += 1;
+  while (end > start && basePath[end - 1] === "/") end -= 1;
+  const scopedBase = start === end ? "" : `/${basePath.slice(start, end)}`;
+  return `${scopedBase}/${PROXY_PATH_SEGMENT}`;
+}
 
 /**
  * The endpoint path standing for one host-side URL, origin-relative so
@@ -34,13 +40,51 @@ export const PROXY_PATH_PREFIX = "/__tabverse_proxy/";
  * scheme (cross-origin, unproxied). A query-parameter form could not
  * even do the directory-relative case.
  */
-export function proxyUrlFor(target: string): string {
+export function proxyUrlFor(
+  target: string,
+  basePath = "/",
+  contextId?: string,
+): string {
   const u = new URL(target);
   const scheme = u.protocol.slice(0, -1);
   if (scheme !== "http" && scheme !== "https") {
     throw new Error(`the proxy carries http requests only, not ${u.protocol}`);
   }
-  return `${PROXY_PATH_PREFIX}${scheme}/${u.host}${u.pathname}${u.search}`;
+  const context = contextId === undefined ? "" : `${encodeURIComponent(contextId)}/`;
+  return `${proxyPathRoot(basePath)}${context}${scheme}/${u.host}${u.pathname}${u.search}`;
+}
+
+export interface ProxyRoute {
+  contextId: string | null;
+  target: string;
+}
+
+/** Decode both current context-scoped paths and legacy unscoped test paths. */
+export function proxyRouteFromUrl(url: URL): ProxyRoute | null {
+  const marker = `/${PROXY_PATH_SEGMENT}`;
+  const markerAt = url.pathname.indexOf(marker);
+  if (markerAt < 0) return null;
+  const rest = url.pathname.slice(markerAt + marker.length);
+  const parts = rest.split("/");
+  const scoped = parts[0] !== "http" && parts[0] !== "https";
+  const schemeAt = scoped ? 1 : 0;
+  const scheme = parts[schemeAt];
+  if (scheme !== "http" && scheme !== "https") return null;
+  const authorityAndPath = parts.slice(schemeAt + 1).join("/");
+  if (authorityAndPath === "") return null;
+  let contextId: string | null = null;
+  if (scoped) {
+    try {
+      contextId = decodeURIComponent(parts[0]);
+    } catch {
+      return null;
+    }
+    if (contextId === "") return null;
+  }
+  return {
+    contextId,
+    target: `${scheme}://${authorityAndPath}${url.search}`,
+  };
 }
 /**
  * The host-side URL a request to this path is aimed at, or null when the
@@ -50,537 +94,197 @@ export function proxyUrlFor(target: string): string {
  * same function reads back what proxyUrlFor wrote, from any origin.
  */
 export function targetFromProxyUrl(url: URL): string | null {
-  if (!url.pathname.startsWith(PROXY_PATH_PREFIX)) return null;
-  const rest = url.pathname.slice(PROXY_PATH_PREFIX.length);
-  const slash = rest.indexOf("/");
-  if (slash <= 0) return null;
-  const scheme = rest.slice(0, slash);
-  if (scheme !== "http" && scheme !== "https") return null;
-  return `${scheme}://${rest.slice(slash + 1)}${url.search}`;
+  return proxyRouteFromUrl(url)?.target ?? null;
 }
 
-/** What the page hands the client: the wasm seam's send, with the id the
- * answer will correlate on. Kept as a parameter so tests (and any future
- * non-wasm transport) supply their own. */
-export type ProxyReqSend = (
-  id: number,
-  head: string,
-  body: string | undefined,
-) => void;
-
-/** One request head as the host's proxy parses it (remote_proxy.rs
- * target_of): request line in absolute form, a Host the authority is
- * read from, and the length said when a body rides along. */
-function buildRequestHead(req: Request, body: string | undefined): string {
-  const lines = [
-    `${req.method} ${req.url} HTTP/1.1`,
-    `Host: ${new URL(req.url).host}`,
-  ];
-  req.headers.forEach((value, name) => {
-    // The head's own Host line above is the authority; a caller's copy
-    // would only duplicate it.
-    if (name.toLowerCase() !== "host") lines.push(`${name}: ${value}`);
-  });
-  if (body !== undefined) {
-    // Bytes, not characters: the host reads this many bytes off the wire.
-    lines.push(`Content-Length: ${new TextEncoder().encode(body).length}`);
-  }
-  return `${lines.join("\r\n")}\r\n\r\n`;
+/** One independently multiplexed HTTP stream exposed by the wasm seam. */
+export interface HttpDataStream {
+  cancel(): void;
+  writeRequestChunk(bytes: Uint8Array): Promise<void>;
+  finishRequest(): void;
+  responseStart(): Promise<
+    | { type: "response"; head: { status: number; finalUrl: string; headers: HeaderPair[] } }
+    | { type: "error"; error: { code: string; message: string; retryable: boolean } }
+  >;
+  readResponseChunk(limit: number): Promise<Uint8Array>;
 }
 
-/** The Response one ProxyRes amounts to: status line and headers parsed
- * back out of the head text, the body decoded from its base64 frame
- * into the exact bytes (text and binary alike — an image or a font
- * crosses intact). Throws — settling the waiter with a rejection — when
- * the head is not an HTTP status line, which is a malformed answer, not
- * a page to render. */
-function responseFrom(head: string, bodyB64: string | undefined): Response {
-  const lines = head.split(/\r?\n/);
-  const statusMatch = /^HTTP\/\d(?:\.\d)? (\d+)(?: (.*))?$/.exec(
-    lines[0] ?? "",
-  );
-  if (statusMatch === null) {
-    throw new Error("the host's proxy answer was not an HTTP head");
-  }
-  const status = Number(statusMatch[1]);
-  const headers = new Headers();
-  for (const line of lines.slice(1)) {
-    const colon = line.indexOf(":");
-    if (colon > 0) {
-      headers.append(line.slice(0, colon).trim(), line.slice(colon + 1).trim());
-    }
-  }
-  // 204/205/304 may not carry a Response body — the constructor throws
-  // on one, and a proxied 204 must resolve, not explode on arrival.
-  const nullBody = status === 204 || status === 205 || status === 304;
-  let payload: ArrayBuffer | null = null;
-  if (bodyB64 !== undefined && !nullBody) {
-    const bin = atob(bodyB64);
-    payload = new ArrayBuffer(bin.length);
-    const view = new Uint8Array(payload);
-    for (let i = 0; i < bin.length; i++) view[i] = bin.charCodeAt(i);
-  }
-  return new Response(payload, {
-    status,
-    statusText: statusMatch[2] ?? "",
-    headers,
-  });
+export interface HeaderPair {
+  name: string;
+  value: string;
 }
 
-/** One waiting request: its timer and the promise's two ends. */
-interface Waiting {
-  timer: ReturnType<typeof setTimeout>;
-  resolve: (r: Response) => void;
-  reject: (e: Error) => void;
-}
+export type OpenHttpDataStream = (
+  contextId: string,
+  method: string,
+  url: string,
+  headers: HeaderPair[],
+) => Promise<HttpDataStream>;
 
 /** The client the page keeps for the session's lifetime. */
 export interface ProxyClient {
-  /** One fetch through the host's network. Rejection is transport or
-   * budget (timeout, refused target, dead session) — an HTTP error
+  /** One fetch through the host's network. Rejection is transport,
+   * refused target, or dead session — an HTTP error
    * status is a resolved Response, the same split window.fetch has. */
   requestViaProxy(
     input: string | URL | Request,
     init?: RequestInit,
+    requestContextId?: string,
   ): Promise<Response>;
-  /** A proxyRes landed: resolve the waiter it correlates. Unknown ids —
-   * already answered, timed out, or never ours — are dropped silently. */
-  settle(id: number, head: string, body?: string): void;
-  /** The host's error arm: a ProxyReq it could not run comes back as an
-   * rpcResult carrying the same id (app_share.rs), not a proxyRes.
-   * Returns whether this frame claimed a waiter; anything else falls
-   * through to the ordinary frame dispatch untouched. */
-  consumeRpcResult(frame: unknown): boolean;
-  /** Reject every waiter — the session ended. Pending panes surface as
-   * errors instead of riding out their timers. */
+  /** Reject every operation belonging to the ended connection. */
   failAll(reason: string): void;
 }
 
-export interface BrowserAttachment {
-  readonly id: string;
-  readonly generation: number;
-}
+export const MAX_REDIRECTS = 10;
 
-export interface BrowserStreamSend {
-  open(frame: {
-    streamId: number;
-    tabId: string;
-    grantId: string;
-    attachmentId: string;
-    attachmentGeneration: number;
-    method: string;
-    url: string;
-    headers: Array<[string, string]>;
-    bodyLen?: number;
-  }): void;
-  requestChunk(streamId: number, seq: number, b64: string): void;
-  requestEnd(streamId: number): void;
-  credit(streamId: number, bytes: number): void;
-  cancel(streamId: number, reason?: string): void;
-}
+export function createProxyClient(
+  open: OpenHttpDataStream,
+  contextId: () => string = () => "remote-browser",
+): ProxyClient {
+  const waiting = new Set<(error: Error) => void>();
+  const active = new Set<HttpDataStream>();
+  let generation = 0;
 
-export type BrowserStreamHostFrame =
-  | {
-      type: "browserResponseHead";
-      streamId: number;
-      status: number;
-      headers: Array<[string, string]>;
-      finalUrl: string;
-    }
-  | { type: "browserResponseChunk"; streamId: number; seq: number; b64: string }
-  | { type: "browserResponseEnd"; streamId: number }
-  | {
-      type: "browserResponseError";
-      streamId: number;
-      code: string;
-      message: string;
-    };
-
-interface BrowserWaiting {
-  readonly method: string;
-  readonly resolve: (response: Response) => void;
-  readonly reject: (error: Error) => void;
-  readonly abort?: () => void;
-  readonly headTimer: ReturnType<typeof setTimeout>;
-  controller?: ReadableStreamDefaultController<Uint8Array>;
-  expectedSeq: number;
-  uncreditedBytes: number;
-  settled: boolean;
-}
-
-export interface BrowserStreamClient {
-  requestViaHost(
-    tabId: string,
-    input: string | URL | Request,
-    init?: RequestInit,
-  ): Promise<Response>;
-  consume(frame: unknown): boolean;
-  failAll(reason: string): void;
-}
-
-const STREAM_ID_START = 2 ** 31;
-const REQUEST_CHUNK_BYTES = 64 * 1024;
-const INITIAL_RESPONSE_CREDIT = 512 * 1024;
-export const MAX_BROWSER_REQUEST_BYTES = 16 * 1024 * 1024;
-
-function bytesToB64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-  }
-  return btoa(binary);
-}
-
-function b64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
-
-async function boundedRequestBody(request: Request): Promise<Uint8Array> {
-  if (
-    request.method === "GET" ||
-    request.method === "HEAD" ||
-    request.body === null
-  ) {
-    return new Uint8Array();
-  }
-  const declared = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_BROWSER_REQUEST_BYTES) {
-    throw new Error("request-too-large: request body exceeds stream budget");
-  }
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > MAX_BROWSER_REQUEST_BYTES) {
-      await reader.cancel("request body exceeds stream budget");
-      throw new Error("request-too-large: request body exceeds stream budget");
-    }
-    chunks.push(value);
-  }
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return body;
-}
-
-/** Browser A's http-stream-v2 client: binary request chunks up, a
- * requester-private ReadableStream down, explicit byte credit, and AbortSignal
- * cancellation. The host-issued attachment identity is read at open time so a
- * reconnect cannot reuse an old generation. */
-export function createBrowserStreamClient(
-  send: BrowserStreamSend,
-  attachment: () => BrowserAttachment | null,
-): BrowserStreamClient {
-  const waiting = new Map<number, BrowserWaiting>();
-  let nextStreamId = STREAM_ID_START;
-
-  async function requestViaHost(
-    tabId: string,
-    input: string | URL | Request,
-    init?: RequestInit,
+  async function perform(
+    req: Request,
+    requestGeneration: number,
+    redirects: number,
+    requestContextId: string,
   ): Promise<Response> {
-    const owner = attachment();
-    if (owner === null)
-      throw new Error("browser stream has no live attachment");
-    const request = new Request(input, init);
-    if (!/^https?:$/.test(new URL(request.url).protocol)) {
-      throw new Error("Browser A carries HTTP(S) only");
-    }
-    if (request.signal.aborted)
-      throw new DOMException("request aborted", "AbortError");
-    const body = await boundedRequestBody(request);
-    if (request.signal.aborted)
-      throw new DOMException("request aborted", "AbortError");
-    const streamId = ++nextStreamId;
-    const headers: Array<[string, string]> = [];
-    request.headers.forEach((value, name) => headers.push([name, value]));
-
-    return new Promise<Response>((resolve, reject) => {
-      const onAbort = () => {
-        send.cancel(streamId, "viewer-abort");
-        const current = waiting.get(streamId);
-        if (current === undefined) return;
-        waiting.delete(streamId);
-        clearTimeout(current.headTimer);
-        const error = new DOMException("request aborted", "AbortError");
-        if (current.controller !== undefined) current.controller.error(error);
-        if (!current.settled) current.reject(error);
-      };
-      request.signal.addEventListener("abort", onAbort, { once: true });
-      const headTimer = setTimeout(() => {
-        const current = waiting.get(streamId);
-        if (current === undefined || current.settled) return;
-        waiting.delete(streamId);
-        send.cancel(streamId, "response-head-timeout");
-        current.abort?.();
-        current.reject(
-          new Error(
-            `browser response head timed out after ${PROXY_TIMEOUT_MS}ms`,
-          ),
-        );
-      }, PROXY_TIMEOUT_MS);
-      waiting.set(streamId, {
-        method: request.method,
-        resolve,
-        reject,
-        abort: () => request.signal.removeEventListener("abort", onAbort),
-        headTimer,
-        expectedSeq: 0,
-        uncreditedBytes: 0,
-        settled: false,
-      });
-      send.open({
-        streamId,
-        tabId,
-        grantId: `browser-grant-v1:${owner.id}:${owner.generation}:${tabId}`,
-        attachmentId: owner.id,
-        attachmentGeneration: owner.generation,
-        method: request.method,
-        url: request.url,
-        headers,
-        bodyLen: body.length === 0 ? undefined : body.length,
-      });
-      for (
-        let offset = 0, seq = 0;
-        offset < body.length;
-        offset += REQUEST_CHUNK_BYTES, seq += 1
-      ) {
-        send.requestChunk(
-          streamId,
-          seq,
-          bytesToB64(body.subarray(offset, offset + REQUEST_CHUNK_BYTES)),
-        );
+    const headers: HeaderPair[] = [];
+    req.headers.forEach((value, name) => headers.push({ name, value }));
+    const redirectSource = req.body === null ? req : req.clone();
+    const stream = await open(requestContextId, req.method, req.url, headers);
+    active.add(stream);
+    let bodyOwnsStream = false;
+    const abort = () => stream.cancel();
+    req.signal.addEventListener("abort", abort, { once: true });
+    try {
+      if (requestGeneration !== generation) throw new Error("the session ended");
+      if (req.signal.aborted) {
+        stream.cancel();
+        throw new DOMException("The operation was aborted", "AbortError");
       }
-      send.credit(streamId, INITIAL_RESPONSE_CREDIT);
-      send.requestEnd(streamId);
-    });
-  }
+      if (req.body !== null) {
+        const reader = req.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await stream.writeRequestChunk(value);
+          if (requestGeneration !== generation) throw new Error("the session ended");
+        }
+      }
+      stream.finishRequest();
+      const start = await stream.responseStart();
+      if (requestGeneration !== generation) throw new Error("the session ended");
+      if (start.type === "error") throw new Error(start.error.message);
+      const headersOut = new Headers();
+      for (const pair of start.head.headers) headersOut.append(pair.name, pair.value);
 
-  function consume(frame: unknown): boolean {
-    if (typeof frame !== "object" || frame === null) return false;
-    const value = frame as Partial<BrowserStreamHostFrame> &
-      Record<string, unknown>;
-    if (
-      value.type !== "browserResponseHead" &&
-      value.type !== "browserResponseChunk" &&
-      value.type !== "browserResponseEnd" &&
-      value.type !== "browserResponseError"
-    )
-      return false;
-    const streamId = Number(value.streamId);
-    const current = waiting.get(streamId);
-    if (current === undefined) return true;
+      const location = headersOut.get("location");
+      const redirect = [301, 302, 303, 307, 308].includes(start.head.status) && location !== null;
+      if (redirect && req.redirect !== "manual") {
+        stream.cancel();
+        active.delete(stream);
+        req.signal.removeEventListener("abort", abort);
+        if (req.redirect === "error") throw new TypeError("redirect mode is set to error");
+        if (redirects >= MAX_REDIRECTS) throw new TypeError(`redirected more than ${MAX_REDIRECTS} times`);
+        const target = new URL(location, start.head.finalUrl || req.url).href;
+        const switchToGet = start.head.status === 303 || ((start.head.status === 301 || start.head.status === 302) && req.method === "POST");
+        let next = switchToGet
+          ? new Request(target, { method: "GET", headers: [...req.headers].filter(([name]) => !["content-length", "content-type"].includes(name.toLowerCase())), redirect: req.redirect, signal: req.signal })
+          : new Request(target, redirectSource);
+        if (new URL(target).origin !== new URL(req.url).origin) {
+          const safe = new Headers(next.headers);
+          safe.delete("authorization");
+          safe.delete("proxy-authorization");
+          safe.delete("cookie");
+          next = new Request(next, { headers: safe });
+        }
+        return perform(next, requestGeneration, redirects + 1, requestContextId);
+      }
 
-    if (value.type === "browserResponseHead") {
-      if (current.settled) return true;
-      clearTimeout(current.headTimer);
-      const status = Number(value.status);
-      const nullBody =
-        current.method === "HEAD" ||
-        status === 204 ||
-        status === 205 ||
-        status === 304;
-      let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+      const nullBody = [204, 205, 304].includes(start.head.status);
       const body = nullBody
         ? null
-        : new ReadableStream<Uint8Array>(
-            {
-              start(next) {
-                controller = next;
-                current.controller = next;
-              },
-              pull() {
-                if (current.uncreditedBytes > 0) {
-                  send.credit(streamId, current.uncreditedBytes);
-                  current.uncreditedBytes = 0;
-                }
-              },
-              cancel(reason) {
-                send.cancel(
-                  streamId,
-                  String(reason ?? "response-body-cancelled"),
-                );
-                waiting.delete(streamId);
-                current.abort?.();
-              },
+        : new ReadableStream<Uint8Array>({
+            async pull(controller) {
+              try {
+                if (requestGeneration !== generation) throw new Error("the session ended");
+                const chunk = await stream.readResponseChunk(64 * 1024);
+                if (chunk.length === 0) {
+                  active.delete(stream);
+                  req.signal.removeEventListener("abort", abort);
+                  controller.close();
+                } else controller.enqueue(chunk);
+              } catch (error) {
+                active.delete(stream);
+                req.signal.removeEventListener("abort", abort);
+                controller.error(error);
+              }
             },
-            new ByteLengthQueuingStrategy({
-              highWaterMark: INITIAL_RESPONSE_CREDIT,
-            }),
-          );
-      const headers = new Headers(value.headers as Array<[string, string]>);
-      if (typeof value.finalUrl === "string") {
-        headers.set("x-tabverse-final-url", value.finalUrl);
+            cancel() {
+              active.delete(stream);
+              req.signal.removeEventListener("abort", abort);
+              stream.cancel();
+            },
+          });
+      const response = new Response(body, { status: start.head.status, headers: headersOut });
+      Object.defineProperties(response, {
+        url: { value: start.head.finalUrl },
+        redirected: { value: redirects > 0 },
+      });
+      bodyOwnsStream = body !== null;
+      return response;
+    } finally {
+      if (!bodyOwnsStream) {
+        req.signal.removeEventListener("abort", abort);
+        active.delete(stream);
       }
-      current.controller = controller;
-      current.settled = true;
-      current.resolve(new Response(body, { status, headers }));
-      return true;
     }
-    if (value.type === "browserResponseChunk") {
-      if (
-        Number(value.seq) !== current.expectedSeq ||
-        current.controller === undefined
-      ) {
-        send.cancel(streamId, "response-chunk-gap");
-        current.controller?.error(new Error("browser response chunk gap"));
-        if (!current.settled)
-          current.reject(new Error("browser response chunk gap"));
-        current.abort?.();
-        clearTimeout(current.headTimer);
-        waiting.delete(streamId);
-        return true;
-      }
-      const bytes = b64ToBytes(String(value.b64));
-      current.expectedSeq += 1;
-      current.controller.enqueue(bytes);
-      current.uncreditedBytes += bytes.byteLength;
-      // Credit follows consumption pressure: while the byte-length queue is
-      // below its high-water mark it can safely take another chunk; once it
-      // fills, pull() alone replenishes the host window.
-      if ((current.controller.desiredSize ?? 0) > 0) {
-        send.credit(streamId, current.uncreditedBytes);
-        current.uncreditedBytes = 0;
-      }
-      return true;
-    }
-    waiting.delete(streamId);
-    clearTimeout(current.headTimer);
-    current.abort?.();
-    if (value.type === "browserResponseEnd") {
-      current.controller?.close();
-      if (!current.settled)
-        current.reject(new Error("browser response ended before its head"));
-    } else {
-      const error = new Error(
-        `${String(value.code)}: ${String(value.message)}`,
-      );
-      current.controller?.error(error);
-      if (!current.settled) current.reject(error);
-    }
-    return true;
   }
-
-  function failAll(reason: string): void {
-    for (const [streamId, current] of waiting) {
-      send.cancel(streamId, "session-ended");
-      const error = new Error(reason);
-      current.controller?.error(error);
-      if (!current.settled) current.reject(error);
-      current.abort?.();
-      clearTimeout(current.headTimer);
-    }
-    waiting.clear();
-  }
-
-  return { requestViaHost, consume, failAll };
-}
-
-/**
- * The proxy ids start far above the rpc channel's counter so the two
- * waiting maps can never both hold the same id: the host echoes whatever
- * id a request rode in on, and one answer frame must find exactly one
- * claimant. Any monotonic range the rpc side cannot reach is correct.
- */
-const ID_SEED_START = 2 ** 30;
-
-export function createProxyClient(send: ProxyReqSend): ProxyClient {
-  const waiting = new Map<number, Waiting>();
-  let seed = ID_SEED_START;
 
   function requestViaProxy(
     input: string | URL | Request,
     init?: RequestInit,
+    requestContextId = contextId(),
   ): Promise<Response> {
-    // Request does the merging and the URL validation the platform
-    // already promises; the head is built from the normalized result.
     const req = new Request(input, init);
-    const build = async (): Promise<Response> => {
-      // A GET/HEAD body is the caller's error; the platform already
-      // threw for one at Request construction.
-      const body =
-        req.method === "GET" || req.method === "HEAD"
-          ? undefined
-          : await req.text();
-      const head = buildRequestHead(req, body);
-      const id = ++seed;
-      return new Promise<Response>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          waiting.delete(id);
-          reject(
-            new Error(
-              `proxied fetch of ${new URL(req.url).host} timed out after ${PROXY_TIMEOUT_MS}ms`,
-            ),
-          );
-        }, PROXY_TIMEOUT_MS);
-        waiting.set(id, { timer, resolve, reject });
-        send(id, head, body);
-      });
-    };
-    return build();
-  }
-
-  function settle(id: number, head: string, body?: string): void {
-    const w = waiting.get(id);
-    if (w === undefined) return;
-    waiting.delete(id);
-    clearTimeout(w.timer);
-    try {
-      w.resolve(responseFrom(head, body));
-    } catch (e) {
-      // A malformed head is this one request's failure, not the
-      // session's.
-      w.reject(e instanceof Error ? e : new Error(String(e)));
-    }
-  }
-
-  function consumeRpcResult(frame: unknown): boolean {
-    if (typeof frame !== "object" || frame === null) return false;
-    const f = frame as Record<string, unknown>;
-    if (f.type !== "rpcResult") return false;
-    const w = waiting.get(Number(f.id));
-    if (w === undefined) return false;
-    waiting.delete(Number(f.id));
-    clearTimeout(w.timer);
-    w.reject(
-      new Error(
-        typeof f.err === "string" ? f.err : "the host's proxy request failed",
-      ),
-    );
-    return true;
+    const requestGeneration = generation;
+    return new Promise<Response>((resolve, reject) => {
+      waiting.add(reject);
+      void (async () => {
+        try {
+          resolve(await perform(req, requestGeneration, 0, requestContextId));
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+        } finally {
+          waiting.delete(reject);
+        }
+      })();
+    });
   }
 
   function failAll(reason: string): void {
-    for (const [, w] of waiting) {
-      clearTimeout(w.timer);
-      w.reject(new Error(reason));
-    }
+    generation += 1;
+    for (const stream of active) stream.cancel();
+    active.clear();
+    for (const reject of waiting) reject(new Error(reason));
     waiting.clear();
   }
 
-  return { requestViaProxy, settle, consumeRpcResult, failAll };
+  return { requestViaProxy, failAll };
 }
 
 export function installProxyFetchPatch(
   client: Pick<ProxyClient, "requestViaProxy">,
-  href: () => string = () => location.href,
+  href: () => string = () => location.href
 ): () => void {
   const original = globalThis.fetch;
   const pageOrigin = new URL(href()).origin;
   const patched = (
     input: RequestInfo | URL,
-    init?: RequestInit,
+    init?: RequestInit
   ): Promise<Response> => {
     let url: URL;
     try {
@@ -592,10 +296,10 @@ export function installProxyFetchPatch(
       return original(input, init);
     }
     if (url.origin !== pageOrigin) return original(input, init);
-    const target = targetFromProxyUrl(url);
-    return target === null
+    const route = proxyRouteFromUrl(url);
+    return route === null
       ? original(input, init)
-      : client.requestViaProxy(target, init);
+      : client.requestViaProxy(route.target, init, route.contextId ?? undefined);
   };
   globalThis.fetch = patched;
   return () => {

@@ -1,10 +1,11 @@
 import { create } from "zustand";
 import {
   APP_MIRROR_ACTION_NAMES,
+  TAB_TYPES,
   isAppMirrorActionName,
   type AppMirrorActionName,
+  type TabType,
 } from "@tabverse/runtime-contracts";
-import type { TabContribution } from "@tabverse/tab-contracts";
 import type {
   WorkbenchSidebarTreeGroup,
   WorkbenchTabRow,
@@ -14,7 +15,6 @@ import type { AppFrameSinks } from "@tabverse/remote-client/app-frame";
 import { receiveClip } from "@tabverse/remote-client/clipboard";
 
 export interface RemoteMirrorTab extends WorkbenchTabRow {
-  readonly type: string;
   readonly cwd?: string;
   readonly renamed?: boolean;
   readonly lastActiveAt?: number;
@@ -24,7 +24,7 @@ export interface RemoteMirrorGroup extends WorkbenchSidebarTreeGroup {
   readonly name: string;
   readonly colorIndex: number;
   readonly collapsed: boolean;
-  readonly preset?: string;
+  readonly preset?: TabType;
   readonly keepWhenEmpty?: true;
 }
 
@@ -44,44 +44,11 @@ const EMPTY_STATE: RemoteMirrorState = {
   filesOpenDir: {},
 };
 
-let remoteTabPresentations = new Map<string, TabContribution<unknown>["manifest"]["presentation"]>();
-let remotePrivateStreams = new Map<string, ReadonlySet<string>>();
-
-/** Join accepts and presents exactly the enabled contributions advertising Remote. */
-export function configureRemoteTabContributions(
-  contributions: readonly TabContribution<unknown>[],
-): void {
-  remoteTabPresentations = new Map(
-    contributions
-      .filter((contribution) => contribution.remote !== undefined)
-      .map((contribution) => [
-        contribution.manifest.kind,
-        contribution.manifest.presentation,
-      ]),
-  );
-  remotePrivateStreams = new Map(
-    contributions
-      .filter((contribution) => contribution.remote !== undefined)
-      .map((contribution) => [
-        contribution.manifest.kind,
-        new Set(contribution.remote?.privateStreams?.streams.map(({ name }) => name) ?? []),
-      ]),
-  );
-}
-
-export function remoteTabSupportsPrivateStream(kind: string, name: string): boolean {
-  return remotePrivateStreams.get(kind)?.has(name) === true;
-}
-
-export function remoteTabDefinitions() {
-  return [...remoteTabPresentations].map(([type, presentation]) => ({
-    type,
-    ...presentation,
-  })).sort((left, right) =>
-    (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER) ||
-    left.type.localeCompare(right.type),
-  );
-}
+const PRESET_GROUPS: ReadonlyArray<{ type: TabType; name: string }> = [
+  { type: "terminal", name: "Terminals" },
+  { type: "files", name: "Files" },
+  { type: "browser", name: "Browser" },
+];
 
 /** The Join entry's own mirror store. It contains only host-renderable facts;
  * desktop actions, persistence and native runtime state never enter it. */
@@ -97,22 +64,17 @@ export function resetRemoteMirror(): void {
   });
 }
 
-const isTabType = (value: unknown): value is string =>
-  typeof value === "string" && remoteTabPresentations.has(value);
+const isTabType = (value: unknown): value is TabType =>
+  typeof value === "string" && (TAB_TYPES as readonly string[]).includes(value);
 
 function readTab(raw: unknown): RemoteMirrorTab | null {
   if (typeof raw !== "object" || raw === null) return null;
   const tab = raw as Record<string, unknown>;
   if (typeof tab.id !== "string" || tab.id.length === 0) return null;
-  const type = isTabType(tab.type)
-    ? tab.type
-    : isTabType(tab.kind)
-      ? tab.kind
-      : null;
-  if (type === null || typeof tab.title !== "string") return null;
+  if (!isTabType(tab.type) || typeof tab.title !== "string") return null;
   return {
     id: tab.id,
-    type,
+    type: tab.type,
     title: tab.title,
     groupId: typeof tab.groupId === "string" ? tab.groupId : null,
     cwd: typeof tab.cwd === "string" ? tab.cwd : undefined,
@@ -211,25 +173,22 @@ function sanitizeGroupTree(groups: RemoteMirrorGroup[]): RemoteMirrorGroup[] {
 }
 
 function withPresetGroups(groups: RemoteMirrorGroup[]): RemoteMirrorGroup[] {
-  const presets = remoteTabDefinitions()
-    .filter((definition) => definition.groupLabel !== undefined)
-    .map((definition, colorIndex) => {
-      const { type } = definition;
-      const id = `preset-${type}`;
-      const existing = groups.find(
-        (group) => group.preset === type || group.id === id,
-      );
-      return {
-        ...(existing ?? {
-          id,
-          name: definition.groupLabel!,
-          colorIndex: colorIndex % LEGACY_GROUP_PALETTE.length,
-          collapsed: false,
-        }),
-        preset: type,
-        parentId: undefined,
-      } satisfies RemoteMirrorGroup;
-    });
+  const presets = PRESET_GROUPS.map(({ type, name }, colorIndex) => {
+    const id = `preset-${type}`;
+    const existing = groups.find(
+      (group) => group.preset === type || group.id === id,
+    );
+    return {
+      ...(existing ?? {
+        id,
+        name,
+        colorIndex: colorIndex % LEGACY_GROUP_PALETTE.length,
+        collapsed: false,
+      }),
+      preset: type,
+      parentId: undefined,
+    } satisfies RemoteMirrorGroup;
+  });
   const custom = groups.filter(
     (group) => !presets.some((preset) => preset.id === group.id),
   );
@@ -252,11 +211,7 @@ function stringMapForTabs(
 export function applyMirrorSnapshot(raw: unknown): boolean {
   if (typeof raw !== "object" || raw === null) return false;
   const snapshot = raw as Record<string, unknown>;
-  if (
-    (snapshot.version !== 1 && snapshot.version !== 2) ||
-    !Array.isArray(snapshot.tabs)
-  )
-    return false;
+  if (snapshot.version !== 1 || !Array.isArray(snapshot.tabs)) return false;
   const tabs = snapshot.tabs
     .map(readTab)
     .filter((tab): tab is RemoteMirrorTab => tab !== null);
@@ -415,34 +370,6 @@ export function applyMirrorAction(name: string, args: unknown): boolean {
   return true;
 }
 
-/** Apply one contribution-owned replacement without exposing app-local fields. */
-export function applyContributionState(
-  tabId: string,
-  kind: string,
-  raw: unknown,
-): boolean {
-  if (!isTabType(kind) || !isObject(raw)) return false;
-  const current = useRemoteMirrorStore.getState().tabs.find((tab) => tab.id === tabId);
-  const next = readTab({
-    ...current,
-    ...raw,
-    id: tabId,
-    type: kind,
-    title:
-      typeof raw.title === "string"
-        ? raw.title
-        : (current?.title ?? kind),
-  });
-  if (next === null) return false;
-  useRemoteMirrorStore.setState((state) => ({
-    tabs: state.tabs.some((tab) => tab.id === tabId)
-      ? state.tabs.map((tab) => (tab.id === tabId ? next : tab))
-      : [next, ...state.tabs],
-    activeTabId: state.activeTabId ?? tabId,
-  }));
-  return true;
-}
-
 export function mirrorSinks(): AppFrameSinks {
   return {
     onSnapshot: (state) => {
@@ -454,6 +381,5 @@ export function mirrorSinks(): AppFrameSinks {
     onClip: (seq, text) => {
       receiveClip(seq, text);
     },
-    onProxy: () => {},
   };
 }

@@ -1,9 +1,8 @@
 import { registerShareCapability } from "../framework/capability";
 
-// Files state is semantic; reads/writes stay host-side behind declared access.
+// No runtime to mirror: a files tab is a local view over the filesystem,
+// with no event stream a viewer could follow.
 registerShareCapability("files", {
-  shareable: true,
-  levels: ["view", "steer"],
-  defaultLevel: "view",
-  payload: "dom",
+  shareable: false,
+  reason: "files tabs cannot be shared",
 });

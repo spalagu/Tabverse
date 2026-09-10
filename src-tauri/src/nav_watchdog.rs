@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::AppHandle;
-use tauri::{Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// How long to give a load before deciding it never began. Comfortably
 /// past the delegate's own latency, well under a person's patience.

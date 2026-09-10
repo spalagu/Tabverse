@@ -14,6 +14,8 @@ vi.mock("./platform", async (original) => ({
 }));
 
 import { NewTabMenu } from "./components/NewTabMenu";
+import { WorkbenchRuntimeProvider } from "@tabverse/workbench/runtime";
+import { desktopRuntime } from "@tabverse/runtime-desktop";
 import {
   filesKeyAction,
   onLocalKeys,
@@ -132,7 +134,10 @@ describe("the local entrance during composition", () => {
 function Harness() {
   useGlobalKeys();
   const open = useStore((s) => s.newTabMenuOpen);
-  return open ? createElement(NewTabMenu) : null;
+  return createElement(WorkbenchRuntimeProvider, {
+    runtime: desktopRuntime,
+    children: open ? createElement(NewTabMenu) : null,
+  });
 }
 
 let root: Root | null = null;

@@ -6,12 +6,11 @@ use std::ffi::{c_char, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
-use crate::AppHandle;
 use block2::{Block, RcBlock};
 use objc2::msg_send;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
 use objc2_foundation::NSString;
-use tauri::Emitter;
+use tauri::{AppHandle, Emitter};
 
 /// WKPermissionDecision
 const DECISION_DENY: isize = 2;

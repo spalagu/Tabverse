@@ -1,5 +1,4 @@
-use crate::AppHandle;
-use tauri::Emitter;
+use tauri::{AppHandle, Emitter};
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

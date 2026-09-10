@@ -95,10 +95,6 @@ export const STR = {
       unmute: "Unmute",
       scriptCommands: "Script commands",
       saveLayout: "Save layout as template…",
-      residentPolicy: "Keep running",
-      residentInherit: "Use app default",
-      residentOn: "Always",
-      residentOff: "Never",
       pickedTabs: (p: { n: number }) => plural(p.n, "tab"),
       closeBatch: (p: { n: number }) => `Close — ${plural(p.n, "tab")}`,
       archiveBatch: (p: { acting: number; total: number }) =>
@@ -803,6 +799,8 @@ export const STR = {
       filesHint: "Explorer with git status and previews",
       browser: "Browser",
       browserHint: "Embedded web page",
+      agent: "Agent",
+      agentHint: "A coding agent working in a folder",
       remote: "Join remote…",
       remoteHint: "Watch or control a tab shared from another device",
       settings: "Settings",
@@ -893,34 +891,6 @@ export const STR = {
       sharedEntry: (p: { title: string; viewers: number }) =>
         `${p.title} (${plural(p.viewers, "viewer")})`,
     },
-    plugins: {
-      heading: "Plugins",
-      blurb:
-        "Enable, disable or remove the trusted plugins bundled with this copy of Tabverse. " +
-        "A plugin with an open tab, active share, resident runtime or enabled dependent stays in place until that blocker is closed.",
-      trustBoundary:
-        "This catalog does not download plugins or execute untrusted or newly installed native code.",
-      runtime: "Runtime service",
-      required: "Required local control plane",
-      stateRetained: "Saved state retained",
-      install: "Install",
-      enable: "Enable",
-      disable: "Disable",
-      uninstall: "Uninstall",
-      repair: "Restore last stable state",
-      retry: "Retry",
-      state: {
-        "not-installed": "Not installed",
-        installing: "Installing",
-        installed: "Installed",
-        enabling: "Enabling",
-        enabled: "Enabled",
-        disabling: "Disabling",
-        disabled: "Disabled",
-        uninstalling: "Uninstalling",
-        failed: "Needs recovery",
-      },
-    },
     appearance: {
       heading: "Appearance",
       blurb:
@@ -977,7 +947,7 @@ export const STR = {
         "session mirrored from another machine, and the shell under a file " +
         "listing, keep the accelerated renderer and draw no ligatures.",
       terminalLigaturesUnread:
-        "Waiting for the configuration file before this can be changed.",
+        "Waiting for saved settings before this can be changed.",
       terminalBackgroundTasks: "Keep terminal tasks running in the background",
       terminalBackgroundTasksNote:
         "Off keeps today’s behavior: closing a terminal tab stops its task, " +
@@ -985,7 +955,7 @@ export const STR = {
         "to the background automatically; closing a busy tab or quitting " +
         "while tasks run asks what to do.",
       terminalBackgroundTasksUnread:
-        "Waiting for the configuration file before this can be changed.",
+        "Waiting for saved settings before this can be changed.",
       terminalImageMemory: "Inline image memory",
       terminalImageMemoryUnit:
         "Megabytes of decoded image storage, per terminal pane.",
@@ -1007,15 +977,14 @@ export const STR = {
     config: {
       errorHeading: "Your configuration file could not be read",
       errorBlurb:
-        "Nothing in the file has been changed, and nothing you set through " +
-        "this page will be saved until it loads. Settings on screen are the " +
-        "built-in ones.",
+        "The file has not been changed. Settings saved in Tabverse remain " +
+        "available; profiles, templates, shortcuts and file-walk rules from " +
+        "this file use their built-in values until the file is fixed.",
       openFile: "Show the file",
       writeFailedHeading: "Some changes could not be saved",
       writeFailedBlurb:
-        "Your configuration file could not be written, so these settings " +
-        "are back on the values they had. Once the file can be saved, " +
-        "change them again.",
+        "Tabverse could not save these settings, so they are back on the " +
+        "values they had. Change them again after the reported problem is fixed.",
       writeFailedLine: (p: { setting: string; reason: string }) =>
         `${p.setting} — ${p.reason}`,
       dismissWriteFailures: "Close",
@@ -1040,9 +1009,9 @@ export const STR = {
       onlyChanged: "Show only what I have changed",
       none: "Nothing here differs from its built-in value.",
       blurb:
-        "These settings are the ones your configuration file sets to " +
-        "something other than the built-in value. Resetting one removes " +
-        "its line from the file, so it follows the built-in value again — " +
+        "These settings are saved in Tabverse at something other than the " +
+        "built-in value. Resetting one removes its saved override, so it " +
+        "follows the built-in value again — " +
         "including when a later version of Tabverse improves that value.",
       reset: "Reset",
       /** Names which setting a reset button belongs to, for a screen reader. */
@@ -1186,19 +1155,13 @@ export const STR = {
       unknownCwd: "Working directory unavailable",
       running: "Running",
       exited: (p: { code: number }) => `Exited with code ${p.code}`,
-      residentDefault: "Keep supported tabs running after Tabverse closes",
-      residentDefaultNote:
-        "Tabs set to use the app default follow this switch. Only tabs that declare continuous runtime stay alive; Files and ordinary Browser page state are restored but do not keep executing.",
-      residentDefaultUnread:
-        "Waiting for the configuration file before this can be changed.",
     },
     session: {
       heading: "Session",
       blurb:
-        "Tabs and groups are restored on start. An ordinary Remote tab is " +
-        "not restored because its ticket may have been revoked. A Remote " +
-        "tab with a continuous resident runtime is recovered from that " +
-        "still-running runtime instead of silently redialing from saved settings.",
+        "Tabs and groups are restored on start. Remote tabs are " +
+        "deliberately not restored: a ticket may have been revoked, and " +
+        "silently redialing someone's machine on launch is not okay.",
       // The button itself is STR.settings.danger.session — this section
       // explains what a session is, the danger zone is where it is erased.
     },
@@ -1257,7 +1220,7 @@ export const STR = {
         "A browser tab carries the page itself: its own navigations and " +
         "subresources. With this on, they resolve through the provider " +
         "chosen above. Tabverse’s own fetches — site icons, userscripts and " +
-        "the requests those make and completions — already follow " +
+        "the requests those make, completions, the agent — already follow " +
         "that provider, whatever this switch says.",
       coverWhen:
         "WebKit shares one page-data store, so page routing is global, not " +
@@ -1265,7 +1228,7 @@ export const STR = {
         "switch to that shared route; loads already in flight finish where " +
         "they started.",
       coverUnread:
-        "Waiting for the configuration file before this can be changed.",
+        "Waiting for saved settings before this can be changed.",
       coverGateNote:
         "This Mac is running a macOS older than 14, whose page engine " +
         "cannot be given a proxy. Page traffic stays on the system " +
@@ -1293,6 +1256,9 @@ export const STR = {
       uncoveredRemote:
         "Remote sessions. They reach the other machine over their own " +
         "transport through a relay, which never asks this.",
+      uncoveredSocket:
+        "The agent’s socket. Its streamed replies follow this setting; the " +
+        "long-lived socket it also opens resolves through the system.",
       uncoveredTerminal:
         "Terminal commands. A shell you start inherits your own settings, " +
         "which is what a login shell is for.",
@@ -1626,7 +1592,7 @@ export const STR = {
     levelHint: {
       view: "Watch only",
       steer: "Watch and send input",
-      approve: "Steer, plus approve privileged actions",
+      approve: "Steer, plus approve the agent's actions",
     },
     ttlLabel: "Link admits joiners for",
     ttlHours: (p: { h: number }) => plural(p.h, "hour"),
@@ -1763,7 +1729,6 @@ export const STR = {
         reason:
           | "read-failed"
           | "invalid-json"
-          | "migration-failed"
           | "unsupported-version"
           | "invalid-shape"
           | "empty-tabs";
@@ -1771,8 +1736,6 @@ export const STR = {
         const reason = {
           "read-failed": "Tabverse could not read the saved session file",
           "invalid-json": "The saved session file is not valid JSON",
-          "migration-failed":
-            "Tabverse could not create a durable backup and migrate the saved session",
           "unsupported-version": "The saved session file uses an unsupported version",
           "invalid-shape": "The saved session file has an invalid structure",
           "empty-tabs": "The saved session file has no tabs",

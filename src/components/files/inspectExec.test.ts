@@ -70,9 +70,10 @@ function render(
   return host;
 }
 
-async function settle() {
-  await new Promise((r) => setTimeout(r, 0));
-  flushSync(() => {});
+async function waitForText(host: HTMLElement, expected: string) {
+  await vi.waitFor(() => {
+    expect(host.textContent ?? "").toContain(expected);
+  });
 }
 
 beforeEach(() => {
@@ -103,10 +104,9 @@ describe("the executable card", () => {
     mocks.invoke.mockResolvedValue(data);
     const { InspectView: View, STR } = await fresh();
     const host = render(View, META);
-    await settle();
+    await waitForText(host, STR.files.inspect.exec.formatMachO);
 
     const text = host.textContent ?? "";
-    expect(text).toContain(STR.files.inspect.exec.formatMachO);
     expect(text).toContain(STR.files.inspect.exec.universal);
     expect(text).toContain("x86_64");
     expect(text).toContain("arm64e");
@@ -134,9 +134,8 @@ describe("the executable card", () => {
     mocks.invoke.mockResolvedValue(data);
     const { InspectView: View, STR } = await fresh();
     const host = render(View, META);
-    await settle();
+    await waitForText(host, STR.files.inspect.exec.formatElf);
     const text = host.textContent ?? "";
-    expect(text).toContain(STR.files.inspect.exec.formatElf);
     expect(text).toContain("shared object");
     expect(text).toContain(STR.files.inspect.exec.execBitOff);
 
@@ -150,8 +149,7 @@ describe("the executable card", () => {
     };
     mocks.invoke.mockResolvedValue(unsigned);
     const host2 = render(View, META);
-    await settle();
-    expect(host2.textContent).toContain(STR.files.inspect.exec.signedNo);
+    await waitForText(host2, STR.files.inspect.exec.signedNo);
   });
 
   it("a script's card carries the interpreter line", async () => {
@@ -169,9 +167,8 @@ describe("the executable card", () => {
     mocks.invoke.mockResolvedValue(data);
     const { InspectView: View, STR } = await fresh();
     const host = render(View, SCRIPT_META);
-    await settle();
+    await waitForText(host, STR.files.inspect.exec.formatScript);
     const text = host.textContent ?? "";
-    expect(text).toContain(STR.files.inspect.exec.formatScript);
     expect(text).toContain("/usr/bin/env python3 -u");
     expect(text).toContain(STR.files.inspect.exec.execBitOn);
   });

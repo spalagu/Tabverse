@@ -2,9 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::AppHandle;
 use notify::{Config, Event, Watcher};
-use tauri::Emitter;
+use tauri::{AppHandle, Emitter};
 
 use tabverse_fs::{Exclusions, WalkRules};
 
@@ -264,10 +263,8 @@ mod tests {
         let sink2 = move |_tab: &str| {};
         poll_arm(&hub, "t1", &a, &plain_rules(), sink2).unwrap();
         assert_eq!(hub.len(), 1);
-        // Snapshot before the write: the poll callback may run immediately
-        // after write returns, especially on a loaded CI runner.
-        let before = *hits.lock().unwrap();
         std::fs::write(a.join("one.txt"), "two").unwrap();
+        let before = *hits.lock().unwrap();
         assert!(wait_until(
             || *hits.lock().unwrap() > before,
             Duration::from_secs(5)

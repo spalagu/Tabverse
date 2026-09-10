@@ -8,6 +8,8 @@ import {
   type AppShareGroup,
   type AppShareTab,
 } from "@tabverse/workbench/app-shell";
+import { WorkbenchRuntimeProvider } from "@tabverse/workbench/runtime";
+import { remoteRuntime } from "@tabverse/runtime-remote";
 import { groupColors } from "@tabverse/workbench/theme";
 
 declare global {
@@ -78,7 +80,7 @@ function setViewport(wide: boolean, coarse: boolean): void {
 
 const TABS: AppShareTab[] = [
   { id: "t1", title: "zsh", type: "terminal", groupId: null },
-  { id: "f1", title: "Files", type: "files", groupId: null },
+  { id: "a1", title: "Agent", type: "agent", groupId: null },
   { id: "t2", title: "cargo run", type: "terminal", groupId: null },
 ];
 const TITLES = TABS.map((t) => t.title);
@@ -107,7 +109,11 @@ afterEach(() => {
 /** Render into the shared root. */
 function mount(node: ReactNode): void {
   act(() => {
-    root.render(node);
+    root.render(
+      <WorkbenchRuntimeProvider runtime={remoteRuntime}>
+        {node}
+      </WorkbenchRuntimeProvider>,
+    );
   });
 }
 
@@ -118,37 +124,20 @@ function shell(
   onSelect: (id: string) => void = () => {},
 ): ReactNode {
   return (
-    <AppShareShell tabs={TABS} groups={[]} activeId={activeId} onSelect={onSelect}>
-      <p className="pane">active pane</p>
-    </AppShareShell>
+    <WorkbenchRuntimeProvider runtime={remoteRuntime}>
+      <AppShareShell tabs={TABS} groups={[]} activeId={activeId} onSelect={onSelect}>
+        <p className="pane">active pane</p>
+      </AppShareShell>
+    </WorkbenchRuntimeProvider>
   );
 }
 
 const handle = () => host.querySelector<HTMLButtonElement>(".app-drawer-handle");
 
-const REMOTE_DEFINITIONS = [
-  { type: "terminal", label: "Terminal", hint: "Shell", icon: "terminal", order: 10 },
-  { type: "files", label: "Files", hint: "Explorer", icon: "files", order: 20 },
-  {
-    type: "browser",
-    label: "Browser",
-    hint: "Web",
-    icon: "browser",
-    order: 30,
-    creation: {
-      field: "url",
-      fieldLabel: "Address",
-      placeholder: "http://intranet.example…",
-      submitLabel: "Open",
-      defaultScheme: "https",
-    },
-  },
-] as const;
-
 describe("AppShareShell", () => {
   it("a wide fine-pointer viewport shows the tab rail, not the handle or drawer", () => {
     setViewport(true, false);
-    mount(shell("f1"));
+    mount(shell("a1"));
 
     expect(host.querySelector(".app-shell-side")).not.toBeNull();
     expect(handle()).toBeNull();
@@ -231,7 +220,7 @@ describe("AppShareShell", () => {
     act(() => handle()!.click());
     act(() => host.querySelectorAll<HTMLButtonElement>(".app-tab-row")[1].click());
 
-    expect(picked).toEqual(["f1"]);
+    expect(picked).toEqual(["a1"]);
     expect(host.querySelector(".app-shell-drawer")!.className).not.toContain(
       "open",
     );
@@ -429,7 +418,7 @@ describe("the shared sidebar core renders the shell's rows", () => {
 });
 
 describe("the new-tab picker (the host menu's shape)", () => {
-  it("+ raises contribution rows; declared creation fields ride with the host's scheme default", () => {
+  it("+ raises the kind rows; a Browser address rides onCreateBrowserTab with the host's scheme default", () => {
     const madeTabs: string[] = [];
     const madeUrls: string[] = [];
     mount(
@@ -438,18 +427,15 @@ describe("the new-tab picker (the host menu's shape)", () => {
         groups={PINNED_GROUPS}
         activeId="p3"
         onSelect={() => {}}
-        tabDefinitions={REMOTE_DEFINITIONS}
-        onCreateTab={(type, initial) => {
-          madeTabs.push(type);
-          if (initial?.url !== undefined) madeUrls.push(initial.url);
-        }}
+        onCreateTab={(type) => madeTabs.push(type)}
+        onCreateBrowserTab={(url) => madeUrls.push(url)}
       >
         <p className="pane">active pane</p>
       </AppShareShell>,
     );
     act(() => host.querySelector<HTMLButtonElement>(".app-new-button")!.click());
     const menuRows = [...host.querySelectorAll<HTMLButtonElement>(".app-new-menu-row")];
-    expect(menuRows.length).toBe(3); // terminal, files, browser; Settings is local-only
+    expect(menuRows.length).toBe(5); // terminal, files, agent, settings, browser
     // A kind row asks for that tab on the host.
     act(() =>
       menuRows.find((r) => r.textContent!.includes("Files"))!.click(),
@@ -461,8 +447,8 @@ describe("the new-tab picker (the host menu's shape)", () => {
     act(() => host.querySelector<HTMLButtonElement>(".app-new-button")!.click());
     const again = [...host.querySelectorAll<HTMLButtonElement>(".app-new-menu-row")];
     act(() => again.find((r) => r.textContent!.startsWith("Browser"))!.click());
-    const input = host.querySelector<HTMLInputElement>(".app-new-menu-creation input")!;
-    const form = host.querySelector<HTMLFormElement>(".app-new-menu-creation")!;
+    const input = host.querySelector<HTMLInputElement>(".app-new-menu-browser input")!;
+    const form = host.querySelector<HTMLFormElement>(".app-new-menu-browser")!;
     const setVal = Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       "value",

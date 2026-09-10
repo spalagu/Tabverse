@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentType } from "react";
+import { useEffect, useState, type ComponentType, type ReactNode } from "react";
 import DOMPurify from "dompurify";
 import { describeError, type ErrorDescription } from "../strings/errors";
 import { STR } from "../strings";
@@ -42,6 +42,92 @@ export interface FilePreviewProps<Meta extends FilePreviewMeta> {
   renderers: FilePreviewRenderers<Meta>;
 }
 
+interface ContentHandlerContext<Meta extends FilePreviewMeta> {
+  readonly meta: Meta;
+  readonly runtime: FilePreviewRuntime;
+  readonly renderers: FilePreviewRenderers<Meta>;
+  readonly url: string;
+}
+
+export interface ContentHandler {
+  readonly id: string;
+  supports(meta: FilePreviewMeta): boolean;
+  open<Meta extends FilePreviewMeta>(context: ContentHandlerContext<Meta>): ReactNode;
+}
+
+/** Ordered because content evidence is stronger than a generic binary fallback. */
+export const CONTENT_HANDLERS: readonly ContentHandler[] = [
+  {
+    id: "image",
+    supports: (meta) => meta.kind === "image",
+    open: ({ meta, runtime, url }) =>
+      meta.name.toLowerCase().endsWith(".svg") ? (
+        <SvgPreview meta={meta} runtime={runtime} />
+      ) : (
+        <div className="preview-center column">
+          <img className="preview-img" src={url} alt={meta.name} />
+          <ImageCaption meta={meta} runtime={runtime} />
+        </div>
+      ),
+  },
+  {
+    id: "pdf",
+    supports: (meta) => meta.kind === "pdf",
+    open: ({ meta, url }) => <iframe className="preview-frame" src={url} title={meta.name} />,
+  },
+  {
+    id: "audio",
+    supports: (meta) => meta.kind === "audio",
+    open: ({ url }) => <div className="preview-center"><audio controls src={url} /></div>,
+  },
+  {
+    id: "video",
+    supports: (meta) => meta.kind === "video",
+    open: ({ url }) => <div className="preview-center"><video className="preview-video" controls src={url} /></div>,
+  },
+  {
+    id: "office",
+    supports: (meta) => meta.kind === "document",
+    open: ({ meta, runtime }) => <DocumentPreview meta={meta} runtime={runtime} />,
+  },
+  {
+    id: "archive",
+    supports: (meta) => meta.kind === "archive",
+    open: ({ meta, renderers }) => <renderers.InspectView meta={meta} />,
+  },
+  {
+    id: "sqlite",
+    supports: (meta) => meta.kind === "binary" && meta.mime === "application/vnd.sqlite3",
+    open: ({ meta, renderers }) => <renderers.SqliteView meta={meta} />,
+  },
+  {
+    id: "font",
+    supports: (meta) => meta.kind === "binary" && meta.mime.startsWith("font/"),
+    open: ({ meta, renderers }) => <renderers.FontView meta={meta} />,
+  },
+  {
+    id: "executable",
+    supports: (meta) => meta.kind === "binary" && meta.mime === "application/x-executable",
+    open: ({ meta, renderers }) => <renderers.InspectView meta={meta} />,
+  },
+  {
+    id: "plist",
+    supports: (meta) => meta.kind === "binary" && meta.name.toLowerCase().endsWith(".plist"),
+    open: ({ meta, renderers }) => <renderers.InspectView meta={meta} />,
+  },
+  {
+    id: "binary",
+    supports: () => true,
+    open: ({ meta, renderers }) => <renderers.HexView meta={meta} />,
+  },
+];
+
+export function contentHandlerFor(meta: FilePreviewMeta): ContentHandler {
+  const handler = CONTENT_HANDLERS.find((candidate) => candidate.supports(meta));
+  if (handler === undefined) throw new Error("Content handler registry has no fallback");
+  return handler;
+}
+
 /**
  * Non-text viewers. Images, PDF, audio and video are handed to the webview's
  * own decoders through the app's file protocol — nothing to bundle, and it
@@ -54,54 +140,8 @@ export function Preview<Meta extends FilePreviewMeta>({
   renderers,
 }: FilePreviewProps<Meta>) {
   const url = runtime.url(meta.path);
-  const lower = meta.name.toLowerCase();
-  const { InspectView, SqliteView, FontView, HexView } = renderers;
-
-  // Files nothing above can render land in the hex dump — every byte
-  // sequence is at least hexdumpable, so there is no dead end anymore.
-  const fallback = <HexView meta={meta} />;
-
-  switch (meta.kind) {
-    case "image":
-      if (lower.endsWith(".svg")) {
-        return <SvgPreview meta={meta} runtime={runtime} />;
-      }
-      return (
-        <div className="preview-center column">
-          <img className="preview-img" src={url} alt={meta.name} />
-          <ImageCaption meta={meta} runtime={runtime} />
-        </div>
-      );
-    case "pdf":
-      return <iframe className="preview-frame" src={url} title={meta.name} />;
-    case "audio":
-      return (
-        <div className="preview-center">
-          <audio controls src={url} />
-        </div>
-      );
-    case "video":
-      return (
-        <div className="preview-center">
-          <video className="preview-video" controls src={url} />
-        </div>
-      );
-    case "document":
-      return <DocumentPreview meta={meta} runtime={runtime} />;
-    case "archive":
-      return <InspectView meta={meta} />;
-    case "binary":
-      // kind_for labels these by mime, so route on that, not extension.
-      if (meta.mime === "application/vnd.sqlite3")
-        return <SqliteView meta={meta} />;
-      if (meta.mime.startsWith("font/")) return <FontView meta={meta} />;
-      if (meta.mime === "application/x-executable") return <InspectView meta={meta} />;
-      // Binary plists decode to readable XML; everything else stays opaque.
-      if (lower.endsWith(".plist")) return <InspectView meta={meta} />;
-      return fallback;
-    default:
-      return fallback;
-  }
+  const context: ContentHandlerContext<Meta> = { meta, runtime, renderers, url };
+  return contentHandlerFor(meta).open(context);
 }
 
 function ImageCaption({

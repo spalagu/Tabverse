@@ -1,7 +1,7 @@
 {
   "name": "tabverse",
   "private": true,
-  "version": "0.0.3",
+  "version": "0.1.0",
   "license": "Apache-2.0",
   "description": "A cross-platform workspace for terminals, files, the web, and shareable sessions.",
   "homepage": "https://github.com/spalagu/Tabverse#readme",
@@ -10,7 +10,7 @@
     "url": "git+https://github.com/spalagu/Tabverse.git"
   },
   "engines": {
-    "node": "22.23.2"
+    "node": ">=20"
   },
   "packageManager": "npm@10.7.0",
   "type": "module",
@@ -21,18 +21,17 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "build:resident-artifacts": "node tools/prepare-resident-artifacts.mjs --release",
-    "build:resident-artifacts:debug": "node tools/prepare-resident-artifacts.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
     "test:browser": "playwright test",
-    "check:workbench": "npm run -w @tabverse/workbench check",
-    "check:architecture": "node tools/architecture/check-plugin-boundaries.mjs",
-    "check:secrets": "node tools/check-secrets.mjs",
-    "check:security-mutations": "node tools/security-mutation-check.mjs",
-    "evidence:security": "node tools/run-local-security-evidence.mjs",
-    "check:quality": "npm run check:workbench && npm run check:architecture && npm run build && npm test && npm run check:secrets -- --require-artifact dist && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
+    "check:content-catalog": "node tools/check-content-catalog.mjs",
+    "generate:associations": "node tools/generate-tauri-associations.mjs --write",
+    "check:associations": "node tools/generate-tauri-associations.mjs",
+    "check:release-source": "node tools/check-release-source.mjs",
+    "check:architecture": "node tools/check-workbench-boundary.mjs && npm run check:content-catalog && npm run check:associations && npm run check:release-source",
+    "check:workbench": "npm run -w @tabverse/workbench check && npm run check:architecture",
+    "check:quality": "npm run check:workbench && npm run build && npm test && cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

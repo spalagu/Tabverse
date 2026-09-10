@@ -4,6 +4,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { CONTENT_REGISTRY } from "@tabverse/runtime-contracts";
 import { STR } from "../strings";
 import {
   describeError,
@@ -121,18 +122,6 @@ export interface FilesWorkspaceDescriptor<File extends FilesWorkspaceFile> {
   dirty: boolean;
 }
 
-const RENDERABLE: Record<string, FilesWorkspaceRenderKind> = {
-  md: "markdown",
-  markdown: "markdown",
-  csv: "csv",
-  tsv: "tsv",
-  html: "html",
-  htm: "html",
-  ipynb: "notebook",
-};
-
-const CERT_EXTS = new Set(["pem", "crt", "cer", "der", "csr", "key"]);
-
 function fileExt(name: string): string {
   return name.split(".").pop()?.toLowerCase() ?? "";
 }
@@ -142,8 +131,22 @@ export function describeFilesWorkspacePane<File extends FilesWorkspaceFile>(
 ): FilesWorkspaceDescriptor<File> {
   const sel = pane.open.find((file) => file.path === pane.activePath) ?? null;
   const ext = sel ? fileExt(sel.name) : "";
-  const renderKind = sel?.kind === "text" ? RENDERABLE[ext] : undefined;
-  const isCert = !!sel && CERT_EXTS.has(ext);
+  const contentType = sel ? CONTENT_REGISTRY.resolvePath(sel.name) : undefined;
+  const renderKind =
+    sel?.kind === "text"
+      ? contentType?.handler === "markdown"
+        ? "markdown"
+        : contentType?.handler === "table"
+          ? ext === "tsv"
+            ? "tsv"
+            : "csv"
+          : contentType?.handler === "html"
+            ? "html"
+            : contentType?.handler === "notebook"
+              ? "notebook"
+              : undefined
+      : undefined;
+  const isCert = contentType?.handler === "certificate";
   const isScript =
     !!sel && sel.kind === "text" && sel.mime === "text/x-shellscript";
   const viewMode = sel

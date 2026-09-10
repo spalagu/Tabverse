@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { act } from "react";
 import { createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { BrowserPane } from "@tabverse/workbench/browser-pane";
+import {
+  BrowserPane,
+  mirroredDocument,
+} from "@tabverse/workbench/browser-pane";
 import { proxyUrlFor } from "@tabverse/remote-client/proxy-fetch";
 import { STR } from "@tabverse/workbench/strings";
 
@@ -47,28 +50,64 @@ const okHtml = (): Promise<Response> =>
     new Response(htmlDoc, {
       status: 200,
       headers: { "content-type": "text/html" },
-    }),
+    })
   );
 
 describe("BrowserPane", () => {
+  it("rewrites static relative, root and absolute HTTP URLs into the virtual space", () => {
+    const html = mirroredDocument(
+      '<html><head><base href="https://wrong.example/"></head><body>' +
+        '<img id="relative" src="img/logo.png">' +
+        '<img id="root" src="/assets/app.png">' +
+        '<link id="cross" href="https://cdn.example/site.css">' +
+        '<a id="fragment" href="#part">part</a>' +
+        '<img id="data" src="data:image/gif;base64,AA==">' +
+        "</body></html>",
+      "http://intranet.local/wiki/Home",
+      (target) => proxyUrlFor(target, "/Tabverse/join/"),
+    );
+    const doc = new DOMParser().parseFromString(html, "text/html");
+
+    expect(doc.querySelector("base")?.getAttribute("href")).toBe(
+      "/Tabverse/join/__tabverse_proxy/http/intranet.local/wiki/",
+    );
+    expect(doc.querySelector("#relative")?.getAttribute("src")).toBe(
+      "/Tabverse/join/__tabverse_proxy/http/intranet.local/wiki/img/logo.png",
+    );
+    expect(doc.querySelector("#root")?.getAttribute("src")).toBe(
+      "/Tabverse/join/__tabverse_proxy/http/intranet.local/assets/app.png",
+    );
+    expect(doc.querySelector("#cross")?.getAttribute("href")).toBe(
+      "/Tabverse/join/__tabverse_proxy/https/cdn.example/site.css",
+    );
+    expect(doc.querySelector("#fragment")?.getAttribute("href")).toBe("#part");
+    expect(doc.querySelector("#data")?.getAttribute("src")).toBe(
+      "data:image/gif;base64,AA==",
+    );
+    expect(doc.querySelectorAll("base")).toHaveLength(1);
+  });
+
   it("mirrored: an HTML answer renders in a sandboxed srcdoc frame, its base aimed at the proxy endpoint", async () => {
     mount(
       createElement(BrowserPane, {
         url: "http://intranet.local/wiki/Home",
         fetchViaHost: okHtml,
         resolveProxyUrl: proxyUrlFor,
-      }),
+        networkProxyRoot: "https://join.example/__tabverse_proxy/",
+      })
     );
     await flush();
 
     const frame = host.querySelector<HTMLIFrameElement>(".browser-pane-frame");
     expect(frame).not.toBeNull();
-    // No script, form, popup, navigation or same-origin authority is granted.
-    expect(frame!.getAttribute("sandbox")).toBe("");
+    // Scripts run, but the sandbox keeps a unique opaque origin: the page
+    // cannot read the Join application or its ticket.
+    expect(frame!.getAttribute("sandbox")).toBe("allow-forms allow-scripts");
+    expect(frame!.getAttribute("sandbox")).not.toContain("allow-same-origin");
     // The document's directory, mirrored onto the endpoint path the
     // page's fetch patch (and, later, the SW arm) answers.
     expect(frame!.getAttribute("srcdoc")).toContain(
-      '<base href="/__tabverse_proxy/http/intranet.local/wiki/">',
+      '<base href="/__tabverse_proxy/http/intranet.local/wiki/">'
     );
     expect(frame!.getAttribute("srcdoc")).toContain("<h1>Intranet wiki</h1>");
     expect(host.querySelector(".browser-pane-chip")).not.toBeNull();
@@ -82,42 +121,11 @@ describe("BrowserPane", () => {
             status: 200,
             headers: { "content-type": "text/html" },
           }),
-      }),
+      })
     );
     await flush();
     const bare = host.querySelector<HTMLIFrameElement>(".browser-pane-frame");
-    expect(bare!.getAttribute("srcdoc")).toContain("<base href=");
-  });
-
-  it("rewrites retained resources to the host endpoint and drops unsupported external stylesheet links", async () => {
-    mount(
-      createElement(BrowserPane, {
-        url: "http://intranet.local/wiki/Home",
-        resolveProxyUrl: proxyUrlFor,
-        fetchViaHost: async () =>
-          new Response(
-            '<html><head><link href="/root.css"><style>.x{background:url(../img/a.png)}</style></head>' +
-              '<body><img src="icons/x.png"><a href="https://cdn.local/a">x</a></body></html>',
-            {
-              status: 200,
-              headers: {
-                "content-type": "text/html",
-                "x-tabverse-final-url": "http://intranet.local/redirected/Page",
-              },
-            },
-          ),
-      }),
-    );
-    await flush();
-    const doc = host
-      .querySelector<HTMLIFrameElement>(".browser-pane-frame")!
-      .getAttribute("srcdoc")!;
-    expect(doc).not.toContain("root.css");
-    expect(doc).not.toContain("img/a.png");
-    expect(doc).toContain("/__tabverse_proxy/https/cdn.local/a");
-    expect(doc).toContain(
-      '<base href="/__tabverse_proxy/http/intranet.local/redirected/">',
-    );
+    expect(bare!.getAttribute("srcdoc")).toContain("<head><base href=");
   });
 
   it("unmirrored by refusal: the annotation, the transport's words, and the original URL as a plain link — never a frame", async () => {
@@ -130,10 +138,10 @@ describe("BrowserPane", () => {
         fetchViaHost: (url) => {
           asked.push(url);
           return Promise.reject(
-            new Error("the request named no forwardable host"),
+            new Error("the request named no forwardable host")
           );
         },
-      }),
+      })
     );
     await flush();
 
@@ -141,14 +149,12 @@ describe("BrowserPane", () => {
     const pane = host.querySelector(".browser-pane-unmirrored");
     expect(pane).not.toBeNull();
     expect(pane!.textContent).toContain(
-      STR.remote.web.browserPane.unmirroredLabel,
+      STR.remote.web.browserPane.unmirroredLabel
     );
     expect(pane!.textContent).toContain(
-      STR.remote.web.browserPane.unmirroredWhy,
+      STR.remote.web.browserPane.unmirroredWhy
     );
-    expect(pane!.textContent).toContain(
-      "the request named no forwardable host",
-    );
+    expect(pane!.textContent).toContain("the request named no forwardable host");
     const link = host.querySelector<HTMLAnchorElement>(".browser-pane-link");
     expect(link!.getAttribute("href")).toBe("http://members.example/wiki");
     expect(link!.getAttribute("target")).toBe("_blank");
@@ -165,10 +171,10 @@ describe("BrowserPane", () => {
           asked.push(url);
           return okHtml();
         },
-      }),
+      })
     );
     await flush();
-    // No up-front refusal anymore: the host terminates TLS (remote_proxy's
+    // No up-front refusal anymore: the host gateway terminates TLS (its
     // reqwest half), so the pane asks the proxy and mirrors what came back.
     expect(asked).toEqual(["https://gitlab.example/dashboard"]);
     expect(host.querySelector(".browser-pane-frame")).not.toBeNull();
@@ -179,12 +185,12 @@ describe("BrowserPane", () => {
       createElement(BrowserPane, {
         url: "http://intranet.local/forbidden",
         fetchViaHost: async () => new Response("no", { status: 403 }),
-      }),
+      })
     );
     await flush();
     let pane = host.querySelector(".browser-pane-unmirrored");
     expect(pane!.textContent).toContain(
-      STR.remote.web.browserPane.unmirroredStatus({ status: "403" }),
+      STR.remote.web.browserPane.unmirroredStatus({ status: "403" })
     );
 
     mount(
@@ -195,12 +201,12 @@ describe("BrowserPane", () => {
             status: 200,
             headers: { "content-type": "application/pdf" },
           }),
-      }),
+      })
     );
     await flush();
     pane = host.querySelector(".browser-pane-unmirrored");
     expect(pane!.textContent).toContain(
-      STR.remote.web.browserPane.unmirroredType,
+      STR.remote.web.browserPane.unmirroredType
     );
     expect(host.querySelector(".browser-pane-frame")).toBeNull();
   });
@@ -210,7 +216,7 @@ describe("BrowserPane", () => {
       createElement(BrowserPane, {
         url: "http://intranet.local/slow",
         fetchViaHost: () => new Promise<Response>(() => {}),
-      }),
+      })
     );
     expect(host.querySelector(".browser-pane-loading")).not.toBeNull();
     expect(host.querySelector(".browser-pane-frame")).toBeNull();
@@ -232,15 +238,29 @@ describe("BrowserPane", () => {
     await flush();
     mount(pane("http://intranet.local/two"));
     await flush();
-    expect(asked).toEqual([
-      "http://intranet.local/one",
-      "http://intranet.local/two",
-    ]);
+    expect(asked).toEqual(["http://intranet.local/one", "http://intranet.local/two"]);
     const frame = host.querySelector<HTMLIFrameElement>(".browser-pane-frame");
     // The second document's base — the first answer never landed on a
     // pane that had already moved to the second URL.
     expect(frame!.getAttribute("srcdoc")).toContain(
-      '<base href="/__tabverse_proxy/http/intranet.local/">',
+      '<base href="/__tabverse_proxy/http/intranet.local/">'
     );
+  });
+
+  it("aborts the Host data stream when the pane moves to another URL", async () => {
+    const signals: AbortSignal[] = [];
+    const pane = (url: string) =>
+      createElement(BrowserPane, {
+        url,
+        fetchViaHost: (_url, init) => {
+          signals.push(init!.signal as AbortSignal);
+          return new Promise<Response>(() => {});
+        },
+      });
+    mount(pane("http://intranet.local/one"));
+    expect(signals[0].aborted).toBe(false);
+    mount(pane("http://intranet.local/two"));
+    expect(signals[0].aborted).toBe(true);
+    expect(signals[1].aborted).toBe(false);
   });
 });

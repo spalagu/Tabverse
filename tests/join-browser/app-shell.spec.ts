@@ -5,7 +5,7 @@ const appSnapshot = {
   tabs: [
     { id: "terminal", type: "terminal", title: "Build shell", groupId: "work" },
     { id: "browser", type: "browser", title: "Project docs", groupId: "work", url: "https://example.test/docs" },
-    { id: "files", type: "files", title: "Project files" },
+    { id: "agent", type: "agent", title: "Review agent" },
   ],
   groups: [{ id: "work", name: "Work", colorIndex: 0, collapsed: false }],
   activeTabId: "terminal",
@@ -30,6 +30,44 @@ async function replayActions(page: Page) {
   });
 }
 
+test("the Pages Service Worker controls the scoped Host-network URL", async ({ page }) => {
+  await openReplay(page);
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+
+  const result = await page.evaluate(async () => {
+    const response = await fetch(
+      "/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/probe",
+    );
+    return { status: response.status, body: await response.text() };
+  });
+  expect(result.status).toBe(502);
+  expect(result.body).toContain("session is not connected");
+
+  const iframeResourceFinished = await page.evaluate(() =>
+    new Promise<boolean>((resolve) => {
+      const frame = document.createElement("iframe");
+      const timer = window.setTimeout(() => resolve(false), 3_000);
+      frame.onload = () => {
+        const image = frame.contentDocument?.querySelector("img");
+        if (image?.complete) {
+          window.clearTimeout(timer);
+          resolve(true);
+          return;
+        }
+        image?.addEventListener("error", () => {
+          window.clearTimeout(timer);
+          resolve(true);
+        }, { once: true });
+      };
+      frame.srcdoc =
+        '<img src="/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/image.png">';
+      document.body.appendChild(frame);
+    }),
+  );
+  expect(iframeResourceFinished).toBe(true);
+});
+
 test("renders the same replayed app shell across desktop and mobile widths", async ({ page }, testInfo) => {
   await openReplay(page);
   await expect(page.locator("#term")).toBeVisible();
@@ -41,10 +79,6 @@ test("renders the same replayed app shell across desktop and mobile widths", asy
     await expect(page.locator(".app-shell-side")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Tabs" })).toBeVisible();
     await page.getByRole("button", { name: "Tabs" }).click();
-    // App shares deliberately use actual size on narrow screens. Wait for
-    // the responsive fit effect before taking the visual snapshot so the
-    // test cannot capture the transient desktop default.
-    await expect(page.locator("#zoom")).toHaveText("100%");
   }
 
   await expect(page.getByRole("tab", { name: "Build shell" })).toBeVisible();

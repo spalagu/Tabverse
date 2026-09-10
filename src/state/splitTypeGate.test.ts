@@ -37,6 +37,7 @@ const ALL_TYPES: TabType[] = [
   "browser",
   "settings",
   "remote",
+  "agent",
 ];
 
 /** One tab of each type in each state a split cares about. Built as plain
