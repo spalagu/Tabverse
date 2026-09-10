@@ -47,3 +47,17 @@ jobs:
       - run: npm run build
       - run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
         working-directory: src-tauri
+
+  cross-platform:
+    if: always()
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.build.result }}" = success
+
+  packaging:
+    if: always()
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.build.result }}" = success

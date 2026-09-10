@@ -148,6 +148,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  join-page:
+    if: always()
+    needs: [build, visual-regression]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          test "${{ needs.build.result }}" = success
+          test "${{ needs.visual-regression.result }}" = success
+
   deploy:
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/architecture-v3-base')
     needs: [build, visual-regression]

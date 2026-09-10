@@ -55,3 +55,23 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+
+  security:
+    if: always()
+    needs: [npm-audit, rust-advisories, codeql, dependency-review]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize required security checks
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          NPM_AUDIT: ${{ needs.npm-audit.result }}
+          RUST_ADVISORIES: ${{ needs.rust-advisories.result }}
+          CODEQL: ${{ needs.codeql.result }}
+          DEPENDENCY_REVIEW: ${{ needs.dependency-review.result }}
+        run: |
+          test "$NPM_AUDIT" = success
+          test "$RUST_ADVISORIES" = success
+          test "$CODEQL" = success
+          if [[ "$EVENT_NAME" == 'pull_request' ]]; then
+            test "$DEPENDENCY_REVIEW" = success
+          fi
