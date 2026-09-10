@@ -837,7 +837,7 @@ export const STR = {
       browserPane: {
         loading: "Loading through the host's network…",
         mirroredChip:
-          "Mirrored via the host's network — scripts off, subresources unloaded",
+          "Loaded through the host's network",
         frameTitle: (p: { url: string }) => `Mirrored page ${p.url}`,
         unmirroredLabel: "Not mirrored — loads independently",
         unmirroredWhy: "The host's proxy could not fetch this page.",
