@@ -54,6 +54,10 @@ sw.addEventListener("fetch", (event) => {
 
 /** One proxied subresource: ask the page, or fail as 503/504 honestly. */
 async function proxyViaPage(request: Request): Promise<Response> {
+  if (import.meta.env.VITE_JOIN_TEST_HARNESS === "1") {
+    const fixture = browserTestSubresource(request);
+    if (fixture !== null) return fixture;
+  }
   const scope = sw as unknown as {
     clients: {
       matchAll(o: { type: string; includeUncontrolled: boolean }): Promise<
@@ -164,6 +168,30 @@ async function proxyViaPage(request: Request): Promise<Response> {
       })();
     }
   });
+}
+
+function browserTestSubresource(request: Request): Response | null {
+  const path = new URL(request.url).pathname;
+  if (!path.includes("/__tabverse_proxy/browser-test/http/intranet.local/")) {
+    return null;
+  }
+  if (path.endsWith("/page.css")) {
+    return new Response("body { background-color: rgb(1, 2, 3); }", {
+      headers: { "content-type": "text/css" },
+    });
+  }
+  if (path.endsWith("/page.js")) {
+    return new Response('document.documentElement.dataset.hostScript = "loaded";', {
+      headers: { "content-type": "text/javascript" },
+    });
+  }
+  if (path.endsWith("/pixel.svg")) {
+    return new Response(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>',
+      { headers: { "content-type": "image/svg+xml" } },
+    );
+  }
+  return null;
 }
 
 async function cacheFirst(request: Request): Promise<Response> {

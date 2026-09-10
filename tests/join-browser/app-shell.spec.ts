@@ -14,6 +14,7 @@ const appSnapshot = {
 async function openReplay(page: Page) {
   await page.goto("?replay");
   await page.waitForFunction(() => typeof (window as Record<string, unknown>).__replayFrame === "function");
+  expect(await page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
   await page.evaluate((snapshot) => {
     const replay = (window as unknown as { __replayFrame: (frame: unknown) => void }).__replayFrame;
     replay({ type: "welcome", proto: 2, tabTitle: "Shared workspace", cols: 80, rows: 24, tabType: "app" });
@@ -32,8 +33,6 @@ async function replayActions(page: Page) {
 
 test("the Pages Service Worker controls the scoped Host-network URL", async ({ page }) => {
   await openReplay(page);
-  await page.evaluate(() => navigator.serviceWorker.ready);
-  await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
 
   const result = await page.evaluate(async () => {
     const response = await fetch(
@@ -44,28 +43,35 @@ test("the Pages Service Worker controls the scoped Host-network URL", async ({ p
   expect(result.status).toBe(502);
   expect(result.body).toContain("session is not connected");
 
-  const iframeResourceFinished = await page.evaluate(() =>
-    new Promise<boolean>((resolve) => {
+  const subresources = await page.evaluate(() =>
+    new Promise<{ background: string; script: string | undefined; image: boolean }>((resolve) => {
       const frame = document.createElement("iframe");
-      const timer = window.setTimeout(() => resolve(false), 3_000);
+      const timer = window.setTimeout(
+        () => resolve({ background: "timeout", script: undefined, image: false }),
+        3_000,
+      );
       frame.onload = () => {
+        window.clearTimeout(timer);
+        const body = frame.contentDocument?.body;
         const image = frame.contentDocument?.querySelector("img");
-        if (image?.complete) {
-          window.clearTimeout(timer);
-          resolve(true);
-          return;
-        }
-        image?.addEventListener("error", () => {
-          window.clearTimeout(timer);
-          resolve(true);
-        }, { once: true });
+        resolve({
+          background: body === undefined ? "missing" : getComputedStyle(body).backgroundColor,
+          script: frame.contentDocument?.documentElement.dataset.hostScript,
+          image: image?.complete === true && image.naturalWidth === 1,
+        });
       };
       frame.srcdoc =
-        '<img src="/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/image.png">';
+        '<link rel="stylesheet" href="/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/page.css">' +
+        '<script src="/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/page.js"></script>' +
+        '<img src="/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/pixel.svg">';
       document.body.appendChild(frame);
     }),
   );
-  expect(iframeResourceFinished).toBe(true);
+  expect(subresources).toEqual({
+    background: "rgb(1, 2, 3)",
+    script: "loaded",
+    image: true,
+  });
 });
 
 test("renders the same replayed app shell across desktop and mobile widths", async ({ page }, testInfo) => {

@@ -27,6 +27,7 @@ Remote Browser 的目标是取得 Host 网络能力，不是远程桌面。Remot
 - iframe 使用 `sandbox="allow-forms allow-scripts"`，不授予 `allow-same-origin`。
 - 注入 CSP 只允许当前 context 的虚拟代理路径；页面不能读取 Join 状态、ticket 或协议对象。
 - bootstrap 将 fetch、XMLHttpRequest 和 EventSource 的 HTTP(S) URL 映射到虚拟代理路径。
+- GitHub Pages Join 必须先注册 Service Worker 并确认当前页面已受其控制，再挂载应用。Service Worker 是 CSS、图片、字体、脚本等虚拟子资源的必要数据面，不只是离线缓存优化；注册或接管失败必须显式阻止启动，不能降级为只有主 HTML 的残页。
 - WebSocket 尚未伪装为 HTTP；未来必须使用专用长连接数据流。
 
 ## HTTP 状态
