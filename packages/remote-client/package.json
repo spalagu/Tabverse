@@ -8,7 +8,6 @@
     "./b64": "./src/b64.ts",
     "./app-frame": "./src/appFrame.ts",
     "./agent-viewer": "./src/agent/viewerFrames.ts",
-    "./clipboard": "./src/clipboard.ts",
-    "./proxy-fetch": "./src/proxyFetch.ts"
+    "./clipboard": "./src/clipboard.ts"
   }
 }

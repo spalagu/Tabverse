@@ -1,6 +1,5 @@
 import type { ReactNode } from "react";
 import type { HostRpc } from "./hostRpc";
-import { BrowserPane, type HostFetch } from "./BrowserPane";
 import { FilesPane, type RemoteFileReader } from "./FilesPane";
 import { SettingsPane } from "./SettingsPane";
 import {
@@ -38,11 +37,6 @@ export interface RemoteWorkbenchTabViewContext {
     readonly rpc: HostRpc;
     readonly readOnly: boolean;
   };
-  readonly browser: {
-    readonly fetchViaHost: HostFetch;
-    readonly resolveProxyUrl: (target: string, contextId?: string) => string;
-    readonly networkProxyRoot: string;
-  };
 }
 
 function unavailable(line: ReactNode): ReactNode {
@@ -55,18 +49,7 @@ const REMOTE_TAB_RENDERERS = defineTabViewRenderers<
 >({
   terminal: ({ context }) => <TerminalViewer {...context.terminal} />,
   files: ({ context }) => <FilesPane {...context.files} />,
-  browser: ({ tab, context }) =>
-    tab.url ? (
-      <BrowserPane
-        url={tab.url}
-        contextId={tab.id}
-        fetchViaHost={context.browser.fetchViaHost}
-        resolveProxyUrl={context.browser.resolveProxyUrl}
-        networkProxyRoot={context.browser.networkProxyRoot}
-      />
-    ) : (
-      unavailable(STR.remote.web.appShareLive)
-    ),
+  browser: () => unavailable(STR.remote.web.browserUnavailable),
   agent: ({ context }) => <RemoteAgentPane {...context.agent} />,
   remote: () => unavailable(STR.remote.web.appShareLive),
   settings: ({ context }) => <SettingsPane {...context.settings} />,

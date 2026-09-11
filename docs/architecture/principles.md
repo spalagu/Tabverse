@@ -18,20 +18,19 @@ This file is the short-form architectural constitution for V3. When implementati
    - Terminal: host executes PTY; remote renders terminal bytes.
    - Agent: host executes; remote renders structured events.
    - Files: host owns filesystem; remote renders metadata and requested content.
-   - Browser: remote renders its own browser context; network requests use the host network path.
-9. **Remote Browser does not synchronize browser instances by default.** Local and remote cookies/storage/history may differ. The initial requirement is host-network reachability, not identical browser state.
-10. **Host networking is a capability, not permanently an HTTP proxy.** HTTP(S) is the first consumer; architecture must allow WebSocket/TCP capabilities later without redefining Remote.
-11. **Bulk Remote data must stream as bytes.** Do not base64 large bodies into JSON control messages. Pixel/frame streaming is a fallback, not the default Browser Remote design.
+   - Browser: local only. Browser tabs remain visible in a Whole-App share but are unavailable on Join.
+9. **Remote does not carry Browser content or networking.** Do not add Browser pixels, DOM mirroring, browser-state synchronization, or Host-network proxying to Remote.
+10. **Bulk Remote file data must stream as bytes.** Do not base64 file bodies into JSON control messages.
 
 ## Cross-platform and implementation
 
-12. **Product semantics are cross-platform; OS mechanics live at the edge.** Core code should know abstractions such as RuntimeHost, HostNetworkGateway, SecretStore and ContentHandler, not launchctl/Win32/systemd/WebView internals.
-13. **Own differentiation; reuse commodity infrastructure.** Prefer official Tauri plugins, then mature Rust crates, then narrow platform adapters, before custom OS plumbing.
-14. **One authoritative writer per durable state domain.** Application state and runtime state must not be concurrently mutated by unrelated components.
-15. **Do not fake recovery.** A new process is not the old terminal; visual restoration is not execution restoration.
-16. **Built-in modularity does not require a dynamic plugin package manager.** V3 uses lightweight built-in Feature Modules. External plugins are a separate future trust/distribution problem.
-17. **Functionality before speculative defense.** Keep clear structural trust boundaries, but do not add allowlists, rate limits or protocol restrictions without a concrete threat and product reason.
-18. **Every abstraction must pay rent in current product value.** Do not add managers, daemons, worker layers or policy frameworks for hypothetical future consumers.
+11. **Product semantics are cross-platform; OS mechanics live at the edge.** Core code should know abstractions such as RuntimeHost, SecretStore and ContentHandler, not launchctl/Win32/systemd/WebView internals.
+12. **Own differentiation; reuse commodity infrastructure.** Prefer official Tauri plugins, then mature Rust crates, then narrow platform adapters, before custom OS plumbing.
+13. **One authoritative writer per durable state domain.** Application state and runtime state must not be concurrently mutated by unrelated components.
+14. **Do not fake recovery.** A new process is not the old terminal; visual restoration is not execution restoration.
+15. **Built-in modularity does not require a dynamic plugin package manager.** V3 uses lightweight built-in Feature Modules. External plugins are a separate future trust/distribution problem.
+16. **Functionality before speculative defense.** Keep clear structural trust boundaries, but do not add allowlists, rate limits or protocol restrictions without a concrete threat and product reason.
+17. **Every abstraction must pay rent in current product value.** Do not add managers, daemons, worker layers or policy frameworks for hypothetical future consumers.
 
 ## Decision order
 

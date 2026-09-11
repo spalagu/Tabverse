@@ -1,7 +1,7 @@
 # ADR-0004: Remote Browser delegates network capability through HostNetworkGateway
 
 ## Status
-Accepted.
+Superseded by ADR-0017. The implementation described below has been removed.
 
 ## Requirement
 A Remote Browser must be able to reach resources that are reachable from the Host environment even when the remote device itself cannot reach them. Initial examples include Host localhost, LAN services, VPN routes and Host-resolved internal DNS names.

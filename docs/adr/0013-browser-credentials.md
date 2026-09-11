@@ -12,7 +12,7 @@ CredentialVault 将加密记录保存到 `app.db`；机器 master-key bundle 由
 ## 备选与拒绝原因
 - 明文配置：泄漏密码。
 - 依赖 WebView 自有密码库：跨平台行为和迁移不可控。
-- Host 凭据同步到 Remote：超出 Remote Browser 边界。
+- Synchronizing Host credentials to Remote: rejected because Browser is local-only.
 
 ## 跨平台影响
 vault 和 origin 规则共享，master-key adapter 分平台。

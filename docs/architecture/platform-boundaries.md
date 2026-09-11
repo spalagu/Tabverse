@@ -11,7 +11,7 @@
 - Desktop 使用官方 Tauri + Wry。
 - macOS 使用 WKWebView；Windows 使用 WebView2；Linux 使用 WebKitGTK。
 - 不包含 CEF、custom Tauri fork 或双 Runtime。
-- 本地 Browser 使用本机 WebView 网络；Remote Browser 使用 HostNetworkGateway，两者不共享 Browser 状态。
+- Browser is local-only. Join does not render Browser content or proxy Browser traffic through the Host.
 
 ## 凭据
 

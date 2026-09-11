@@ -1,19 +1,11 @@
-//! Independent Remote data streams carried beside the long-lived control stream.
-//!
-//! The control protocol remains small and semantic. Bulk/network traffic opens
-//! additional QUIC bidirectional streams on the already-authenticated iroh
-//! connection, so a large response cannot head-of-line block presence, input,
-//! approvals, or other control messages.
+//! Raw file streams carried beside the long-lived Remote control stream.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use std::sync::Arc;
 use tabverse_network::{
-    read_data_stream_preface, read_file_read_request, read_file_read_start,
-    read_http_response_start, write_data_stream_preface, write_file_read_request,
-    write_file_read_start, write_http_request_head, DataStreamKind, DataStreamPreface,
-    FileReadHead, FileReadRequest, FileReadStart, HostNetworkGateway, HttpRequestHead,
-    HttpResponseStart, DATA_STREAM_VERSION,
+    read_file_read_request, read_file_read_start, write_file_read_request, write_file_read_start,
+    FileReadHead, FileReadRequest, FileReadStart,
 };
 use tokio::io::AsyncReadExt;
 
@@ -26,75 +18,17 @@ pub trait RemoteFileSource: Send + Sync {
     fn open(&self, request: &FileReadRequest) -> Result<OpenedRemoteFile>;
 }
 
-/// One extra bidirectional stream whose small routing preface has already been
-/// read, but whose request has not yet been executed.
-///
-/// This split is load-bearing for authorization. The Remote lifecycle owns the
-/// connection and must inspect `preface()` and the viewer's *current* access
-/// before calling `serve()`. In particular, a viewer downgraded from Steer to
-/// View must lose the ability to start the very next network request; a
-/// forever-running accept loop hidden inside this module could only check the
-/// permission once when it started.
-pub struct IncomingDataStream {
-    preface: DataStreamPreface,
+/// One extra stream accepted from an already-authenticated Remote connection.
+/// The Remote lifecycle rechecks the current App share and viewer before it
+/// calls `serve_file`.
+pub struct IncomingFileStream {
     send: SendStream,
     recv: RecvStream,
 }
 
-impl IncomingDataStream {
-    /// Routing metadata only. `context_id` identifies remote Browser state; it
-    /// is never an authorization credential.
-    pub fn preface(&self) -> &DataStreamPreface {
-        &self.preface
-    }
-
-    /// Execute one stream after the caller has authorized it.
-    pub async fn serve(self, gateway: HostNetworkGateway) -> Result<()> {
-        let Self {
-            preface,
-            send,
-            recv,
-        } = self;
-        match preface.kind {
-            DataStreamKind::Http => {
-                // `RecvStream::stop` at the viewer sends STOP_SENDING for our
-                // response half. Observe it independently of write backpressure
-                // so dropping a Browser pane cancels the Host HTTP request now,
-                // rather than only after QUIC's send window eventually fills.
-                let stopped = send.stopped();
-                tokio::pin!(stopped);
-                tokio::select! {
-                    biased;
-                    result = &mut stopped => {
-                        result.context("wait for remote HTTP response consumer")?;
-                        Ok(())
-                    }
-                    result = gateway.serve_http_exchange(&preface.context_id, recv, send) => match result {
-                        // AsyncWrite erases noq's WriteError into io::Error. If
-                        // STOP_SENDING raced the failed write, the transport's
-                        // own stopped future is the authoritative distinction
-                        // between cancellation and a real gateway failure.
-                        Err(_) if matches!(
-                            tokio::time::timeout(
-                                std::time::Duration::from_millis(100),
-                                &mut stopped,
-                            ).await,
-                            Ok(Ok(Some(_)))
-                        ) => Ok(()),
-                        result => result,
-                    },
-                }
-            }
-            DataStreamKind::FileRead => bail!("FileRead stream needs a RemoteFileSource"),
-        }
-    }
-
+impl IncomingFileStream {
     pub async fn serve_file(self, source: Arc<dyn RemoteFileSource>) -> Result<()> {
-        let Self {
-            preface: _,
-            mut send,
-            mut recv,
-        } = self;
+        let Self { mut send, mut recv } = self;
         let request = read_file_read_request(&mut recv)
             .await
             .context("read file request")?;
@@ -133,39 +67,12 @@ impl IncomingDataStream {
     }
 }
 
-/// Accept exactly one data stream and expose its routing preface to the Remote
-/// lifecycle *before* any Host network I/O occurs.
-///
-/// Authentication, live viewer-access checks, connection lifetime, and the
-/// accept loop all belong to the caller. This module owns only data-plane
-/// framing and transport mechanics.
-pub async fn accept_data_stream(conn: &Connection) -> Result<IncomingDataStream> {
-    let (send, mut recv) = conn
+pub async fn accept_file_stream(conn: &Connection) -> Result<IncomingFileStream> {
+    let (send, recv) = conn
         .accept_bi()
         .await
-        .context("accept Remote data stream")?;
-    let preface = read_data_stream_preface(&mut recv)
-        .await
-        .context("read Remote data-stream preface")?;
-    if preface.version != DATA_STREAM_VERSION {
-        bail!(
-            "unsupported Remote data-stream version {} (expected {})",
-            preface.version,
-            DATA_STREAM_VERSION
-        );
-    }
-    Ok(IncomingDataStream {
-        preface,
-        send,
-        recv,
-    })
-}
-
-/// Client side of one HTTP data stream. Request and response bodies stay raw;
-/// only the small preface/head frames are JSON encoded by `tabverse-network`.
-pub struct RemoteHttpStream {
-    send: SendStream,
-    recv: RecvStream,
+        .context("accept Remote file stream")?;
+    Ok(IncomingFileStream { send, recv })
 }
 
 pub struct RemoteFileStream {
@@ -173,13 +80,8 @@ pub struct RemoteFileStream {
 }
 
 impl RemoteFileStream {
-    pub async fn open(
-        conn: &Connection,
-        context_id: &str,
-        request: &FileReadRequest,
-    ) -> Result<Self> {
+    pub async fn open(conn: &Connection, request: &FileReadRequest) -> Result<Self> {
         let (mut send, recv) = conn.open_bi().await.context("open file data stream")?;
-        write_data_stream_preface(&mut send, &DataStreamPreface::file_read(context_id)).await?;
         write_file_read_request(&mut send, request).await?;
         send.finish().context("finish file request")?;
         Ok(Self { recv })
@@ -198,310 +100,5 @@ impl RemoteFileStream {
 
     pub fn cancel(&mut self) {
         let _ = self.recv.stop(0u8.into());
-    }
-}
-
-impl RemoteHttpStream {
-    pub async fn open(conn: &Connection, context_id: &str, head: &HttpRequestHead) -> Result<Self> {
-        let (mut send, recv) = conn.open_bi().await.context("open HTTP data stream")?;
-        write_data_stream_preface(&mut send, &DataStreamPreface::http(context_id))
-            .await
-            .context("write HTTP data-stream preface")?;
-        write_http_request_head(&mut send, head)
-            .await
-            .context("write HTTP request head")?;
-        Ok(Self { send, recv })
-    }
-
-    pub async fn write_request_chunk(&mut self, bytes: &[u8]) -> Result<()> {
-        self.send
-            .write_all(bytes)
-            .await
-            .context("write HTTP request body")
-    }
-
-    /// Half-close the request direction while keeping the response direction
-    /// alive. This is the authoritative end of the streamed request body.
-    pub fn finish_request(&mut self) -> Result<()> {
-        self.send.finish().context("finish HTTP request stream")
-    }
-
-    pub async fn response_start(&mut self) -> Result<HttpResponseStart> {
-        read_http_response_start(&mut self.recv)
-            .await
-            .context("read HTTP response head")
-    }
-
-    /// Convenience for bounded consumers such as tests or small resources.
-    /// Production Browser plumbing should stream chunks directly rather than
-    /// turning this helper into a new architecture-level response ceiling.
-    pub async fn read_response_to_end(&mut self, size_limit: usize) -> Result<Vec<u8>> {
-        self.recv
-            .read_to_end(size_limit)
-            .await
-            .context("read HTTP response body")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use iroh::Endpoint;
-    use std::{
-        net::Ipv4Addr,
-        time::{Duration, Instant},
-    };
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    const TEST_ALPN: &[u8] = b"/tabverse/v3-data-test/1";
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn control_and_large_http_data_streams_share_one_iroh_connection() -> Result<()> {
-        tokio::time::timeout(Duration::from_secs(30), async {
-            const BODY_LEN: usize = 1024 * 1024 + 196_608;
-
-            // This standalone crate does not run the Tauri composition root. Match
-            // the Host HTTP factory's process-wide choice before reqwest builds a
-            // client; an Err means another test installed the same provider first.
-            let _ = rustls::crypto::ring::default_provider().install_default();
-
-            // The origin is reachable only from the Host side of this test. Using
-            // `localhost` below means resolution happens inside HostNetworkGateway.
-            let listener = TcpListener::bind("127.0.0.1:0").await?;
-            let port = listener.local_addr()?.port();
-            let origin = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                let mut byte = [0u8; 1];
-                while !request.ends_with(b"\r\n\r\n") {
-                    socket.read_exact(&mut byte).await.unwrap();
-                    request.push(byte[0]);
-                }
-                assert!(String::from_utf8_lossy(&request).starts_with("GET /large HTTP/1.1"));
-                let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {BODY_LEN}\r\nConnection: close\r\n\r\n"
-                );
-                socket.write_all(head.as_bytes()).await.unwrap();
-                let chunk = vec![0x6b; 32 * 1024];
-                let mut left = BODY_LEN;
-                while left > 0 {
-                    let n = left.min(chunk.len());
-                    socket.write_all(&chunk[..n]).await.unwrap();
-                    left -= n;
-                }
-                socket.shutdown().await.unwrap();
-            });
-
-            // This test proves QUIC stream multiplexing, not relay/discovery. Keep
-            // both endpoints on loopback so CI never depends on n0 DNS publishing,
-            // public relays, interface discovery, or their shutdown timing.
-            let host_ep = Endpoint::builder(iroh::endpoint::presets::Minimal)
-                .alpns(vec![TEST_ALPN.to_vec()])
-                .clear_ip_transports()
-                .bind_addr((Ipv4Addr::LOCALHOST, 0))?
-                .bind()
-                .await?;
-            let client_ep = Endpoint::builder(iroh::endpoint::presets::Minimal)
-                .clear_ip_transports()
-                .bind_addr((Ipv4Addr::LOCALHOST, 0))?
-                .bind()
-                .await?;
-
-            let host_addr = host_ep.addr();
-            let host_ep_for_accept = host_ep.clone();
-            let host_accept = tokio::spawn(async move {
-                let incoming = host_ep_for_accept
-                    .accept()
-                    .await
-                    .expect("incoming connection");
-                incoming.await.expect("host handshake")
-            });
-            let client_conn = tokio::time::timeout(
-                Duration::from_secs(20),
-                client_ep.connect(host_addr, TEST_ALPN),
-            )
-            .await
-            .context("client connect timeout")??;
-            let host_conn = host_accept.await?;
-
-            // Stream #1 represents the existing long-lived semantic control
-            // stream. Extra streams become eligible for authorization only after
-            // the caller has accepted and authenticated this one.
-            let (mut client_control_send, client_control_recv) = client_conn.open_bi().await?;
-            // QUIC streams become visible to the peer only after their first
-            // bytes are sent. Write before accept_bi() to avoid both sides
-            // waiting for the other to make the control stream observable.
-            client_control_send.write_all(b"control-alive").await?;
-            let (mut host_control_send, mut host_control_recv) = host_conn.accept_bi().await?;
-            let mut control_marker = [0u8; 13];
-            host_control_recv.read_exact(&mut control_marker).await?;
-            assert_eq!(&control_marker, b"control-alive");
-            let before = client_conn.stats();
-            let started = Instant::now();
-
-            let gateway = HostNetworkGateway::new(Default::default());
-            let host_data = tokio::spawn(async move {
-                // The lifecycle gets the preface before the gateway touches the
-                // network. Production code checks the viewer's current access at
-                // exactly this point, on every accepted stream.
-                let incoming = accept_data_stream(&host_conn).await?;
-                assert_eq!(incoming.preface().kind, DataStreamKind::Http);
-                assert_eq!(incoming.preface().context_id, "remote-browser-context-1");
-                incoming.serve(gateway).await
-            });
-
-            let mut http = RemoteHttpStream::open(
-                &client_conn,
-                "remote-browser-context-1",
-                &HttpRequestHead {
-                    method: "GET".into(),
-                    url: format!("http://localhost:{port}/large"),
-                    headers: Vec::new(),
-                },
-            )
-            .await?;
-            http.finish_request()?;
-
-            let start = http.response_start().await?;
-            let HttpResponseStart::Response { head } = start else {
-                bail!("HostNetworkGateway returned {start:?}");
-            };
-            assert_eq!(head.status, 200);
-
-            let body = http.read_response_to_end(BODY_LEN + 1).await?;
-            assert_eq!(body.len(), BODY_LEN);
-            assert!(body.iter().all(|byte| *byte == 0x6b));
-
-            // The control stream remains a distinct live stream while the >1 MiB
-            // data response travels on its own QUIC stream.
-            client_control_send.write_all(b"!").await?;
-            let mut marker = [0u8; 1];
-            host_control_recv.read_exact(&mut marker).await?;
-            assert_eq!(&marker, b"!");
-
-            // Transport-level baseline: count encrypted QUIC datagrams, not
-            // just application bytes. A normal page fetch may pay framing and
-            // ACK overhead, but must remain proportional to its body instead
-            // of silently starting a continuous pixel stream.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let after = client_conn.stats();
-            let host_to_remote = after.udp_rx.bytes.saturating_sub(before.udp_rx.bytes);
-            let remote_to_host = after.udp_tx.bytes.saturating_sub(before.udp_tx.bytes);
-            assert!(host_to_remote >= BODY_LEN as u64);
-            assert!(host_to_remote < (BODY_LEN as u64) * 2);
-            assert!(remote_to_host < 256 * 1024);
-            eprintln!(
-                "remote_baseline body_bytes={BODY_LEN} host_to_remote_bytes={host_to_remote} remote_to_host_bytes={remote_to_host} elapsed_ms={}",
-                started.elapsed().as_millis()
-            );
-
-            host_data.await??;
-            origin.await?;
-
-            // End the proof stream explicitly before closing the connection. This
-            // keeps endpoint teardown independent from live stream handles.
-            client_control_send.finish()?;
-            host_control_send.finish()?;
-            drop(client_control_send);
-            drop(client_control_recv);
-            drop(host_control_send);
-            drop(host_control_recv);
-
-            client_conn.close(0u32.into(), b"test complete");
-            client_ep.close().await;
-            host_ep.close().await;
-            Ok::<(), anyhow::Error>(())
-        })
-        .await
-        .context("iroh control/data roundtrip exceeded 30 seconds")?
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn stopping_response_stream_cancels_host_http_exchange() -> Result<()> {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            let _ = rustls::crypto::ring::default_provider().install_default();
-            let listener = TcpListener::bind("127.0.0.1:0").await?;
-            let port = listener.local_addr()?.port();
-            let origin = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                let mut byte = [0u8; 1];
-                while !request.ends_with(b"\r\n\r\n") {
-                    socket.read_exact(&mut byte).await.unwrap();
-                    request.push(byte[0]);
-                }
-                socket
-                    .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
-                    .await
-                    .unwrap();
-                let chunk = vec![b'x'; 32 * 1024];
-                loop {
-                    let head = format!("{:x}\r\n", chunk.len());
-                    if socket.write_all(head.as_bytes()).await.is_err()
-                        || socket.write_all(&chunk).await.is_err()
-                        || socket.write_all(b"\r\n").await.is_err()
-                    {
-                        break;
-                    }
-                }
-            });
-
-            let host_ep = Endpoint::builder(iroh::endpoint::presets::Minimal)
-                .alpns(vec![TEST_ALPN.to_vec()])
-                .clear_ip_transports()
-                .bind_addr((Ipv4Addr::LOCALHOST, 0))?
-                .bind()
-                .await?;
-            let client_ep = Endpoint::builder(iroh::endpoint::presets::Minimal)
-                .clear_ip_transports()
-                .bind_addr((Ipv4Addr::LOCALHOST, 0))?
-                .bind()
-                .await?;
-            let host_ep_for_accept = host_ep.clone();
-            let host_accept =
-                tokio::spawn(
-                    async move { host_ep_for_accept.accept().await.unwrap().await.unwrap() },
-                );
-            let client_conn = client_ep.connect(host_ep.addr(), TEST_ALPN).await?;
-            let host_conn = host_accept.await?;
-            let host_data = tokio::spawn(async move {
-                accept_data_stream(&host_conn)
-                    .await?
-                    .serve(HostNetworkGateway::new(Default::default()))
-                    .await
-            });
-
-            let mut http = RemoteHttpStream::open(
-                &client_conn,
-                "browser-tab-cancelled",
-                &HttpRequestHead {
-                    method: "GET".into(),
-                    url: format!("http://localhost:{port}/slow"),
-                    headers: Vec::new(),
-                },
-            )
-            .await?;
-            http.finish_request()?;
-            assert!(matches!(
-                http.response_start().await?,
-                HttpResponseStart::Response { .. }
-            ));
-
-            http.recv.stop(0u32.into())?;
-            tokio::time::timeout(Duration::from_secs(2), host_data)
-                .await
-                .context("Host HTTP exchange survived viewer cancellation")???;
-            tokio::time::timeout(Duration::from_secs(2), origin)
-                .await
-                .context("origin connection survived viewer cancellation")??;
-
-            client_conn.close(0u32.into(), b"test complete");
-            client_ep.close().await;
-            host_ep.close().await;
-            Ok::<(), anyhow::Error>(())
-        })
-        .await
-        .context("HTTP cancellation roundtrip exceeded 20 seconds")?
     }
 }

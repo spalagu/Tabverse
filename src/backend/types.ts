@@ -15,7 +15,7 @@ export type {
  * Backend abstraction: the same UI runs against
  *  - the Tauri desktop core (real PTYs),
  *  - a mock (plain-browser development),
- *  - and later an iroh wasm client (browser remote control).
+ *  - and the web Join runtime for shared non-Browser tabs.
  */
 /** One agent session, owned by one agent tab. */
 export interface AgentHandle {

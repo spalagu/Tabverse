@@ -88,6 +88,7 @@ for (const adr of [
   "0013-browser-credentials.md",
   "0014-content-and-associations.md",
   "0015-platform-adapters-and-completeness.md",
+  "0017-remove-remote-browser.md",
 ]) {
   if (!existsSync(join(ROOT, "docs", "adr", adr))) {
     violations.push(`docs/adr/${adr} is required by the V3 architecture record`);
@@ -170,6 +171,9 @@ for (const sourceRoot of ["apps", "packages", "src", "src-tauri/src", "crates"])
     const source = readFileSync(path, "utf8");
     if (/\bProxy(?:Req|Res)\b/.test(source)) {
       violations.push(`${relative(ROOT, path)} reintroduces legacy ProxyReq/ProxyRes control frames`);
+    }
+    if (/HostNetworkGateway|RemoteHttpStream|openHttpStream|open_http_stream|__tabverse_proxy/.test(source)) {
+      violations.push(`${relative(ROOT, path)} reintroduces removed Remote Browser networking`);
     }
   }
 }

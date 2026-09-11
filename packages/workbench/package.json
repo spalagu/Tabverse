@@ -152,8 +152,6 @@
     "./files/workspace.css": "./src/files/files-workspace.css",
     "./settings-pane": "./src/SettingsPane.tsx",
     "./host-panes.css": "./src/hostPanes.css",
-    "./browser-pane": "./src/BrowserPane.tsx",
-    "./remote-browser-document": "./src/remoteBrowserDocument.ts",
     "./browser-progress": "./src/browser/progress.ts",
     "./browser-progress-bar": "./src/browser/BrowserProgressBar.tsx",
     "./browser-native-pane": "./src/browser/BrowserNativePane.tsx",

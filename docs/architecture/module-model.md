@@ -35,7 +35,7 @@ crates/tabverse-*            可复用 Rust Core
 
 `src-tauri/src/terminal_commands.rs` 持有 Terminal IPC、helper 事件缓冲、GUI channel 适配和共享源接线。终端进程与协议语义仍由 `tabverse-term` 实现，远程会话排序与权限语义仍由 `tabverse-remote` 实现。新增 Terminal 命令不得重新写回组合根。
 
-`src-tauri/src/remote_commands.rs` 持有 Remote Join IPC 和 GUI channel 适配。连接、加密传输、控制/数据流以及 Host 端授权仍由 `tabverse-remote` 实现；`context_id` 不在该适配器中参与授权判断。
+`src-tauri/src/remote_commands.rs` owns the Remote Join IPC and GUI channel adapter. `tabverse-remote` owns connections, encrypted transport, control/file streams, and Host-side authorization.
 
 `src-tauri/src/agent_commands.rs` 持有 Agent 登录、Agent Tab IPC、Runtime Supervisor 接线和共享源注册。Agent 事件与回合语义属于 `tabverse-agent`，runtime 身份和进程生命周期属于 `tabverse-runtime`；适配器不保存恢复状态，也不伪造进程恢复。
 
@@ -43,7 +43,7 @@ crates/tabverse-*            可复用 Rust Core
 
 `src-tauri/src/appearance_commands.rs` 持有窗口全屏、macOS traffic lights、主题背景、主题偏好和 webview 日志 IPC。平台调用只存在于带 target 条件的适配器分支，主题偏好仍写入 `app.db` scope。
 
-`src-tauri/src/browser_commands.rs` 是官方 Tauri/Wry Browser adapter，持有 webview 创建、导航、查找、快照、页面代理和 Browser IPC 接线。密码、cookie、userscript、网络和 Remote Browser 的产品语义仍分别属于现有专用模块与 Rust Core；Browser adapter 不引入 CEF 或自定义 Tauri runtime。
+`src-tauri/src/browser_commands.rs` is the official Tauri/Wry Browser adapter. It owns webview creation, navigation, find, snapshots, local page proxying, and Browser IPC wiring. It does not introduce CEF or a custom Tauri runtime. Browser is local-only.
 
 ## 非目标
 

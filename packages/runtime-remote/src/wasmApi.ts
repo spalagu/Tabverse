@@ -31,14 +31,7 @@ export interface WasmSession {
    * the watcher then echoes to every viewer. */
   sendClipPush(text: string): void;
   sendRpc(id: bigint, cmd: string, args: unknown): void;
-  openHttpStream(
-    contextId: string,
-    method: string,
-    url: string,
-    headers: Array<{ name: string; value: string }>
-  ): Promise<WasmHttpStream>;
   openFileStream(
-    contextId: string,
     path: string,
     offset: bigint,
     length?: bigint
@@ -50,17 +43,6 @@ export interface WasmFileStream {
   responseStart(): Promise<
     | { type: "file"; head: { path: string; name: string; mime: string; total: bigint; offset: bigint; length: bigint } }
     | { type: "error"; code: string; message: string }
-  >;
-  readResponseChunk(limit: number): Promise<Uint8Array>;
-}
-
-export interface WasmHttpStream {
-  cancel(): void;
-  writeRequestChunk(bytes: Uint8Array): Promise<void>;
-  finishRequest(): void;
-  responseStart(): Promise<
-    | { type: "response"; head: { status: number; finalUrl: string; headers: Array<{ name: string; value: string }> } }
-    | { type: "error"; error: { code: string; message: string; retryable: boolean } }
   >;
   readResponseChunk(limit: number): Promise<Uint8Array>;
 }

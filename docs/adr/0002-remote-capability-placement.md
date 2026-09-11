@@ -1,7 +1,7 @@
 # ADR-0002: Remote uses capability placement, not remote-desktop replication
 
 ## Status
-Accepted.
+Accepted for Terminal, Agent, Files, and Workbench. Browser-related decisions are superseded by ADR-0017.
 
 ## Context
 Tabverse Remote must minimize data transfer while preserving useful host capabilities. A single "host executes and remote receives pixels" model wastes bandwidth and is wrong for several feature domains.

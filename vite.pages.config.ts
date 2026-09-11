@@ -24,17 +24,6 @@ export default defineConfig({
     emptyOutDir: true,
     target: "es2022",
     assetsInlineLimit: 0,
-    rollupOptions: {
-      input: {
-        index: at("apps/join/index.html"),
-        // The service worker is its own entry: un-hashed and at the root,
-        // because its URL is its identity to the browser and its scope.
-        sw: at("apps/join/src/sw.ts"),
-      },
-      output: {
-        entryFileNames: (chunk) =>
-          chunk.name === "sw" ? "sw.js" : "assets/[name]-[hash].js",
-      },
-    },
+    rollupOptions: { input: at("apps/join/index.html") },
   },
 });

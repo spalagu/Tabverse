@@ -19,9 +19,5 @@ rand = "0.10.2"
 data-encoding = "2.11.0"
 
 [dev-dependencies]
-# The data-stream integration test builds the injected Host client in this
-# standalone crate. Production installs the same ring provider at the Tauri
-# HTTP composition root; keeping this test-only preserves that boundary.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tabverse-term = { path = "../tabverse-term" }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }

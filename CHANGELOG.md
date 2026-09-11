@@ -16,21 +16,15 @@
 
 ### Remote
 
-- 保留 iroh 端到端加密传输，控制流与大正文数据流分离。
-- Terminal 传输终端字节与控制语义，Agent 传输语义事件，Files 按需传输原始文件字节。
-- 每条数据流均要求已认证连接、有效 App share 和当前 Steer 权限。
-
-### Remote Browser
-
-- viewer 负责渲染，HTTP/HTTPS 请求经 HostNetworkGateway 从 Host 网络发出。
-- 支持 Host localhost、LAN、VPN、内部 DNS、Host 信任链、重定向、相对资源和大响应流式传输。
-- fetch、XMLHttpRequest 和 EventSource 使用独立 QUIC HTTP 数据流；正文不进入语义控制流，不使用 base64。
-- 每条流和每次重定向重新检查权限；切换标签、AbortSignal 或连接关闭会取消请求。
-- Remote Browser 使用独立 cookie jar，不同步 Host Browser 的 cookie、localStorage、DOM 或历史。
+- Retains end-to-end encrypted iroh transport and separates semantic control from raw file data.
+- Terminal carries terminal bytes and control semantics, Agent carries structured events, and Files transfers requested raw bytes.
+- File streams require an authenticated connection and a current App-share viewer.
+- Browser is local-only. Join displays Browser rows as unavailable and carries no Browser pixels, state, or network traffic.
 
 ### 架构清理
 
 - 不包含 CEF、自定义 Tauri fork、Resident Runtime、Plugin Kernel 或旧 ProxyReq/ProxyRes。
+- Remote Browser document rewriting, HostNetworkGateway, and HTTP data streams are removed.
 - macOS、Windows 和 Linux 产品语义保持一致，平台机制留在窄 adapter。
 
 ### 分发
