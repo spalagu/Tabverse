@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Terminal } from "@xterm/xterm";
-import { installMacKeyConventions } from "./keys";
+import { installMacKeyConventions } from "@tabverse/workbench/terminal/keys";
 
 /** Stub terminal: CSI handler registry + the custom key handler hook. */
 function stubTerm() {

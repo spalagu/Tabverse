@@ -646,7 +646,7 @@ export function BrowserView({ tab, active }: Props) {
     currentUrlRef.current = url;
     useStore.getState().setTabUrl(tab.id, url);
     // No webview in the browser demo means no page-load callbacks, so the
-    // demo's stand-in engine speaks for them (browserProgress.ts). Without
+    // demo's stand-in engine speaks for them (Workbench browser progress). Without
     // this the load bar would be invisible in the only channel this project
     // can photograph.
     if (!isTauri) playDemoNavigation(tab.id);

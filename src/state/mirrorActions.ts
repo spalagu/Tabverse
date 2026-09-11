@@ -46,7 +46,7 @@ export function resetMirrorStore(): void {
   mirror = useStore;
 }
 
-/** The store replays land in, for mirrorStore.ts's snapshot landing. */
+/** The store replays land in for the remote runtime's snapshot handling. */
 export function mirrorSetState(patch: Partial<AppStore>): void {
   mirror.setState(patch);
 }

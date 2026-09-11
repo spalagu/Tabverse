@@ -17,7 +17,7 @@ vi.mock("../Confirm", () => ({
 }));
 
 type Tree = typeof import("./FileTree");
-type Filter = typeof import("./treeFilter");
+type Filter = typeof import("@tabverse/workbench/files/tree-filter");
 type Strings = typeof import("../../strings");
 
 /** /w1: sdk/, sub/, a.txt, c.txt; sdk/ holds inner-dir/; sub/ holds inner.txt. */
@@ -89,7 +89,7 @@ async function fresh(): Promise<{
       mocks.invoke(cmd, args),
   };
   const tree = await import("./FileTree");
-  const filter = await import("./treeFilter");
+  const filter = await import("@tabverse/workbench/files/tree-filter");
   const strings = await import("../../strings");
   // Same module graph as FileTree, so the store writes the tree makes are
   // the store this test reads.

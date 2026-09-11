@@ -2,7 +2,9 @@ import { createElement } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CompletionPopup } from "./CompletionPopup";
+import {
+  TerminalCompletionPopup as CompletionPopup,
+} from "@tabverse/workbench/terminal/completion-popup";
 import { STR } from "../../strings";
 import type { CompletionOffer } from "../../term/completionSpec";
 

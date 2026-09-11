@@ -93,8 +93,9 @@ vi.mock("../term/font", () => ({
   setTerminalFont: () => {},
   setTerminalLigatures: () => {},
 }));
-vi.mock("../term/keys", () => ({ installMacKeyConventions: () => {} }));
-vi.mock("../term/scaleToFit", () => ({ scheduleScaleToFit: () => {} }));
+vi.mock("@tabverse/workbench/terminal/keys", () => ({
+  installMacKeyConventions: () => {},
+}));
 
 const tab: Tab = {
   id: "remote-test-tab",

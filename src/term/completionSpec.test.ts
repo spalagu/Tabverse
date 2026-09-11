@@ -9,7 +9,7 @@ import {
   resetCompletionSpecForTest,
   snapshotVersion,
 } from "./completionSpec";
-import { bracketedPaste } from "./pasteGuard";
+import { bracketedPaste } from "@tabverse/workbench/terminal/paste-guard";
 
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));

@@ -15,7 +15,7 @@ import {
   spawnCwd,
   stripTerminalEscapeSequences,
   termScope,
-} from "./sessionMemory";
+} from "@tabverse/workbench/terminal/session-memory";
 
 const TAB = "11111111-2222-4333-8444-555555555555";
 

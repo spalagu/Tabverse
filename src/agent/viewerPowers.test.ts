@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { describePowers, viewerPowers } from "./viewerPowers";
+import {
+  describePowers,
+  viewerPowers,
+} from "@tabverse/workbench/agent-viewer-powers";
 
 describe("what a viewer may do", () => {
   it("separates steering from approving", () => {

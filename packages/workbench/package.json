@@ -7,9 +7,7 @@
   "dependencies": {
     "@tabverse/runtime-contracts": "file:../runtime-contracts",
     "dompurify": "^3.4.12",
-    "marked": "^18.0.7",
-    "postcss": "8.5.25",
-    "postcss-value-parser": "4.2.0"
+    "marked": "^18.0.7"
   },
   "peerDependencies": {
     "@xterm/addon-search": "^0.15.0",

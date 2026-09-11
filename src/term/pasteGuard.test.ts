@@ -8,7 +8,7 @@ import {
   guardPaste,
   needsConfirm,
   type PasteGuardPorts,
-} from "./pasteGuard";
+} from "@tabverse/workbench/terminal/paste-guard";
 
 
 /** A ports recorder: everything the guard did, and nothing else. */

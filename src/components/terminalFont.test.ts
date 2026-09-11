@@ -109,7 +109,9 @@ vi.mock("@xterm/addon-webgl", () => ({
 }));
 // The key conventions negotiate with a real xterm parser; they have nothing
 // to do with fonts.
-vi.mock("../term/keys", () => ({ installMacKeyConventions: () => {} }));
+vi.mock("@tabverse/workbench/terminal/keys", () => ({
+  installMacKeyConventions: () => {},
+}));
 // The screen-memory doorway would reach for storage on mount and on unmount.
 vi.mock("../persist", () => ({
   loadState: () => Promise.resolve(null),

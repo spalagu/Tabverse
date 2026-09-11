@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyRemote, shortHost } from "./remoteState";
+import { classifyRemote, shortHost } from "@tabverse/workbench/terminal/remote-state";
 
 describe("classifyRemote", () => {
   it.each([

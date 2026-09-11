@@ -2,7 +2,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { Terminal } from "@xterm/xterm";
 import { ImageAddon } from "@xterm/addon-image";
 import { SerializeAddon } from "@xterm/addon-serialize";
-import { buildTermMemory, hasVisibleContent } from "../components/terminal/sessionMemory";
+import {
+  buildTermMemory,
+  hasVisibleContent,
+} from "@tabverse/workbench/terminal/session-memory";
 
 
 /** A 1x1 transparent PNG (68 bytes), as the wire would carry it. */

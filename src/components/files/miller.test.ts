@@ -5,7 +5,7 @@ import {
   millerAt,
   millerKey,
   millerPush,
-} from "./miller";
+} from "@tabverse/workbench/files/miller";
 
 
 const e = (name: string, isDir = false): FsEntry => ({

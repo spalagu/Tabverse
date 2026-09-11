@@ -7,7 +7,7 @@ import {
   lastPageStart,
   offsetDigits,
   parseOffsetInput,
-} from "./hex";
+} from "@tabverse/workbench/files/hex";
 
 describe("hexRows", () => {
   it("formats a full 16-byte row with the classic 8+8 grouping", () => {

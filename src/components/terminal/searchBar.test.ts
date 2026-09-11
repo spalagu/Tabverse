@@ -9,7 +9,7 @@ import {
   rememberSearch,
   resetSearchHistoryForTest,
   searchHistory,
-} from "../../term/searchHistory";
+} from "@tabverse/workbench/terminal/search-history";
 import { SearchBar } from "./SearchBar";
 
 

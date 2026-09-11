@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Terminal } from "@xterm/xterm";
-import { BlockTracker } from "./blocks";
+import { BlockTracker } from "@tabverse/workbench/terminal/blocks";
 
 /**
  * A stub terminal just big enough for BlockTracker: OSC dispatch, markers
