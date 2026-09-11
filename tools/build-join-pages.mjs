@@ -3,8 +3,7 @@
  * Post-build check for the MULTI-FILE join page (Pages target).
  *
  * The build itself is all vite's (vite.pages.config.ts): assets are emitted
- * with content hashes, the wasm rides wasm-bindgen's own URL path, the
- * service worker lands un-hashed at the root. What vite cannot promise is
+ * with content hashes and the wasm rides wasm-bindgen's own URL path. What vite cannot promise is
  * that the pieces the deploy depends on actually came out — a missing wasm
  * or a hashless filename would surface as a broken page (or an uncacheable
  * one) only after publish. This script fails the build instead.
@@ -36,10 +35,9 @@ const fail = (msg) => {
 
 if (!existsSync(out)) fail(`${outName}/ missing — run the Vite Pages build first`);
 
-// The un-hashed shell: entry, worker, manifest, icons.
+// The un-hashed shell: entry, manifest, icons.
 for (const f of [
   "index.html",
-  "sw.js",
   "manifest.webmanifest",
   "icons/icon-192.png",
   "icons/icon-512.png",
@@ -47,8 +45,7 @@ for (const f of [
   if (!existsSync(join(out, f))) fail(`missing ${f}`);
 }
 
-// Exactly one wasm asset, content-hashed: the hash in the filename is the
-// whole cache-invalidation story (sw.js caches assets/* forever).
+// Exactly one wasm asset with a content hash in its filename.
 const assets = readdirSync(join(out, "assets"));
 const wasm = assets.filter((f) => f.endsWith(".wasm"));
 if (wasm.length !== 1) fail(`expected exactly one .wasm asset, got [${wasm}]`);
@@ -118,7 +115,7 @@ if (!stamped.includes(`tabverse-build" content="${buildId}`))
 writeFileSync(join(out, "index.html"), stamped);
 
 const size = (f) => statSync(join(out, f)).size;
-const total = ["index.html", "sw.js", ...assets.map((f) => join("assets", f))]
+const total = ["index.html", ...assets.map((f) => join("assets", f))]
   .map(size)
   .reduce((a, b) => a + b, 0);
 console.log(

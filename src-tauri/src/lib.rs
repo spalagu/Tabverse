@@ -601,11 +601,8 @@ pub fn run() {
         std::process::exit(code);
     }
     http::ensure_crypto_provider();
-    let remote_network = tabverse_network::HostNetworkGateway::new(
-        http::build_remote_browser().expect("build Remote Browser Host HTTP client"),
-    );
     let fs = Arc::new(FsBackend::new());
-    let hub = RemoteHub::with_data_sources(remote_network, Arc::new(RemoteFsSource(fs.clone())));
+    let hub = RemoteHub::with_file_source(Arc::new(RemoteFsSource(fs.clone())));
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())

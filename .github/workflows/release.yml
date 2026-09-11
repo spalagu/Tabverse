@@ -219,7 +219,7 @@ jobs:
           elif [ "$version" = "0.1.0" ]; then
             cat >> release-notes.md <<'EOF'
 
-          Tabverse V3 将桌面工作区、可恢复 Runtime、统一内容系统和语义 Remote 能力整合到一套跨平台架构中。Remote Browser 在 viewer 端渲染，并通过 Host 网络访问 localhost、LAN、VPN、内部 DNS 和 Host 信任的 HTTPS；不会同步 Host Browser 的 cookie、localStorage、DOM 或历史。
+          Tabverse V3 combines a desktop workbench, recoverable runtimes, a unified content system, and semantic Remote capabilities. Browser is local-only; Join supports Terminal, Agent, Files, Settings, and Whole-App semantic actions without carrying Browser pixels, state, or network traffic.
 
           ### macOS 安装提示
 

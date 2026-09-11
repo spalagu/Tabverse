@@ -1,7 +1,6 @@
 import ReactDOM from "react-dom/client";
 import { applyThemeVars } from "@tabverse/workbench/theme";
 import { App } from "./App";
-import { waitForHostNetworkWorker } from "./serviceWorker";
 import "@xterm/xterm/css/xterm.css";
 import "@tabverse/workbench/sidebar.css";
 import "@tabverse/workbench/new-tab.css";
@@ -41,7 +40,7 @@ import "./join.css";
  * The no-install remote-control page.
  *
  * One React source, two artifacts: the multi-file Pages site (wasm fetched
- * by content-hashed URL, service-worker cached) and the single-file offline
+ * by content-hashed URL) and the single-file offline
  * fallback (everything inlined, works from disk). Connections go through
  * iroh's public relays (browsers cannot send UDP) and stay end-to-end
  * encrypted, so the relay only ever sees ciphertext.
@@ -50,21 +49,4 @@ import "./join.css";
 applyThemeVars(document.documentElement, "dark");
 
 const root = ReactDOM.createRoot(document.getElementById("root")!);
-
-async function start(): Promise<void> {
-  try {
-    if (__JOIN_PAGES_BUILD__) await waitForHostNetworkWorker();
-    root.render(<App />);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : "Unknown worker error";
-    root.render(
-      <main className="join-startup-error" role="alert">
-        <h1>Tabverse Join could not start</h1>
-        <p>{detail}</p>
-        <p>Reload this page. If the problem continues, use a current Chromium browser.</p>
-      </main>,
-    );
-  }
-}
-
-void start();
+root.render(<App />);

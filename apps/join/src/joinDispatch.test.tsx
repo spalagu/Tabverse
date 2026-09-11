@@ -16,11 +16,9 @@ const h = vi.hoisted(() => {
   const events: Array<(json: string) => void> = [];
   const tickets: string[] = [];
   const calls: Array<{ fn: string; args: unknown[] }> = [];
-  const httpStarts: Array<(value: unknown) => void> = [];
-  const httpBodies: Uint8Array[][] = [];
   const fileStarts: Array<(value: unknown) => void> = [];
   const fileBodies: Uint8Array[][] = [];
-  return { termInstances, onDataHandlers, events, tickets, calls, httpStarts, httpBodies, fileStarts, fileBodies };
+  return { termInstances, onDataHandlers, events, tickets, calls, fileStarts, fileBodies };
 });
 
 vi.mock("@tabverse/runtime-remote/wasm-loader", () => ({
@@ -49,21 +47,8 @@ vi.mock("@tabverse/runtime-remote/wasm-loader", () => ({
           h.calls.push({ fn: "sendRpc", args: [id, cmd, args] }),
         sendClipPush: (text: string) =>
           h.calls.push({ fn: "sendClipPush", args: [text] }),
-        openHttpStream: async (contextId: string, method: string, url: string, headers: unknown[]) => {
-          h.calls.push({ fn: "openHttpStream", args: [contextId, method, url, headers] });
-          const bodyIndex = h.httpBodies.length;
-          h.httpBodies.push([]);
-          const start = new Promise((resolve) => h.httpStarts.push(resolve));
-          return {
-            cancel: () => h.calls.push({ fn: "cancelHttpStream", args: [bodyIndex] }),
-            writeRequestChunk: async (bytes: Uint8Array) => { h.httpBodies[bodyIndex].push(bytes); },
-            finishRequest: () => {},
-            responseStart: () => start,
-            readResponseChunk: async () => h.httpBodies[bodyIndex].shift() ?? new Uint8Array(),
-          };
-        },
-        openFileStream: async (contextId: string, path: string, offset: bigint, length?: bigint) => {
-          h.calls.push({ fn: "openFileStream", args: [contextId, path, offset, length] });
+        openFileStream: async (path: string, offset: bigint, length?: bigint) => {
+          h.calls.push({ fn: "openFileStream", args: [path, offset, length] });
           const bodyIndex = h.fileBodies.length;
           h.fileBodies.push([]);
           const start = new Promise((resolve) => h.fileStarts.push(resolve));
@@ -174,8 +159,6 @@ beforeEach(() => {
   h.events.length = 0;
   h.tickets.length = 0;
   h.calls.length = 0;
-  h.httpStarts.length = 0;
-  h.httpBodies.length = 0;
   h.fileStarts.length = 0;
   h.fileBodies.length = 0;
   location.hash = "#tabv-test-ticket";
@@ -582,7 +565,7 @@ describe("join page renderer dispatch", () => {
     });
     await flush();
     expect(sent("openFileStream")).toEqual([
-      { fn: "openFileStream", args: ["f1", "/work/notes.txt", 0n, 4n * 1024n * 1024n] },
+      { fn: "openFileStream", args: ["/work/notes.txt", 0n, 4n * 1024n * 1024n] },
     ]);
     expect(
       sent("sendRpc").some((call) => call.args[1] === "fs_read"),
@@ -614,7 +597,7 @@ describe("join page renderer dispatch", () => {
     expect(sent("cancelFileStream").at(-1)?.args).toEqual(["/work/notes.txt"]);
   });
 
-  it("a fronting browser tab mounts the proxied pane over an independent HTTP stream", async () => {
+  it("a fronting browser tab is explicitly unavailable through Remote", async () => {
     const send = await mountAppShare(false);
     // The host fronts a browser row carrying its address.
     await send({
@@ -630,36 +613,8 @@ describe("join page renderer dispatch", () => {
     });
     await flush();
 
-    const reqs = sent("openHttpStream");
-    expect(reqs).toHaveLength(1);
-    expect(reqs[0].args.slice(0, 3)).toEqual([
-      "b1", "GET", "http://intranet.local/wiki/Home",
-    ]);
-
-    // The host's answer lands and the mirrored document is on screen;
-    // the placeholder the other tab kinds keep is gone.
-    h.httpBodies[0].push(new TextEncoder().encode(
-      "<html><head><title>Wiki</title></head><body><h1>Intranet wiki</h1></body></html>"
-    ));
-    h.httpStarts[0]({ type: "response", head: { status: 200, finalUrl: "http://intranet.local/wiki/Home", headers: [{ name: "content-type", value: "text/html" }] } });
-    await flush();
-    const frame = host.querySelector(".browser-pane-frame");
-    expect(frame).not.toBeNull();
-    expect(frame!.getAttribute("srcdoc")).toContain("<h1>Intranet wiki</h1>");
-    expect(frame!.getAttribute("srcdoc")).toContain(
-      '<base href="/__tabverse_proxy/b1/http/intranet.local/wiki/">'
+    expect(host.querySelector(".app-share-content")?.textContent).toContain(
+      "Browser tabs are not available through Remote."
     );
-    expect(host.querySelector(".app-share-content")).toBeNull();
-
-    // A data-stream failure flips a re-asked pane to the link.
-    await send({ type: "actionApplied", name: "activateTab", args: "t1" });
-    await send({ type: "actionApplied", name: "activateTab", args: "b1" });
-    await flush();
-    const second = sent("openHttpStream")[1];
-    expect(second).toBeDefined();
-    h.httpStarts[1]({ type: "error", error: { code: "denied", message: "the request named no forwardable host", retryable: false } });
-    await flush();
-    expect(host.querySelector(".browser-pane-unmirrored")).not.toBeNull();
-    expect(host.querySelector(".browser-pane-frame")).toBeNull();
   });
 });

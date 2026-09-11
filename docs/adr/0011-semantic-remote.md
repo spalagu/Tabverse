@@ -7,7 +7,7 @@
 Remote 要在低带宽下操作 Host 工作，同时保留功能自身的状态边界。
 
 ## 决策
-Terminal 传 PTY 字节，Agent 传语义事件，Files 传元数据和按需原始内容，Workbench 传 snapshot/action，Browser 在 Remote 渲染并使用 Host 网络。
+Terminal carries PTY bytes, Agent carries semantic events, Files carries metadata and requested raw content, and Workbench carries snapshots/actions. Browser is local-only and unavailable on Join.
 
 ## 备选与拒绝原因
 - 默认截图或视频流：带宽高，丢失结构化交互。

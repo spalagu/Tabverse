@@ -14,7 +14,6 @@ const appSnapshot = {
 async function openReplay(page: Page) {
   await page.goto("?replay");
   await page.waitForFunction(() => typeof (window as Record<string, unknown>).__replayFrame === "function");
-  expect(await page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
   await page.evaluate((snapshot) => {
     const replay = (window as unknown as { __replayFrame: (frame: unknown) => void }).__replayFrame;
     replay({ type: "welcome", proto: 2, tabTitle: "Shared workspace", cols: 80, rows: 24, tabType: "app" });
@@ -30,49 +29,6 @@ async function replayActions(page: Page) {
     return replayWindow.__replayActions as Array<{ name: string; args: unknown }>;
   });
 }
-
-test("the Pages Service Worker controls the scoped Host-network URL", async ({ page }) => {
-  await openReplay(page);
-
-  const result = await page.evaluate(async () => {
-    const response = await fetch(
-      "/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/probe",
-    );
-    return { status: response.status, body: await response.text() };
-  });
-  expect(result.status).toBe(502);
-  expect(result.body).toContain("session is not connected");
-
-  const subresources = await page.evaluate(() =>
-    new Promise<{ background: string; script: string | undefined; image: boolean }>((resolve) => {
-      const frame = document.createElement("iframe");
-      const timer = window.setTimeout(
-        () => resolve({ background: "timeout", script: undefined, image: false }),
-        3_000,
-      );
-      frame.onload = () => {
-        window.clearTimeout(timer);
-        const body = frame.contentDocument?.body;
-        const image = frame.contentDocument?.querySelector("img");
-        resolve({
-          background: body === undefined ? "missing" : getComputedStyle(body).backgroundColor,
-          script: frame.contentDocument?.documentElement.dataset.hostScript,
-          image: image?.complete === true && image.naturalWidth === 1,
-        });
-      };
-      frame.srcdoc =
-        '<link rel="stylesheet" href="/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/page.css">' +
-        '<script src="/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/page.js"></script>' +
-        '<img src="/Tabverse/join/__tabverse_proxy/browser-test/http/intranet.local/pixel.svg">';
-      document.body.appendChild(frame);
-    }),
-  );
-  expect(subresources).toEqual({
-    background: "rgb(1, 2, 3)",
-    script: "loaded",
-    image: true,
-  });
-});
 
 test("renders the same replayed app shell across desktop and mobile widths", async ({ page }, testInfo) => {
   await openReplay(page);
@@ -101,7 +57,9 @@ test("renders the same replayed app shell across desktop and mobile widths", asy
   if (testInfo.project.name === "mobile-chromium") {
     await page.getByRole("tab", { name: "Project docs" }).click();
     await expect(page.getByRole("tab", { name: "Project docs" })).toHaveAttribute("aria-selected", "true");
-    await expect(page.locator(".browser-pane")).toBeVisible();
+    await expect(page.locator(".app-share-content")).toContainText(
+      "Browser tabs are not available through Remote."
+    );
     await expect(page.getByRole("button", { name: "Tabs" })).toHaveAttribute("aria-expanded", "false");
     await page.getByRole("button", { name: "Tabs" }).click();
   }

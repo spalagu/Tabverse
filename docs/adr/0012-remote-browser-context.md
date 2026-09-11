@@ -1,7 +1,7 @@
 # ADR-0012：Remote Browser 在 Remote 渲染并使用 Host 网络
 
-## 状态
-已接受。
+## Status
+Superseded by ADR-0017. The implementation described below has been removed.
 
 ## 需求与上下文
 Remote 设备需要访问 Host localhost、LAN、VPN、内部 DNS 和 Host 信任的 HTTPS，但不应取得 Host Browser 会话。

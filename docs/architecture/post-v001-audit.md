@@ -17,10 +17,10 @@ Every meaningful change after `v0.0.1` must be classified before it is forward-p
 | Resident Runtime V1 | SUPERSEDED by Runtime V3 | Keep GUI-independent task lifetime requirement; replace process/service/lifecycle model. |
 | Tab state versioning/migration | REIMPLEMENT | Good requirement; keep explicit state versions and non-destructive migration. |
 | Remote semantic snapshot/action evolution | PORT/REIMPLEMENT selectively | Fits V3 low-bandwidth Remote philosophy. |
-| Remote Browser ProxyReq/ProxyRes | REIMPLEMENT | Correct host-network direction; old HTTP/base64/body-limit implementation is only a prototype. |
+| Remote Browser and ProxyReq/ProxyRes | DROP | Browser is local-only; Join does not render or proxy Browser tabs. |
 | CEF / runtime-cef / custom Tauri fork | DROP | Product testing preferred Wry; dual runtime complexity has no V3 value. |
 | CEF packaging/helper/release fixes | DROP | Only serve abandoned CEF architecture. |
-| Generic browser network broker / custom DNS/DoH | DROP unless independently required | V3 uses native Wry networking locally and HostNetworkGateway for Remote. |
+| Generic remote browser network broker | DROP | Local Browser networking remains in the Wry adapter; Remote has no Browser network path. |
 | Credential persistence requirement | PORT requirement, REIMPLEMENT mechanism | Password save/fill is core; V3 uses CredentialVault + OS-backed master key. |
 | Broad file association coverage | PORT product intent, REIMPLEMENT source of truth | One-App capability is core; generate associations from ContentTypeCatalog. |
 | FS/session migration and race fixes | REVIEW individually | Likely correctness value independent from abandoned architecture. |
@@ -31,7 +31,7 @@ Every meaningful change after `v0.0.1` must be classified before it is forward-p
 
 - `7ff273978f78b5195bc8d7579a3aec41f934a9b7` — large Plugin Kernel + Resident architecture change: **REIMPLEMENT/SUPERSEDE**, do not cherry-pick wholesale.
 - `58ad06d090ce54b13ef8f11c0fcc5e45d18b1be8` — `v0.0.2` 版本号、Resident 验收和对应发布调整：**DROP/SUPERSEDED**。V3 从 `v0.0.1` 建立新基线，不继承 Resident 交付模型；通用发布源检查在最终 V3 发布流水线中按现状重新实现。
-- `f6eeb2b2852128a2bdeaa2e9ee3d26f00b2e32a1` — Wry/CEF 双 Runtime、Network Broker、Remote Browser 和 RC 验证的大型混合提交：**DROP CEF 与双 Runtime；REIMPLEMENT Remote Browser；REVIEW/PORT 通用发布验证**。不得整体 cherry-pick；V3 已用 Wry、HostNetworkGateway、独立数据流和隔离 Remote Browser renderer 重建有效需求。
+- `f6eeb2b2852128a2bdeaa2e9ee3d26f00b2e32a1` mixed Wry/CEF runtimes, a network broker, Remote Browser, and RC verification. **DROP CEF, dual runtimes, and Remote Browser; REVIEW/PORT only generally useful release verification.** Never cherry-pick the commit wholesale.
 - `7c09ccfbc366c907b75b4ba0f91face043b75bf8` — CEF Release 安全 mutation 冷启动顺序：**SUPERSEDED**。CEF 与旧 runtime contract 已移除；若 V3 最终发布流程存在同类 mutation，只通过当前构建产物测试重新证明。
 - `da097e13bca675e792a85f5f7305cddf9b24866d` — CEF helper installation fix: **DROP** because CEF is dropped.
 - `8150b32bda59e8d7d062afe1cc5789dff422ad71` — portable release performance parser: **REVIEW/PORT** if still relevant to the Wry-only release pipeline.

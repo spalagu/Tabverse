@@ -22,7 +22,6 @@ import {
 import { STR, plural } from "@tabverse/workbench/strings";
 import type { TermSink } from "@tabverse/workbench/terminal/viewer";
 import type { ReadMeta, RemoteFileReader } from "@tabverse/workbench/files-pane";
-import { transformRemoteResponse } from "@tabverse/workbench/remote-browser-document";
 import { Toolbar } from "./Toolbar";
 import { TOOLBAR_BYTES, applyStickyCtrl, type ToolbarKey } from "./toolbarKeys";
 import { ticketFromHash } from "./ticket";
@@ -58,15 +57,6 @@ import {
   isAppFrame,
   type AppFrameSinks,
 } from "@tabverse/remote-client/app-frame";
-import {
-  createProxyClient,
-  installProxyFetchPatch,
-  proxyPathRoot,
-  proxyUrlFor,
-  proxyRouteFromUrl,
-  type ProxyClient,
-} from "@tabverse/remote-client/proxy-fetch";
-import { relayProxyResponse } from "./proxyStreamBridge";
 
 /** The wasm client has no dial timeout of its own (the desktop library uses
  * 20s); race the join against this so a dead relay counts as an unexpected
@@ -176,29 +166,6 @@ function JoinApp() {
    * would go stale until something else re-rendered the page. */
   const mirrorActiveId = useRemoteMirrorStore((s) => s.activeTabId);
 
-  const proxy = useMemo<ProxyClient>(
-    () =>
-      createProxyClient(
-        (contextId, method, url, headers) => {
-          const session = inst.session;
-          if (session === null) return Promise.reject(new Error("the session is not connected"));
-          return session.openHttpStream(contextId, method, url, headers);
-        },
-        () => useRemoteMirrorStore.getState().activeTabId ?? "remote-browser",
-      ),
-    [inst]
-  );
-
-  const resolveProxyUrl = useCallback(
-    (target: string, contextId?: string) =>
-      proxyUrlFor(target, import.meta.env.BASE_URL, contextId),
-    [],
-  );
-  const networkProxyRoot = useMemo(
-    () => new URL(proxyPathRoot(import.meta.env.BASE_URL), location.href).href,
-    [],
-  );
-
   const appSinks = useMemo<AppFrameSinks>(() => mirrorSinks(), []);
 
   const appChannel = useMemo(
@@ -209,18 +176,11 @@ function JoinApp() {
     [inst]
   );
 
-  /** The pane's fetch handle — the client above, nothing more. */
-  const fetchViaHost = useCallback(
-    (url: string, init?: RequestInit) => proxy.requestViaProxy(url, init),
-    [proxy]
-  );
-
   const readFileViaHost = useCallback<RemoteFileReader>(async (path, signal) => {
     const session = inst.session;
     if (session === null) throw new Error("the session is not connected");
-    const contextId = useRemoteMirrorStore.getState().activeTabId ?? "remote-files";
     const previewLimit = 4n * 1024n * 1024n;
-    const stream = await session.openFileStream(contextId, path, 0n, previewLimit);
+    const stream = await session.openFileStream(path, 0n, previewLimit);
     const cancel = () => stream.cancel();
     signal.addEventListener("abort", cancel, { once: true });
     try {
@@ -307,64 +267,6 @@ function JoinApp() {
       : null;
   }, [activeMirrorTab, filesOpenPath]);
 
-  useEffect(() => {
-    if (!("serviceWorker" in navigator)) return;
-    const onMessage = (event: MessageEvent) => {
-      const d = event.data as {
-        type?: string;
-        url?: string;
-        method?: string;
-        headers?: [string, string][];
-        hasBody?: boolean;
-      };
-      const url = d?.url;
-      if (d?.type !== "tabverse-proxy-fetch" || typeof url !== "string") return;
-      const port = (event as MessageEvent & { ports: MessagePort[] }).ports[0];
-      if (port === undefined) return;
-      void (async () => {
-        try {
-          const route = proxyRouteFromUrl(new URL(url));
-          if (route === null) throw new Error("not a proxy endpoint url");
-          await relayProxyResponse(
-            port,
-            route.target,
-            (requestUrl, init) =>
-              proxy
-                .requestViaProxy(requestUrl, init, route.contextId ?? undefined)
-                .then((response) =>
-                  transformRemoteResponse(
-                    response,
-                    requestUrl,
-                    resolveProxyUrl,
-                    route.contextId ?? undefined,
-                    networkProxyRoot,
-                  ),
-                ),
-            {
-              method: d.method ?? "GET",
-              headers: d.headers ?? [],
-              hasBody: d.hasBody ?? false,
-            },
-          );
-        } catch (error) {
-          port.postMessage({
-            type: "error",
-            message: error instanceof Error ? error.message : "proxy failed",
-          });
-        } finally {
-          port.close();
-        }
-      })();
-    };
-    navigator.serviceWorker.addEventListener("message", onMessage);
-    return () => navigator.serviceWorker.removeEventListener("message", onMessage);
-  }, [networkProxyRoot, proxy, resolveProxyUrl]);
-
-  useEffect(() => {
-    if (!connected) return;
-    return installProxyFetchPatch(proxy);
-  }, [connected, proxy]);
-
   const [ctrlArmed, setCtrlArmed] = useState(false);
 
   useVisualViewportHeight();
@@ -399,18 +301,15 @@ function JoinApp() {
     [inst]
   );
 
-  /** Release the live session without touching the page chrome. Proxy
-   * waiters go with it: a pane mid-fetch surfaces the drop as an error
-   * instead of riding out its own budget. */
+  /** Release the live session without touching the page chrome. */
   const dropSession = useCallback(() => {
     if (inst.pingTimer) window.clearInterval(inst.pingTimer);
     inst.pingTimer = 0;
     inst.session?.leave();
     inst.session = null;
-    proxy.failAll("the session ended");
     appChannel.failAll("the session ended");
     setConnected(false);
-  }, [appChannel, inst, proxy]);
+  }, [appChannel, inst]);
   const cancelRetry = useCallback(() => {
     if (inst.retryTimer) window.clearTimeout(inst.retryTimer);
     inst.retryTimer = 0;
@@ -482,8 +381,7 @@ function JoinApp() {
       // Every frame goes through the same fold the app's RemoteView uses;
       // it collects what an agent transcript needs and ignores the rest.
       // The app family first: its frames never reach the terminal/agent
-      // branches below, which never see one. Browser HTTP uses independent
-      // QUIC data streams and therefore never enters this control dispatcher.
+      // branches below, which never see one.
       if (isAppFrame(msg)) {
         if (!appChannel.consume(msg as Record<string, unknown>)) {
           dispatchAppFrame(msg, appSinks);
@@ -562,7 +460,7 @@ function JoinApp() {
           break;
       }
     },
-    [appChannel, appSinks, inst, proxy, scheduleReconnect, setStatusLine, teardown, toTerm]
+    [appChannel, appSinks, inst, scheduleReconnect, setStatusLine, teardown, toTerm]
   );
 
   const handleRef = useRef(handle);
@@ -837,11 +735,6 @@ function JoinApp() {
       readFile: readFileViaHost,
     },
     settings: { rpc: appChannel.rpc, readOnly },
-    browser: {
-      fetchViaHost,
-      resolveProxyUrl,
-      networkProxyRoot,
-    },
   };
 
   const directShareTab: RemoteWorkbenchTabModel | null =

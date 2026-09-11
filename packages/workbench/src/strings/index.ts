@@ -834,18 +834,7 @@ export const STR = {
       connectingRelay: "Connecting through relay…",
       connected: "Connected",
       appShareLive: "App share — the host's workspace is mirrored",
-      browserPane: {
-        loading: "Loading through the host's network…",
-        mirroredChip:
-          "Loaded through the host's network",
-        frameTitle: (p: { url: string }) => `Mirrored page ${p.url}`,
-        unmirroredLabel: "Not mirrored — loads independently",
-        unmirroredWhy: "The host's proxy could not fetch this page.",
-        unmirroredStatus: (p: { status: string }) =>
-          `The host's proxy answered ${p.status}.`,
-        unmirroredType: "The host fetched a page that is not an HTML document.",
-        openOriginal: "Open the original page",
-      },
+      browserUnavailable: "Browser tabs are not available through Remote.",
       pasteToBegin: "Paste a ticket to begin",
       fit: "Fit",
       fitPercent: (p: { percent: number }) => `Fit ${p.percent}%`,
