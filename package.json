@@ -1,7 +1,7 @@
 {
   "name": "tabverse",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "Apache-2.0",
   "description": "A cross-platform workspace for terminals, files, the web, and shareable sessions.",
   "homepage": "https://github.com/spalagu/Tabverse#readme",

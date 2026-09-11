@@ -232,6 +232,14 @@ jobs:
           else
             cat >> release-notes.md <<'EOF'
           This release contains the changes and new features collected since the previous Tabverse release. The generated changelog below links every included pull request and commit.
+
+          ### macOS installation
+
+          macOS DMGs are ad-hoc signed. They do not use an Apple Developer ID and are not notarized. On first launch, use Finder's Open command or allow only Tabverse in System Settings → Privacy & Security. Do not disable Gatekeeper globally. See `distribution.md` in this release for detailed steps.
+
+          ### Artifact verification
+
+          Download the installer matching the device architecture and verify it with this release's `SHA256SUMS` file.
           EOF
           fi
       - name: Create or update release
