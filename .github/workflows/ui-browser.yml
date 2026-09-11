@@ -19,13 +19,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Export isolated review dependencies
-        run: tar -czf "${{ runner.temp }}/tabverse-dependencies.tar.gz" node_modules
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: sidebar-review-dependencies
-          path: ${{ runner.temp }}/tabverse-dependencies.tar.gz
-          retention-days: 1
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
       - if: ${{ !cancelled() }}

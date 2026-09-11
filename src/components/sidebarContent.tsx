@@ -18,10 +18,12 @@ export function TabRowContent({
   tab,
   titleSlot,
   subtitleSlot,
+  deviationHint,
 }: {
   tab: Tab;
   titleSlot?: ReactNode;
   subtitleSlot?: ReactNode;
+  deviationHint?: string;
 }) {
   const Icon = TAB_ICONS[tab.type];
   const favicon = useFavicon(
@@ -49,7 +51,7 @@ export function TabRowContent({
       favicon={favicon}
       titleSlot={titleSlot}
       subtitleSlot={subtitleSlot}
-      deviationHint={STR.common.sidebar.deviationHint}
+      deviationHint={deviationHint ?? STR.common.sidebar.deviationHint}
       attentionHint={STR.common.sidebar.attentionHint}
       broadcastHint={STR.common.sidebar.broadcastHint}
       broadcasting={broadcasting}
