@@ -2719,9 +2719,14 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
 
     setSidebarPeeking: (on) => {
       const previous = get().sidebarPeeking;
+      // `sidebarPeeking` means the unpinned sidebar is floating over content.
+      // Pointer enter/leave events also fire on the pinned sidebar; accepting
+      // those events would make snapshot cleanup believe a floating overlay
+      // still owns the Browser page after a folder preview has closed.
+      const peeking = on && !get().sidebarPinned;
       set((s) => ({
-        sidebarPeeking: on,
-        ...(!on && s.folderPreviewGroupId === null && s.pageFreeze !== null
+        sidebarPeeking: peeking,
+        ...(!peeking && s.folderPreviewGroupId === null && s.pageFreeze !== null
           ? { pageFreeze: null }
           : {}),
       }));
@@ -2729,7 +2734,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       // toggle button. That path changes the titlebar/webview geometry too,
       // so repair the native traffic-light position whenever the peek state
       // actually changes, not only when the persisted pin state changes.
-      if (previous !== on) requestTrafficLightReapply();
+      if (previous !== peeking) requestTrafficLightReapply();
     },
 
     createGroup: (name, tabId) => {

@@ -1546,6 +1546,34 @@ describe("the snapshot freeze's lifecycle", () => {
   beforeEach(reset);
   const shot = { tabId: "t1", src: "data:image/png;base64,x" };
 
+  it("does not treat pointer entry on a pinned sidebar as a floating peek", () => {
+    useStore.setState({
+      sidebarPinned: true,
+      sidebarPeeking: false,
+      folderPreviewGroupId: null,
+      pageFreeze: null,
+    });
+    const st = useStore.getState();
+    expect(st.sidebarPinned).toBe(true);
+
+    // The sidebar's mouse-enter handler runs for both layouts. In pinned
+    // layout it must not claim the snapshot after Folder Preview closes.
+    st.setSidebarPeeking(true);
+    expect(useStore.getState().sidebarPeeking).toBe(false);
+    st.setFolderPreview("g");
+    st.setPageFreeze(shot);
+    useStore.getState().setFolderPreview(null);
+
+    expect(useStore.getState().pageFreeze).toBeNull();
+  });
+
+  it("still records a real peek while the sidebar is unpinned", () => {
+    useStore.setState({ sidebarPinned: false });
+    useStore.getState().setSidebarPeeking(true);
+    expect(useStore.getState().sidebarPeeking).toBe(true);
+    useStore.getState().setSidebarPeeking(false);
+  });
+
   it("closing the panel releases the freeze when nothing else holds it", () => {
     const st = useStore.getState();
     st.setFolderPreview("g");
