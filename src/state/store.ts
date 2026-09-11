@@ -393,7 +393,7 @@ export type PersistedGroup = Omit<Group, "colorIndex"> & {
 /** Read-side compatibility only — saved files are rewritten as the current
  *  shape on the next ordinary persist, never migrated in place. Exported
  *  for the app-share mirror, which restores a host snapshot through the
- *  same hydrate → presets → sanitize chain (state/mirrorStore.ts). */
+ *  same hydrate → presets → sanitize chain in the remote runtime. */
 export function hydrateGroup(g: PersistedGroup): Group {
   const { color, colorIndex, ...rest } = g;
   return {
@@ -461,7 +461,7 @@ let terminalCounter = 0;
 /**
  * Keep the terminal-name counter ahead of whichever titles were just
  * restored, so a new terminal is never "Terminal 1" over a live "Terminal
- * 1". Shared by boot restore and the app-share mirror (state/mirrorStore.ts),
+ * 1". Shared by boot restore and the remote runtime's app-share mirror,
  * which both land whole tab lists in one move.
  */
 export function advanceTerminalCounter(tabs: { title: string }[]): void {

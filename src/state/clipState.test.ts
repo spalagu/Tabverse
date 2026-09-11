@@ -13,7 +13,7 @@ import {
   receiveClip,
   reconcilePaste,
   resetHostClip,
-} from "./clipState";
+} from "@tabverse/remote-client/clipboard";
 
 /** The board the module reaches for, swapped the same way the keys tests
  * swap it: a stub under the real navigator property. */

@@ -120,7 +120,7 @@ const { backend } = await import("../backend");
 const { useStore, withPresetGroups } = await import("../state/store");
 type Tab = import("../state/store").Tab;
 const { setTerminalPasteGuardForTest } = await import("../state/config");
-const { bracketedPaste } = await import("../term/pasteGuard");
+const { bracketedPaste } = await import("@tabverse/workbench/terminal/paste-guard");
 
 /** What each pane's shell was handed, keyed by the shell's own handle id. */
 const shellWrites: Record<string, string[]> = {};

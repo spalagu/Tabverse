@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createAppChannel, dispatchAppFrame, isAppFrame, RPC_TIMEOUT_MS } from "./remoteRpc";
+import {
+  createAppChannel,
+  dispatchAppFrame,
+  isAppFrame,
+  RPC_TIMEOUT_MS,
+} from "@tabverse/remote-client/app-frame";
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });

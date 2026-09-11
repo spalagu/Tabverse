@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { BrowserProgressBar } from "./BrowserProgressBar";
+import { BrowserProgressBar } from "@tabverse/workbench/browser-progress-bar";
 import {
   PROGRESS_EXTENT,
   PROGRESS_FADE_MS,
@@ -13,7 +13,7 @@ import {
   progressFor,
   resetAllProgress,
   PROGRESS_IDLE,
-} from "./browserProgress";
+} from "@tabverse/workbench/browser-progress";
 
 declare global {
   // eslint-disable-next-line no-var

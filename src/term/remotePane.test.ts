@@ -109,7 +109,9 @@ vi.mock("@xterm/addon-webgl", () => ({
     dispose() {}
   },
 }));
-vi.mock("../term/keys", () => ({ installMacKeyConventions: () => {} }));
+vi.mock("@tabverse/workbench/terminal/keys", () => ({
+  installMacKeyConventions: () => {},
+}));
 vi.mock("../persist", () => ({
   SESSION_SCOPE: "session-test",
   loadState: () => Promise.resolve(null),

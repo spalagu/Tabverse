@@ -4,7 +4,7 @@ import {
   decodeLossy,
   prependCapped,
   utf8Len,
-} from "./logWindow";
+} from "@tabverse/workbench/files/log-window";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 

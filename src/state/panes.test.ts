@@ -7,7 +7,7 @@ import {
 } from "./store";
 import { flushAll } from "../persist";
 import { shareBlockedReason } from "../share/framework/terminalBlocking";
-import { termScope } from "../components/terminal/sessionMemory";
+import { termScope } from "@tabverse/workbench/terminal/session-memory";
 import { termKey } from "../termRegistry";
 import { isLeaf, layout, leaves, paneCount, type PaneNode, type PaneSplit } from "../paneTree";
 

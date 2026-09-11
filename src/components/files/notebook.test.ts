@@ -4,7 +4,7 @@ import {
   normalizeCells,
   parseNotebook,
   stripAnsi,
-} from "./notebook";
+} from "@tabverse/workbench/files/notebook";
 
 /** Minimal nbformat 4 wrapper around a cell list. */
 function nb(cells: unknown[], metadata: unknown = {}) {

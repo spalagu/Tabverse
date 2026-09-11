@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { hasExplicitOrigin, resolveLocalPath } from "./markdownUrls";
+import {
+  hasExplicitOrigin,
+  resolveLocalPath,
+} from "@tabverse/workbench/files/markdown-urls";
 
 describe("hasExplicitOrigin", () => {
   it("recognizes scheme-qualified and protocol-relative references", () => {

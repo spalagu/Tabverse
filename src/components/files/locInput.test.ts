@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { FsEntry } from "../../backend/fs";
 import {
-  applyCompletion,
-  completeDirs,
-  normalizePath,
-  resolveLocInput,
-  segmentCandidates,
-} from "./locInput";
+  applyLocationCompletion as applyCompletion,
+  completeLocationDirectories as completeDirs,
+  normalizeLocationPath as normalizePath,
+  resolveLocationInput as resolveLocInput,
+  locationSegmentCandidates as segmentCandidates,
+} from "@tabverse/workbench/files/location-bar";
 import { RECENT_PATHS_MAX, mergeRecentPath } from "./recentPaths";
 
 

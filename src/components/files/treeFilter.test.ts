@@ -6,7 +6,7 @@ import {
   filterActive,
   filterRows,
   type TreeFilter,
-} from "./treeFilter";
+} from "@tabverse/workbench/files/tree-filter";
 
 
 const e = (name: string, isDir = false, parent = "/r"): FsEntry => ({

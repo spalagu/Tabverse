@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Terminal } from "@xterm/xterm";
-import { BlockTracker } from "./blocks";
+import { BlockTracker } from "@tabverse/workbench/terminal/blocks";
 import {
   BlockDecorations,
   blockDecorationOptions,
@@ -8,7 +8,7 @@ import {
   failureRulerOptions,
   isFailedBlock,
   rulerYToBufferLine,
-} from "./decorations";
+} from "@tabverse/workbench/terminal/decorations";
 
 /** What the fake's registerDecoration hands back: the updatable-options and
  *  dispose surface of IDecoration, plus the render callbacks the test fires. */
@@ -311,14 +311,16 @@ describe("ruler click → jump", () => {
 
 describe("block state mapping", () => {
   it("failed means a known non-zero exit, mirroring the block bar's rule", () => {
-    const mk = (over: Partial<import("./blocks").Block>) =>
+    const mk = (
+      over: Partial<import("@tabverse/workbench/terminal/blocks").Block>
+    ) =>
       ({
         id: 1,
         command: "x",
         start: { line: 0, disposed: false },
         startedAt: 0,
         ...over,
-      }) as import("./blocks").Block;
+      }) as import("@tabverse/workbench/terminal/blocks").Block;
     expect(blockDotState(mk({}))).toBe("running");
     // Finished with an unparseable exit is not a failure anyone may point
     // at: the block bar shows the same ok-class for it.
