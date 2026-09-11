@@ -1748,6 +1748,12 @@ kbd {
   inset: 0;
   display: flex;
   flex-direction: column;
+  /* Keep the native page below the load rail. A floating rail that overlaps
+     the child WKWebView forces the whole UI webview above it on macOS, which
+     makes a visible page unable to receive clicks or scrolling until every
+     subresource finishes. Reserving two pixels keeps the rail visible without
+     making navigation state an interaction lock. */
+  padding-top: 2px;
   background: var(--term-bg);
 }
 
@@ -3654,10 +3660,10 @@ table.kv td:first-child {
 
 /* ── Round eleven ─────────────────────────────────────────────────────── */
 
-/* Load rail, truly floating (user direction): absolute over the pane's
-   top edge, in no layout at all — mounting and unmounting it can no
-   longer nudge the content area. uiPlane raises it over the live page
-   for its two-second life; idle renders nothing. It anchors to
+/* Load rail sits in the pane's permanently reserved two-pixel top gutter.
+   It must never overlap the native page: raising this DOM webview above a
+   child WKWebView would make the visible page lose all pointer input while
+   a slow or long-lived request kept the rail mounted. It anchors to
    .browser-pane itself, which stays position:absolute (its base rule):
    an earlier cut of this round switched the pane to position:relative,
    which silently unhooked the pane from its own geometry — the flex
