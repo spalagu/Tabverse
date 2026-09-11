@@ -1,5 +1,13 @@
 # Tabverse 变更记录
 
+## 0.1.1
+
+- Keep local Browser tabs interactive while navigation remains in progress.
+- Restore live Browser tabs after transient desktop overlays close, regardless of how the overlay was opened.
+- Remove Remote Browser transport and rendering; Browser remains local-only while Join keeps Terminal, Agent, Files, Settings, and Whole-App semantic sharing.
+- Remove obsolete compatibility shims, dead media-audibility code, and unused Workbench dependency declarations.
+- Keep zero-cost distribution: macOS builds are ad-hoc signed and not notarized; no paid signing service is required.
+
 ## 0.1.0 — V3
 
 ### 工作区与持久化

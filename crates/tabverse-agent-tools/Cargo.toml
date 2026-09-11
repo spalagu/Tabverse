@@ -1,6 +1,6 @@
 [package]
 name = "tabverse-agent-tools"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Tools the coding agent may invoke: file reads, writes, edits, shell commands, search."
 license.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "tabverse-fs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Filesystem + git status backend for the file explorer tab."
 license.workspace = true
