@@ -22,10 +22,6 @@ const FLOATERS = [
   // cell the buttons live in, so it is named in its own right rather than
   // trusted to fall inside .pane-actions' rectangle (2026-08-12 review).
   ".split-menu",
-  // The load rail floats over the page's top edge while it loads
-  // (round eleven): it participates in no layout, so the pane never
-  // shifts when a navigation starts or ends.
-  ".browser-pane > .browser-progress",
 ];
 
 /**
