@@ -1,6 +1,6 @@
 [package]
 name = "tabverse-remote"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "iroh-based remote control: share a tab, join from anywhere."
 license.workspace = true

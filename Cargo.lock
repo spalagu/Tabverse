@@ -5818,7 +5818,7 @@ dependencies = [
 
 [[package]]
 name = "tabverse"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5873,7 +5873,7 @@ dependencies = [
 
 [[package]]
 name = "tabverse-agent"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -5886,7 +5886,7 @@ dependencies = [
 
 [[package]]
 name = "tabverse-agent-tools"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "globset",
@@ -5903,7 +5903,7 @@ dependencies = [
 
 [[package]]
 name = "tabverse-fs"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5930,7 +5930,7 @@ dependencies = [
 
 [[package]]
 name = "tabverse-network"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -5940,7 +5940,7 @@ dependencies = [
 
 [[package]]
 name = "tabverse-proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -5948,7 +5948,7 @@ dependencies = [
 
 [[package]]
 name = "tabverse-remote"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "data-encoding",
@@ -5964,7 +5964,7 @@ dependencies = [
 
 [[package]]
 name = "tabverse-runtime"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "hmac 0.12.1",
@@ -5979,7 +5979,7 @@ dependencies = [
 
 [[package]]
 name = "tabverse-state"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -5989,7 +5989,7 @@ dependencies = [
 
 [[package]]
 name = "tabverse-term"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "interprocess",
@@ -6003,7 +6003,7 @@ dependencies = [
 
 [[package]]
 name = "tabverse-web"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-channel",

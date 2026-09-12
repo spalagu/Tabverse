@@ -1,6 +1,6 @@
 [package]
 name = "tabverse-proto"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Shared message types between the Tabverse app, remote hosts and clients."
 license.workspace = true

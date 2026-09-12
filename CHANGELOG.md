@@ -1,5 +1,14 @@
 # Tabverse Changelog
 
+## 0.1.2
+
+- Establish `app.db` as the single authority for durable structured application state.
+- Keep runtime lifecycle state in `runtime.db` and Agent transcripts and memory in append-oriented content files.
+- Remove legacy JSON state, import, migration, passphrase, and compatibility paths.
+- Reject corrupt or unsupported current state without overwriting it, and require explicit replacement.
+- Make credential, transcript, and memory persistence failures visible and protect concurrent updates.
+- Document the current local-data ownership model and enforce it through architecture checks.
+
 ## 0.1.1
 
 - Keep local Browser tabs interactive while navigation remains in progress.
