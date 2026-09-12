@@ -1,6 +1,6 @@
 [package]
 name = "tabverse-agent"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "The agent runtime: the turn loop, its session events, and the permission point tools pass through."
 license.workspace = true

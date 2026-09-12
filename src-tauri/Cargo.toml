@@ -1,6 +1,6 @@
 [package]
 name = "tabverse"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Tabverse: a cross-platform terminal that can replace most of your desktop."
 license.workspace = true
@@ -35,7 +35,7 @@ tabverse-remote = { path = "../crates/tabverse-remote" }
 tabverse-network = { path = "../crates/tabverse-network" }
 tabverse-state = { path = "../crates/tabverse-state" }
 tabverse-runtime = { path = "../crates/tabverse-runtime" }
-tabverse-fs = { version = "0.1.1", path = "../crates/tabverse-fs" }
+tabverse-fs = { version = "0.1.2", path = "../crates/tabverse-fs" }
 toml = "1"
 toml_edit = { version = "0.25", features = ["serde"] }
 tauri-plugin-notification = "2.3.3"

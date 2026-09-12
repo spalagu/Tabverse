@@ -1,6 +1,6 @@
 [package]
 name = "tabverse-web"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Browser client for Tabverse remote control (iroh over WebSocket relays)."
 license.workspace = true

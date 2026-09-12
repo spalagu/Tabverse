@@ -1,6 +1,6 @@
 [package]
 name = "tabverse-network"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Raw-byte data stream framing for Tabverse Remote."
 license.workspace = true
