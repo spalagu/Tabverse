@@ -11,6 +11,7 @@ ignore = [
   { id = "RUSTSEC-2024-0418", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
   { id = "RUSTSEC-2024-0419", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
   { id = "RUSTSEC-2024-0420", reason = "Tauri 2's Linux webview stack requires GTK3; no maintained compatible replacement is available." },
+  { id = "RUSTSEC-2024-0429", reason = "Tauri 2.11's Linux GTK3 stack pins glib 0.18; Tabverse does not call the affected VariantStrIter APIs. Remove after Tauri adopts gtk3-rs 0.19 or GTK4." },
   { id = "RUSTSEC-2024-0436", reason = "The current iroh network stack requires this transitive macro crate; no maintained compatible replacement is available." },
   { id = "RUSTSEC-2025-0075", reason = "Tauri 2's URL pattern parser requires this transitive crate; no maintained compatible replacement is available." },
   { id = "RUSTSEC-2025-0080", reason = "Tauri 2's URL pattern parser requires this transitive crate; no maintained compatible replacement is available." },
