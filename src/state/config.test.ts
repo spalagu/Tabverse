@@ -14,11 +14,9 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 
 import {
   SESSION_SCOPE,
-  THEME_SCOPE,
   deleteState,
   flushAll,
   listScopes,
-  loadState,
 } from "../persist";
 import {
   BOOT_CONFIG_KEY,
@@ -337,142 +335,6 @@ describe("the store holds no copy of a default", () => {
   });
 });
 
-describe("moving the six out of the session scope, once", () => {
-  /** A session written by a version that still carried these fields. */
-  const legacySession = {
-    version: 1,
-    zones: 3,
-    tabs: [
-      {
-        id: "11111111-1111-4111-8111-111111111111",
-        type: "terminal",
-        title: "Terminal 1",
-        groupId: null,
-      },
-    ],
-    groups: [],
-    activeTabId: null,
-    sidebarWidth: 402,
-    sidebarPinned: true,
-    archiveThreshold: "12h",
-    searchEngine: "google",
-    customSearchTemplate: "https://old.test/?q=%s",
-  };
-
-  const seedLegacySession = () =>
-    localStorage.setItem(
-      `tabverse.state.${SESSION_SCOPE}`,
-      JSON.stringify(legacySession)
-    );
-
-  /**
-   * What config_get answers when no file contributed: the built-in defaults,
-   * whatever they are. The test never names them — it uses whatever comes
-   * back as the thing an old value is compared against, which is the same
-   * comparison the migration makes.
-   */
-  const noFileYet = (): ConfigSnapshot => ({
-    values: FROM_THE_FILE,
-    warnings: [],
-    sources: [],
-  });
-
-  it("writes the old values into the file when no file has said anything", async () => {
-    seedLegacySession();
-    localStorage.setItem(
-      `tabverse.state.${THEME_SCOPE}`,
-      JSON.stringify({ preference: "dark" })
-    );
-    serve(noFileYet());
-    await useStore.getState().initConfig();
-    await flushConfigWrites();
-
-    expect(new Map(writes())).toEqual(
-      new Map<string, unknown>([
-        [CONFIG_KEYS.sidebarWidth, 402],
-        [CONFIG_KEYS.sidebarPinned, true],
-        [CONFIG_KEYS.archiveAfter, "12h"],
-        [CONFIG_KEYS.searchEngine, "google"],
-        [CONFIG_KEYS.customSearchTemplate, "https://old.test/?q=%s"],
-        [CONFIG_KEYS.theme, "dark"],
-      ])
-    );
-    // And they apply to this run, not only to the next one.
-    expect(useStore.getState().sidebarWidth).toBe(402);
-    expect(useStore.getState().themePreference).toBe("dark");
-  });
-
-  it("never overwrites a file that already exists", async () => {
-    seedLegacySession();
-    // A file contributed, so what it says wins outright — the old session's
-    // copies are not merged in, key by key or otherwise.
-    serve(snapshot());
-    await useStore.getState().initConfig();
-    await flushConfigWrites();
-
-    expect(writes()).toEqual([]);
-    expect(useStore.getState().sidebarWidth).toBe(317);
-    expect(useStore.getState().searchEngine).toBe("bing");
-  });
-
-  it("happens once: the second start finds nothing left to move", async () => {
-    seedLegacySession();
-    serve(noFileYet());
-    await useStore.getState().initConfig();
-    await flushConfigWrites();
-    await flushAll();
-    expect(writes().length).toBeGreaterThan(0);
-
-    // The session snapshot has been stripped, which is what makes it once —
-    // no marker to keep, and nothing to go wrong if one were lost.
-    const pruned = await loadState<Record<string, unknown>>(SESSION_SCOPE);
-    for (const field of [
-      "sidebarWidth",
-      "sidebarPinned",
-      "archiveThreshold",
-      "searchEngine",
-      "customSearchTemplate",
-    ]) {
-      expect(Object.keys(pruned ?? {}), `${field} still in the session`)
-        .not.toContain(field);
-    }
-    expect(pruned?.tabs, "the session itself survives").toBeDefined();
-
-    mocks.invoke.mockClear();
-    serve(noFileYet());
-    await useStore.getState().initConfig();
-    await flushConfigWrites();
-    expect(writes()).toEqual([]);
-  });
-
-  it("creates nothing for a user whose settings were all default", async () => {
-    localStorage.setItem(
-      `tabverse.state.${SESSION_SCOPE}`,
-      JSON.stringify({ ...legacySession, ...configSlice(FROM_THE_FILE) })
-    );
-    serve(noFileYet());
-    await useStore.getState().initConfig();
-    await flushConfigWrites();
-    expect(writes()).toEqual([]);
-  });
-
-  it.each([
-    "{ not json",
-    JSON.stringify({ version: 2, tabs: [] }),
-    JSON.stringify({ version: 1, tabs: "not-an-array" }),
-    JSON.stringify({ version: 1, tabs: [] }),
-  ])("does not rewrite an unrecoverable session before recovery is confirmed", async (raw) => {
-    localStorage.setItem(`tabverse.state.${SESSION_SCOPE}`, raw);
-    serve(noFileYet());
-
-    await useStore.getState().initConfig();
-    await flushConfigWrites();
-    await flushAll();
-
-    expect(localStorage.getItem(`tabverse.state.${SESSION_SCOPE}`)).toBe(raw);
-  });
-});
-
 describe("forgetting the saved session no longer forgets the settings", () => {
   it("keeps all six across the erasure and the restart after it", async () => {
     serve(snapshot());
@@ -502,10 +364,6 @@ describe("forgetting the saved session no longer forgets the settings", () => {
     // forgetSessionScopes directly passes against a page that ignores it.
     const carrier = (scope: string) => `tabverse.state.${scope}`;
     localStorage.setItem(carrier(SESSION_SCOPE), JSON.stringify({ tabs: [] }));
-    localStorage.setItem(
-      carrier(THEME_SCOPE),
-      JSON.stringify({ preference: "dark" })
-    );
     localStorage.setItem(carrier("browser-history"), "[]");
 
     const host = document.createElement("div");
@@ -538,35 +396,26 @@ describe("forgetting the saved session no longer forgets the settings", () => {
     await settle();
 
     expect(
-      localStorage.getItem(carrier(THEME_SCOPE)),
-      "the theme snapshot survives"
-    ).not.toBeNull();
-    expect(
       localStorage.getItem(carrier(SESSION_SCOPE)),
       "the session itself is gone"
     ).toBeNull();
     expect(
       localStorage.getItem(carrier("browser-history")),
-      "and so is every other record"
-    ).toBeNull();
+      "browser history belongs to its own danger action"
+    ).toBe("[]");
 
     flushSync(() => root.unmount());
     host.remove();
   });
 
-  it("spares the theme snapshot and sweeps everything else", () => {
+  it("sweeps only session-owned scopes", () => {
     const all = [
       SESSION_SCOPE,
-      THEME_SCOPE,
       "browser-history",
       "files:11111111-1111-4111-8111-111111111111",
     ];
-    // theme.json is not a record of a session; it is the copy the Rust side
-    // reads before the webview exists, so that the first frame is the
-    // colour the configuration file asks for.
     expect(forgetSessionScopes(all)).toEqual([
       SESSION_SCOPE,
-      "browser-history",
       "files:11111111-1111-4111-8111-111111111111",
     ]);
   });
@@ -707,16 +556,13 @@ describe("a change goes to the file", () => {
     expect(useStore.getState().sidebarWidth).toBe(239);
   });
 
-  it("still refreshes the theme snapshot the first frame is painted from", async () => {
+  it("stores the theme only through the registered setting", async () => {
     serve(snapshot());
     await useStore.getState().initConfig();
     mocks.invoke.mockClear();
     useStore.getState().setThemePreference("dark");
     await flushConfigWrites();
-    await settle();
-    expect(mocks.invoke).toHaveBeenCalledWith("theme_pref_save", {
-      pref: "dark",
-    });
+    expect(writes()).toEqual([[CONFIG_KEYS.theme, "dark"]]);
   });
 });
 

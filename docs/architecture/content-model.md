@@ -1,14 +1,14 @@
-# V3 Content 模型
+# V3 Content Model
 
-## 单一目录
+## Single catalog
 
-`resources/content-types.json` 是内容能力和 OS 文件关联的唯一目录。`tools/check-content-catalog.mjs` 校验目录；`tools/generate-tauri-associations.mjs` 生成并检查 Tauri bundle associations；Rust build 直接读取同一目录。
+`resources/content-types.json` is the single catalog for content capabilities and operating-system file associations. `tools/check-content-catalog.mjs` validates it, `tools/generate-tauri-associations.mjs` generates and checks Tauri bundle associations, and the Rust build reads the same catalog directly.
 
-当前目录覆盖 32 类内容、118 个扩展名和 31 个安装关联组，包括 Markdown、文本/代码、JSON/YAML/TOML/XML、图片、CSV/TSV、HTML、PDF、压缩包、SQLite、Office 和常见媒体。
+The current catalog covers 32 content types, 118 extensions, and 31 installation association groups, including Markdown, text and code, JSON/YAML/TOML/XML, images, CSV/TSV, HTML, PDF, archives, SQLite, Office documents, and common media.
 
-## 路由
+## Routing
 
-`OpenIntent` 是系统打开、深链、命令和 Workbench 内部打开操作的统一输入。`OpenIntentRouter` 根据 ContentRegistry 选择明确 handler；未知或不可内嵌内容进入安全 fallback，不通过扩展名散落判断。
+`OpenIntent` is the unified input for operating-system opens, deep links, commands, and Workbench open actions. `OpenIntentRouter` selects an explicit handler from ContentRegistry. Unknown or non-embeddable content uses a safe fallback instead of scattered extension checks.
 
 ```text
 OS/deep link/Workbench intent
@@ -18,13 +18,13 @@ OS/deep link/Workbench intent
 → preview/editor/inspect/fallback
 ```
 
-## 状态边界
+## State boundaries
 
-- 内容目录描述能力，不保存用户数据。
-- 用户关联偏好和 Tab 状态属于 `app.db`。
-- installer association、运行时识别和显示元数据来自同一 catalog。
-- 应用不得静默抢占系统默认程序；默认应用变更必须经过用户明确操作并可查询状态。
+- The content catalog describes capabilities and does not store user data.
+- User association preferences and tab state belong in `app.db`.
+- Installer associations, runtime recognition, and display metadata come from the same catalog.
+- The application must not silently take over operating-system defaults. Default-application changes require an explicit user action and expose their current status.
 
-## 非目标
+## Non-goals
 
-ContentRegistry 不是 Plugin Kernel，不加载外部执行代码，也不引入 Resident runtime。
+ContentRegistry is not a Plugin Kernel. It does not load external executable code or introduce a Resident Runtime.

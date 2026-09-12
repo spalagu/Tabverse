@@ -1,39 +1,52 @@
 # V3 Runtime Supervisor
 
-## 所有权
+## Ownership
 
-窗口化 GUI 不拥有 LiveProcess。同一个签名后的 Tabverse 可执行文件以 `--helper <state-dir>` 启动无窗口 Runtime Supervisor，Supervisor 独占写入 `runtime.db`。
+The windowed GUI does not own `LiveProcess`. The signed Tabverse executable starts a
+windowless Runtime Supervisor with
+`--helper <app-data-dir> <endpoint-cache-dir> <content-dir>`. The Supervisor is the only
+writer of `runtime.db`.
 
 ```text
 GUI client
-├── Terminal local socket / Windows Named Pipe
-└── Agent local socket / Windows Named Pipe
+├── Terminal local socket / Windows named pipe
+└── Agent local socket / Windows named pipe
         ↓
 Runtime Supervisor
 ├── Terminal PTY LiveProcess
 ├── Agent LiveProcess
-└── runtime.db lease、heartbeat、generation、state
+└── runtime.db lease, heartbeat, generation, and state
 ```
 
-IPC bootstrap token 通过匿名 stdin pipe 传给子进程，不写入 endpoint 文件。Agent IPC 使用双向 HMAC challenge；token 不出现在协议线上。endpoint 文件在 Unix 上使用 `0600`。
+The IPC bootstrap token travels through an anonymous stdin pipe and is never written to the
+endpoint record. Agent IPC uses a bidirectional HMAC challenge. Unix endpoint records use
+owner-only permissions and live in the platform cache directory, not durable application
+data. `runtime.db` lives in the application-data directory.
 
-## 生命周期
+## Lifecycle
 
-- create：Supervisor 创建 LiveProcess，写入 generation 和 attached 状态。
-- GUI detach：断开 GUI egress，LiveProcess 继续运行。
-- GUI restart/reattach：新客户端取得新 generation；旧客户端的变更请求被拒绝。
-- logical tab close：显式终止 LiveProcess并写入 stopped。
-- Supervisor failure：lease 过期后，新 Host 将未停止记录标为 interrupted；不伪造进程恢复。
-- 空 Supervisor 经过 idle window 后退出；任何 Terminal 或 Agent LiveProcess 都会保持 Supervisor 存活。
+- Create: the Supervisor creates a LiveProcess and records its generation and attachment.
+- GUI detach: GUI egress disconnects while the LiveProcess continues.
+- GUI restart/reattach: the new client obtains a new generation; stale mutations are refused.
+- Logical tab close: the LiveProcess is terminated explicitly and recorded as stopped.
+- Supervisor failure: a later Host marks expired non-stopped leases interrupted; no process
+  recovery is fabricated.
+- An empty Supervisor exits after its idle window. Any Terminal or Agent LiveProcess keeps it
+  alive.
 
-## 数据库规则
+## Storage rules
 
-`app.db` 保存 Workspace、Tab 和设置；`runtime.db` 只保存 runtime 身份、generation、状态、Host instance 和必要 checkpoint。GUI 不直接写 `runtime.db`。
+`app.db` owns durable structured application state. `runtime.db` owns runtime identity,
+generation, state, Host instance, and required checkpoints. The GUI never writes
+`runtime.db`. Neither database imports removed JSON or vault formats.
 
-`app.db` 首次创建时事务性导入旧 `state/*.json`，且不删除或改写旧文件。`crates/tabverse-state/tests/fixtures/` 固定保存 `v0.0.1` 的 `type` 会话格式以及 `v0.0.2/v0.0.3` 的 `kind` 会话格式；测试覆盖三版投影、一次性导入、失败回滚和修复后重试。
+Registered scalar settings use `app.db.settings`. Profiles, templates, shortcuts, and Files
+walk rules remain declarative configuration. Agent transcripts are append-only JSONL content
+under the application content directory.
 
-Registered product settings are stored in `app.db.settings`. On the first V3 run, explicitly configured values from `config.toml` are imported transactionally without deleting the source file. The import marker and settings commit together so a failed import can be retried. After import, `config_get`, local `config_set/config_reset`, and App Share Steer RPC use `app.db` as the authority. Profiles, templates, shortcuts, and Files walk rules remain declarative configuration.
+## Verification
 
-## 验证
-
-`src-tauri/tests/runtime_supervisor_process.rs` 启动实际 `tabverse --helper` 子进程，跨两个 GUI 客户端验证同一 PID 下的 Terminal snapshot/继续执行和 Agent handle 重新附着。`crates/tabverse-runtime` 另行验证 writer lease、stale Host、interrupted 状态和无假恢复。
+`src-tauri/tests/runtime_supervisor_process.rs` starts a real `tabverse --helper` child and
+checks Terminal continuation and Agent handle reattachment across two GUI clients.
+`crates/tabverse-runtime` separately verifies writer leases, stale Hosts, interrupted state,
+and the absence of fabricated recovery.

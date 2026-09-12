@@ -35,28 +35,21 @@ describe("V3 built-in feature modules", () => {
     expect(byKind.get("agent")?.closeBehavior).toBe("ask");
   });
 
-  it("migrates old state and preserves unknown future state", () => {
-    const codec = objectStateCodec(2, {
-      1: (state) => ({ ...state, migrated: true }),
-    });
-    expect(codec.decode(1, { path: "/work" })).toEqual({
-      kind: "ready",
-      version: 2,
-      state: { path: "/work", migrated: true },
-    });
+  it("accepts only the current state version", () => {
+    const codec = objectStateCodec(2);
     const future = { payload: ["unknown", 3] };
     expect(codec.decode(3, future)).toEqual({
-      kind: "unsupported-newer",
+      kind: "unsupported-version",
       version: 3,
       original: future,
     });
   });
 
-  it("rejects malformed state and missing migrations without mutating it", () => {
+  it("rejects malformed and old state without mutating it", () => {
     const old = { cwd: "/work" };
     expect(objectStateCodec(2).decode(1, old)).toEqual({
-      kind: "invalid",
-      reason: "missing-migration-1",
+      kind: "unsupported-version",
+      version: 1,
       original: old,
     });
     expect(objectStateCodec(1).decode(1, [])).toEqual({

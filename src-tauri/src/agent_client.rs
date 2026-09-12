@@ -333,15 +333,25 @@ impl AgentClientRegistry {
             history: Arc::new(move || {
                 log_path
                     .as_ref()
-                    .and_then(|path| SessionLog::replay(path).ok())
-                    .map(|replay| {
-                        replay
+                    .map_or_else(Vec::new, |path| match SessionLog::replay(path) {
+                        Ok(replay) => replay
                             .events
                             .iter()
                             .filter_map(|event| serde_json::to_value(event).ok())
-                            .collect()
+                            .collect(),
+                        Err(error) => {
+                            eprintln!("[agent] cannot replay transcript for sharing: {error:#}");
+                            vec![serde_json::to_value(
+                                tabverse_agent::event::SessionEvent::TurnEnded {
+                                    turn: 0,
+                                    reason: tabverse_agent::event::StopReason::Error(format!(
+                                        "Cannot read the current transcript: {error:#}"
+                                    )),
+                                },
+                            )
+                            .expect("the fixed transcript error event serializes")]
+                        }
                     })
-                    .unwrap_or_default()
             }),
             set_broadcast: Arc::new(move |target| {
                 *share.lock().unwrap() = target.map(|share| share as Arc<dyn AgentBroadcast>);

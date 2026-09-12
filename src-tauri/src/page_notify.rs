@@ -104,7 +104,7 @@ pub fn answer(app: &AppHandle, dialog_id: u64, ok: bool, remember: bool) -> Resu
         return Ok(());
     };
     if remember {
-        crate::page_prompts::remember(app, &p.host, KIND, ok);
+        crate::page_prompts::remember(app, &p.host, KIND, ok)?;
     }
     if ok {
         granted_tabs().lock().unwrap().insert(p.tab_id.clone());

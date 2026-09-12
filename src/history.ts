@@ -1,4 +1,4 @@
-import { deleteState, loadState, saveState } from "./persist";
+import { deleteState, loadState, markStateInvalid, saveState } from "./persist";
 import { isFreshRun } from "./state/store";
 
 
@@ -163,20 +163,26 @@ export function mergeVisit(
 }
 
 /** Whatever survived a round trip through storage, shaped and believable. */
-function sanitize(stored: StoredHistory | null): VisitEntry[] {
-  if (!stored || !Array.isArray(stored.entries)) return [];
-  const out: VisitEntry[] = [];
-  for (const raw of stored.entries) {
-    if (!raw || typeof raw.url !== "string" || !isRecordableUrl(raw.url)) continue;
-    out.push({
-      url: raw.url,
-      title: typeof raw.title === "string" ? raw.title : "",
-      host: typeof raw.host === "string" && raw.host ? raw.host : hostOf(raw.url),
-      visits: Number.isFinite(raw.visits) && raw.visits > 0 ? Math.floor(raw.visits) : 1,
-      lastVisit: Number.isFinite(raw.lastVisit) ? raw.lastVisit : 0,
-    });
-  }
-  return out.slice(0, HISTORY_MAX);
+function sanitize(stored: StoredHistory | null): VisitEntry[] | null {
+  if (stored === null) return [];
+  if (
+    stored.version !== 1 ||
+    !Array.isArray(stored.entries) ||
+    stored.entries.length > HISTORY_MAX ||
+    stored.entries.some(
+      (raw) =>
+        !raw ||
+        typeof raw.url !== "string" ||
+        !isRecordableUrl(raw.url) ||
+        typeof raw.title !== "string" ||
+        typeof raw.host !== "string" ||
+        !raw.host ||
+        !Number.isInteger(raw.visits) ||
+        raw.visits < 1 ||
+        !Number.isFinite(raw.lastVisit)
+    )
+  ) return null;
+  return stored.entries;
 }
 
 
@@ -275,19 +281,22 @@ export function groupVisitsByDay(
 }
 
 /** Whatever survived a round trip through storage, shaped and believable. */
-function sanitizeVisits(stored: StoredVisits | null): VisitLogEntry[] {
-  if (!stored || !Array.isArray(stored.entries)) return [];
-  const out: VisitLogEntry[] = [];
-  for (const raw of stored.entries) {
-    if (!raw || typeof raw.url !== "string" || !isRecordableUrl(raw.url)) continue;
-    if (!Number.isFinite(raw.at)) continue;
-    out.push({
-      url: raw.url,
-      title: typeof raw.title === "string" ? raw.title : "",
-      at: raw.at,
-    });
-  }
-  return out.slice(0, VISITS_MAX);
+function sanitizeVisits(stored: StoredVisits | null): VisitLogEntry[] | null {
+  if (stored === null) return [];
+  if (
+    stored.version !== 1 ||
+    !Array.isArray(stored.entries) ||
+    stored.entries.length > VISITS_MAX ||
+    stored.entries.some(
+      (raw) =>
+        !raw ||
+        typeof raw.url !== "string" ||
+        !isRecordableUrl(raw.url) ||
+        typeof raw.title !== "string" ||
+        !Number.isFinite(raw.at)
+    )
+  ) return null;
+  return stored.entries;
 }
 
 /**
@@ -306,7 +315,12 @@ async function entries(): Promise<VisitEntry[]> {
   const mine = gen;
   const loaded = await loadState<StoredHistory>(HISTORY_SCOPE);
   if (gen !== mine) return cache ?? [];
-  cache ??= sanitize(loaded);
+  const decoded = sanitize(loaded);
+  if (decoded === null) {
+    markStateInvalid(HISTORY_SCOPE, "invalid current browser history record");
+    throw new Error("invalid current browser history record");
+  }
+  cache ??= decoded;
   return cache;
 }
 
@@ -320,7 +334,12 @@ async function visitEntries(): Promise<VisitLogEntry[]> {
   const mine = visitsGen;
   const loaded = await loadState<StoredVisits>(VISITS_SCOPE);
   if (visitsGen !== mine) return visitsCache ?? [];
-  visitsCache ??= sanitizeVisits(loaded);
+  const decoded = sanitizeVisits(loaded);
+  if (decoded === null) {
+    markStateInvalid(VISITS_SCOPE, "invalid current browser visit record");
+    throw new Error("invalid current browser visit record");
+  }
+  visitsCache ??= decoded;
   return visitsCache;
 }
 

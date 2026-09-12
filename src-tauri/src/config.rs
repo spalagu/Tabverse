@@ -211,6 +211,37 @@ pub struct Config {
     pub keys: Keys,
 }
 
+/// The only values `config.toml` owns. Registered scalar settings belong to
+/// `app.db`; keeping them out of this deserializer means an obsolete scalar
+/// cannot affect startup, even when its old value is no longer valid.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+struct FileConfig {
+    terminal: FileTerminal,
+    files: Files,
+    keys: Keys,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+struct FileTerminal {
+    #[serde(deserialize_with = "crate::profiles::de_profiles")]
+    profiles: Vec<crate::profiles::Profile>,
+    #[serde(deserialize_with = "crate::templates::de_templates")]
+    templates: Vec<crate::templates::Template>,
+}
+
+impl From<FileConfig> for Config {
+    fn from(file: FileConfig) -> Self {
+        let mut config = Config::default();
+        config.terminal.profiles = file.terminal.profiles;
+        config.terminal.templates = file.terminal.templates;
+        config.files = file.files;
+        config.keys = file.keys;
+        config
+    }
+}
+
 impl Default for Config {
     /// The defaults. Not *a* set of defaults — the only one. Every other
     /// default in this module is written as a read of this construction
@@ -1202,9 +1233,7 @@ fn to_load_error(path: &Path, src: &str, err: &toml::de::Error) -> LoadError {
 /// throws away.
 ///
 /// `deny_unknown_fields` is deliberately not used. It would turn each of
-/// these into a hard failure, so a user who ran a newer version once could
-/// not open their configuration on the older one at all — and this product
-/// takes downgrade seriously enough to ship a migration module.
+/// these into a hard failure instead of reporting every unknown key together.
 fn scan_unknown_keys(path: &Path, src: &str) -> Vec<Warning> {
     let mut out = Vec::new();
     // A syntax error is reported by the value pass, with its own position;
@@ -1288,9 +1317,6 @@ fn scan_unknown_keys(path: &Path, src: &str) -> Vec<Warning> {
                 ));
                 continue;
             }
-            if SETTINGS.iter().any(|s| s.key == dotted) {
-                continue;
-            }
             let (line, column) = line_col(src, leaf.span().start);
             out.push(Warning {
                 key: dotted,
@@ -1349,7 +1375,7 @@ pub fn load_from_paths(paths: &[PathBuf]) -> Result<Loaded, LoadError> {
         // Validate the file on its own text. This is the pass that carries
         // positions: every rule, including the range and format rules
         // written on the fields, reports through it.
-        if let Err(e) = toml::from_str::<Config>(&src) {
+        if let Err(e) = toml::from_str::<FileConfig>(&src) {
             return Err(to_load_error(path, &src, &e));
         }
         warnings.extend(scan_unknown_keys(path, &src));
@@ -1364,8 +1390,8 @@ pub fn load_from_paths(paths: &[PathBuf]) -> Result<Loaded, LoadError> {
         sources.push(path.display().to_string());
     }
 
-    let config = match merged.try_into::<Config>() {
-        Ok(config) => config,
+    let config = match merged.try_into::<FileConfig>() {
+        Ok(config) => Config::from(config),
         Err(e) => {
             // Only reachable when two files are individually valid but
             // disagree once merged; there is no single line to point at, so
@@ -1600,24 +1626,6 @@ pub(crate) fn write_atomically(path: &Path, text: &str) -> Result<(), String> {
     }
 }
 
-/// Set one registered key in one named file.
-///
-/// The unit both the command and the tests go through, so what the tests
-/// prove is what the product does rather than something next to it. Every
-/// refusal happens before the file is opened and the file is written exactly
-/// once at the end: there is no state in which a rejected value has half
-/// landed.
-pub fn set_in_file(path: &Path, key: &str, value: &serde_json::Value) -> Result<(), String> {
-    let setting = setting_for(key)?;
-    let (section, leaf) = split_key(setting.key)?;
-    let new_value = to_toml_value(key, value)?;
-    check_value(section, leaf, &new_value)?;
-    let mut doc = open_document(path)?;
-    let table = section_mut(&mut doc, section)?;
-    put(table, leaf, new_value);
-    write_atomically(path, &doc.to_string())
-}
-
 pub fn files_set_in_file(
     path: &Path,
     exclude: &[String],
@@ -1655,36 +1663,10 @@ pub fn files_set_in_file(
     let text = doc.to_string();
     // The whole file must still load before it replaces the user's file —
     // the same guard `crate::templates` publishes under.
-    if let Err(error) = toml::from_str::<Config>(&text) {
+    if let Err(error) = toml::from_str::<FileConfig>(&text) {
         return Err(error.message().to_string());
     }
     write_atomically(path, &text)
-}
-
-/// Remove one registered key from one named file, so that the built-in
-/// default governs it again.
-///
-/// Removal, not "write the default out". A default written into the file is
-/// frozen there: a later release that improves that default would never reach
-/// this user, who would carry today's value for ever without having chosen
-/// it. The key's line goes; the section header, the comments around it and
-/// every other key stay exactly where they were.
-///
-/// A key that is not in the file is already in the state this call asks for,
-/// so nothing is written — rewriting a file nobody asked us to touch is
-/// itself a change.
-pub fn reset_in_file(path: &Path, key: &str) -> Result<(), String> {
-    let setting = setting_for(key)?;
-    let (section, leaf) = split_key(setting.key)?;
-    let mut doc = open_document(path)?;
-    let table = match doc.get_mut(section).and_then(Item::as_table_mut) {
-        Some(table) => table,
-        None => return Ok(()),
-    };
-    if table.remove(leaf).is_none() {
-        return Ok(());
-    }
-    write_atomically(path, &doc.to_string())
 }
 
 // ------------------------------------------------- write-back: [keys]
@@ -1764,28 +1746,6 @@ pub struct ConfigSnapshot {
     pub error: Option<String>,
 }
 
-const SETTINGS_IMPORT_MARKER: &str = "_migration.config-toml-v1";
-
-fn explicit_legacy_settings(sources: &[String]) -> Result<Vec<(String, String)>, String> {
-    let mut values = BTreeMap::<String, String>::new();
-    for source in sources {
-        let text = std::fs::read_to_string(source)
-            .map_err(|e| format!("cannot read {source} while importing settings: {e}"))?;
-        let table: toml::Table = toml::from_str(&text)
-            .map_err(|e| format!("cannot parse {source} while importing settings: {e}"))?;
-        for setting in SETTINGS {
-            let (section, leaf) = split_key(setting.key)?;
-            let Some(value) = table.get(section).and_then(|v| v.get(leaf)) else {
-                continue;
-            };
-            let json = serde_json::to_string(value)
-                .map_err(|e| format!("cannot import {} from {source}: {e}", setting.key))?;
-            values.insert(setting.key.to_string(), json);
-        }
-    }
-    Ok(values.into_iter().collect())
-}
-
 fn put_json_path(
     root: &mut serde_json::Value,
     key: &str,
@@ -1805,11 +1765,7 @@ pub fn snapshot_with_store(
 ) -> Result<ConfigSnapshot, String> {
     match load() {
         Ok(loaded) => {
-            let legacy = explicit_legacy_settings(&loaded.sources)?;
-            store
-                .import_settings_once(SETTINGS_IMPORT_MARKER, &legacy)
-                .map_err(|e| format!("app.db settings import: {e:#}"))?;
-            let config = apply_store_settings(store, declarative_file_config(loaded.config))?;
+            let config = apply_store_settings(store, loaded.config)?;
             Ok(ConfigSnapshot {
                 values: config,
                 warnings: loaded.warnings,
@@ -1826,23 +1782,6 @@ pub fn snapshot_with_store(
     }
 }
 
-/// After migration, config.toml contributes only the structures that are
-/// deliberately still file-authored. Every registered scalar starts at the
-/// shipped default and is then overlaid exclusively from app.db.
-fn declarative_file_config(file: Config) -> Config {
-    let defaults = Config::default();
-    Config {
-        terminal: Terminal {
-            profiles: file.terminal.profiles,
-            templates: file.terminal.templates,
-            ..defaults.terminal
-        },
-        files: file.files,
-        keys: file.keys,
-        ..defaults
-    }
-}
-
 fn apply_store_settings(
     store: &tabverse_state::AppStateStore,
     config: Config,
@@ -1852,9 +1791,6 @@ fn apply_store_settings(
         .load_settings()
         .map_err(|e| format!("app.db settings read: {e:#}"))?
     {
-        if key == SETTINGS_IMPORT_MARKER {
-            continue;
-        }
         setting_for(&key)?;
         let value = serde_json::from_str(&value_json)
             .map_err(|e| format!("app.db setting `{key}` is invalid: {e}"))?;
@@ -1862,6 +1798,11 @@ fn apply_store_settings(
     }
     serde_json::from_value(values)
         .map_err(|e| format!("app.db settings do not form valid configuration: {e}"))
+}
+
+/// Registered scalar settings from their sole durable owner, app.db.
+pub fn registered_config(store: &tabverse_state::AppStateStore) -> Result<Config, String> {
+    apply_store_settings(store, Config::default())
 }
 
 pub fn set_with_store(
@@ -1879,7 +1820,7 @@ pub fn set_with_store(
             &serde_json::to_string(value).map_err(|e| e.to_string())?,
         )
         .map_err(|e| format!("app.db setting `{key}`: {e:#}"))?;
-    note_written(key);
+    refresh_network_policy(store, key)?;
     Ok(())
 }
 
@@ -1888,83 +1829,30 @@ pub fn reset_with_store(store: &tabverse_state::AppStateStore, key: &str) -> Res
     store
         .delete_setting(key)
         .map_err(|e| format!("app.db setting `{key}`: {e:#}"))?;
-    note_written(key);
+    refresh_network_policy(store, key)?;
     Ok(())
 }
 
-/// Keep the early-start network factory supplied before Tauri can open
-/// app.db. This file entry is a derived boot projection; config_get and all
-/// writes remain database-authoritative after the one-time import.
-pub fn project_network_setting(key: &str, value: Option<&serde_json::Value>) -> Result<(), String> {
+fn refresh_network_policy(store: &tabverse_state::AppStateStore, key: &str) -> Result<(), String> {
     if key.split('.').next() != Some(SECTION_NETWORK) {
         return Ok(());
     }
-    let path = write_target(current_platform(), &EnvVars::from_process())?;
-    match value {
-        Some(value) => set_in_file(&path, key, value),
-        None => reset_in_file(&path, key),
-    }
+    install_network_policy(store)
 }
 
-#[cfg(test)]
-pub async fn config_file_get() -> Result<ConfigSnapshot, String> {
-    // Disk read on the blocking pool, like every other file command here.
-    tauri::async_runtime::spawn_blocking(|| match load() {
-        Ok(loaded) => Ok(ConfigSnapshot {
-            values: loaded.config,
-            warnings: loaded.warnings,
-            sources: loaded.sources,
-            error: None,
-        }),
-        Err(e) => Err(e.to_string()),
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[cfg(test)]
-pub async fn config_file_set(key: String, value: serde_json::Value) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let path = write_target(current_platform(), &EnvVars::from_process())?;
-        set_in_file(&path, &key, &value)?;
-        note_written(&key);
-        Ok(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+/// Install the database-authoritative DNS policy in the shared HTTP factory.
+pub fn install_network_policy(store: &tabverse_state::AppStateStore) -> Result<(), String> {
+    let config = registered_config(store)?;
+    crate::http::set_policy(crate::http::DnsPolicy::from_settings(
+        config.network.dns_mode,
+        &config.network.dns_custom_url,
+    ));
+    Ok(())
 }
 
 /// The first component of every key in [`SECTIONS`] that something outside
 /// this module keeps a composed copy of.
 const SECTION_NETWORK: &str = "network";
-
-/// Tell whoever caches a composition of this key that it has moved.
-///
-/// One reader today: the HTTP factory holds the DNS policy it composed rather
-/// than reading the file per client (`http::policy`). Without this the
-/// settings page would report a saved change that nothing acted on until the
-/// next launch — the failure mode this is here to make impossible, as opposed
-/// to the delay it cannot remove (a client already built keeps its resolver,
-/// which the settings page states).
-fn note_written(key: &str) {
-    if key.split('.').next() == Some(SECTION_NETWORK) {
-        crate::http::forget();
-    }
-}
-
-/// Return one setting to its built-in default by deleting the line that sets
-/// it — see [`reset_in_file`] for why deleting beats writing the default out.
-#[cfg(test)]
-pub async fn config_file_reset(key: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let path = write_target(current_platform(), &EnvVars::from_process())?;
-        reset_in_file(&path, &key)?;
-        note_written(&key);
-        Ok(())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
 
 #[tauri::command]
 pub async fn config_files_set(exclude: Vec<String>, respect_gitignore: bool) -> Result<(), String> {
@@ -2223,44 +2111,6 @@ mod tests {
     }
 
     #[test]
-    fn a_section_present_alone_still_loads() {
-        // The failure mode section-level `#[serde(default)]` exists to
-        // prevent: without it this file is `missing field \`keys\``.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = write(dir.path(), "one.toml", "[appearance]\ntheme = \"dark\"\n");
-        let loaded = load_from_paths(&[path]).expect("partial file loads");
-        assert_eq!(loaded.config.appearance.theme, ThemePref::Named("dark"));
-        assert_eq!(
-            loaded.config.browser.archive_after,
-            Config::default().browser.archive_after
-        );
-    }
-
-    #[test]
-    fn env_override_reads_that_file_and_only_that_file() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = write(
-            dir.path(),
-            "custom.toml",
-            "[appearance]\nsidebar_width = 300\n",
-        );
-        let previous = std::env::var(ENV_CONFIG_FILE).ok();
-        std::env::set_var(ENV_CONFIG_FILE, &path);
-
-        let resolved = resolve_paths(current_platform(), &EnvVars::from_process());
-        assert_eq!(resolved, vec![path.clone()], "override replaces the search");
-        let loaded = load().expect("override file loads");
-        assert_eq!(loaded.config.appearance.sidebar_width, 300);
-        assert_eq!(loaded.sources, vec![path.display().to_string()]);
-
-        match previous {
-            Some(v) => std::env::set_var(ENV_CONFIG_FILE, v),
-            None => std::env::remove_var(ENV_CONFIG_FILE),
-        }
-    }
-
-    #[test]
     fn env_override_at_a_missing_path_is_the_absent_case() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2305,98 +2155,6 @@ mod tests {
             "detail keeps the caret: {}",
             e.detail
         );
-    }
-
-    #[test]
-    fn type_error_reports_its_line() {
-        let e = expect_error("# a configuration\n[appearance]\nsidebar_width = \"wide\"\n");
-        assert_eq!(e.line, BAD_LINE, "type error line ({e})");
-    }
-
-    #[test]
-    fn out_of_range_value_reports_its_line() {
-        let e = expect_error("# a configuration\n[appearance]\nsidebar_width = 999\n");
-        assert_eq!(e.line, BAD_LINE, "range error line ({e})");
-        // Located at the value, not at the start of the line or of the file.
-        assert!(e.column > 1, "range error column ({e})");
-    }
-
-    #[test]
-    fn an_uppercase_scheme_is_an_address_like_any_other() {
-        // RFC 3986: schemes are case-insensitive. The settings page agrees
-        // (src/search.ts tests case-insensitively), so a template it accepts
-        // has to survive the trip to disk — this side once disagreed, and a
-        // user who held shift got a save that failed for no reason a person
-        // could see.
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let path = dir.path().join("upper.toml");
-        std::fs::write(
-            &path,
-            "[browser]\ncustom_search_template = \"HTTPS://example.com/?q=%s\"\n",
-        )
-        .expect("write");
-        let loaded = load_from_paths(&[path]).expect("an uppercase scheme loads");
-        assert_eq!(
-            loaded.config.browser.custom_search_template, "HTTPS://example.com/?q=%s",
-            "the address is kept as the user typed it, not normalised"
-        );
-    }
-
-    #[test]
-    fn semantically_invalid_value_reports_its_line() {
-        let e = expect_error(
-            "# a configuration\n[browser]\ncustom_search_template = \"https://ex.com/?q=QUERY\"\n",
-        );
-        assert_eq!(e.line, BAD_LINE, "semantic error line ({e})");
-    }
-
-    #[test]
-    fn an_unknown_enum_token_reports_its_line() {
-        let e = expect_error("# a configuration\n[appearance]\ntheme = \"solarized\"\n");
-        assert_eq!(e.line, BAD_LINE, "enum error line ({e})");
-    }
-
-    #[test]
-    fn every_theme_tokens_json_declares_is_a_value_the_file_may_hold() {
-        for theme in crate::theme_gen::THEMES {
-            let src = format!("[appearance]\ntheme = \"{}\"\n", theme.id);
-            let dir = tempfile::tempdir().expect("tempdir");
-            let path = write(dir.path(), "config.toml", &src);
-            let loaded = match load_from_paths(&[path]) {
-                Ok(loaded) => loaded,
-                Err(e) => panic!("the file naming theme {} was refused: {e}", theme.id),
-            };
-            assert_eq!(
-                loaded.config.appearance.theme,
-                ThemePref::Named(theme.id),
-                "{} read back as something else",
-                theme.id
-            );
-        }
-        // Discriminating: the assertion above is about the themes that
-        // exist, and there are more of them than the two built-ins.
-        assert!(
-            crate::theme_gen::THEMES.len() > 2,
-            "tokens.json declares more than the two built-in themes"
-        );
-        // A theme nobody declared is still refused — the domain grew, it did
-        // not stop being a domain.
-        let e = expect_error("[appearance]\ntheme = \"no-such-theme\"\n");
-        assert!(
-            e.message.contains("no-such-theme"),
-            "the refusal does not name what was refused ({e})"
-        );
-    }
-
-    #[test]
-    fn the_error_line_moves_with_the_mistake() {
-        // Guards the assertions above against passing for the wrong reason:
-        // if the reported line were a constant, this would still say 3.
-        let e = expect_error(
-            "# a configuration\n[appearance]\nsidebar_width = 248\ntheme = \"system\"\n\
-             sidebar_pinned = 4\n",
-        );
-        assert_eq!(e.line, 5, "line follows the offending value ({e})");
     }
 
     #[test]
@@ -2533,80 +2291,6 @@ mod tests {
     }
 
     #[test]
-    fn the_network_section_is_read_and_its_two_rules_are_enforced() {
-        let dir = tempfile::tempdir().expect("tempdir");
-
-        let good = write(
-            dir.path(),
-            "good.toml",
-            "[network]\n\
-             dns_mode = \"quad9\"\n\
-             dns_custom_url = \"https://doh.example/dns-query\"\n",
-        );
-        let loaded = load_from_paths(&[good]).expect("a well-formed network section loads");
-        assert_eq!(loaded.config.network.dns_mode, DnsMode::Quad9);
-        assert_eq!(
-            loaded.config.network.dns_custom_url,
-            "https://doh.example/dns-query"
-        );
-
-        // A mode nobody offers is refused, and the message says what may be
-        // written — the same treatment every other choice field gets.
-        let bad_mode = write(
-            dir.path(),
-            "bad-mode.toml",
-            "[network]\ndns_mode = \"opendns\"\n",
-        );
-        let refusal = load_from_paths(&[bad_mode])
-            .expect_err("an unknown resolver must not load")
-            .to_string();
-        assert!(
-            refusal.contains("dns_mode must be one of") && refusal.contains("quad9"),
-            "unhelpful refusal: {refusal}"
-        );
-
-        // The address is judged by the rule its registry row declares, which
-        // is what keeps this file and the settings page from disagreeing.
-        let bad_url = write(
-            dir.path(),
-            "bad-url.toml",
-            "[network]\ndns_custom_url = \"ftp://doh.example/\"\n",
-        );
-        let refusal = load_from_paths(&[bad_url])
-            .expect_err("an address that is not http(s) must not load")
-            .to_string();
-        assert!(
-            refusal.contains("network.dns_custom_url"),
-            "the refusal does not name the key: {refusal}"
-        );
-
-        // An absent section is the defaults, not a missing-field failure —
-        // the property every section carries and the one most easily lost.
-        let silent = write(
-            dir.path(),
-            "silent.toml",
-            "[appearance]\ntheme = \"dark\"\n",
-        );
-        let loaded = load_from_paths(&[silent]).expect("a file with no [network] loads");
-        assert_eq!(loaded.config.network, Config::default().network);
-
-        assert!(
-            !Config::default().network.cover_page_traffic,
-            "cover_page_traffic must default to off"
-        );
-        let covered = write(
-            dir.path(),
-            "covered.toml",
-            "[network]\ncover_page_traffic = true\n",
-        );
-        let loaded = load_from_paths(&[covered]).expect("the page-traffic toggle loads");
-        assert!(
-            loaded.config.network.cover_page_traffic,
-            "a file that turns the page-traffic toggle on must load it on"
-        );
-    }
-
-    #[test]
     fn the_defaults_are_what_the_terminals_already_drew_with() {
         let d = Config::default().terminal;
         assert_eq!(d.font_size, 13);
@@ -2615,59 +2299,7 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_section_carries_the_font_and_the_profiles_together() {
-        // Half of `[terminal]` is registry rows and half of it is a list of
-        // entities, and the two have to survive each other: a font block
-        // beside profiles must load without the profiles being read as
-        // unknown settings, or the other way round.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = write(
-            dir.path(),
-            "config.toml",
-            "[terminal]\n\
-             font_family = \"Fira Code\"\n\
-             font_size = 16\n\
-             line_height_percent = 140\n\n\
-             [[terminal.profiles]]\n\
-             name = \"Deploy\"\n\
-             font = \"IBM Plex Mono\"\n",
-        );
-        let loaded = load_from_paths(&[path]).expect("the section loads");
-        assert_eq!(loaded.config.terminal.font_family, "Fira Code");
-        assert_eq!(loaded.config.terminal.font_size, 16);
-        assert_eq!(loaded.config.terminal.line_height_percent, 140);
-        assert_eq!(loaded.config.terminal.profiles.len(), 1);
-        assert_eq!(
-            loaded.config.terminal.profiles[0].font.as_deref(),
-            Some("IBM Plex Mono")
-        );
-        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
-    }
-
-    #[test]
-    fn background_task_prompts_default_off_and_round_trip() {
-        assert!(
-            !Config::default().terminal.background_tasks,
-            "the default must preserve stopping tasks when closing a tab or exiting"
-        );
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = write(
-            dir.path(),
-            "config.toml",
-            "[terminal]\nbackground_tasks = true\n",
-        );
-        let loaded = load_from_paths(&[path]).expect("the terminal setting loads");
-        assert!(loaded.config.terminal.background_tasks);
-        assert!(
-            loaded.warnings.is_empty(),
-            "background_tasks is a known terminal key: {:?}",
-            loaded.warnings
-        );
-    }
-
-    #[test]
-    fn the_ligature_switch_is_off_until_asked_for_and_a_profile_may_differ() {
+    fn a_profile_may_override_the_registered_terminal_default() {
         assert!(
             !Config::default().terminal.ligatures,
             "the default may not silently change a renderer"
@@ -2684,7 +2316,7 @@ mod tests {
              ligatures = false\n",
         );
         let loaded = load_from_paths(&[path]).expect("the section loads");
-        assert!(loaded.config.terminal.ligatures);
+        assert!(!loaded.config.terminal.ligatures);
         // The point of the per-profile field: one machine, ligatures on,
         // and a profile that keeps GPU acceleration for watching a build.
         assert_eq!(
@@ -2692,169 +2324,42 @@ mod tests {
             Some(false),
             "a profile that says otherwise is not merged away"
         );
-        assert!(
-            loaded.warnings.is_empty(),
-            "`ligatures` is a known profile key: {:?}",
-            loaded.warnings
-        );
+        assert_eq!(loaded.warnings.len(), 1);
+        assert_eq!(loaded.warnings[0].key, "terminal.ligatures");
     }
 
     #[test]
-    fn a_font_size_outside_the_range_reports_its_line_and_the_range() {
-        let e = expect_error("[terminal]\n# a note\nfont_size = 200\n");
-        assert_eq!(e.line, 3);
-        assert!(
-            e.message.contains("font_size must be between"),
-            "the refusal must say what may be written: {}",
-            e.message
-        );
-    }
-
-    #[test]
-    fn image_memory_defaults_to_the_addons_own_and_holds_its_range() {
-        assert_eq!(Config::default().terminal.image_memory_mb, 128);
-
-        let e = expect_error("[terminal]\nimage_memory_mb = 8\n");
-        assert_eq!(e.line, 2);
-        assert!(
-            e.message
-                .contains("image_memory_mb must be between 16 and 512"),
-            "the refusal must say what may be written: {}",
-            e.message
-        );
-
-        let ok = load_from_paths(&[write(
-            tempfile::tempdir().expect("tempdir").path(),
-            "c.toml",
-            "[terminal]\nimage_memory_mb = 64\n",
-        )]);
-        assert_eq!(
-            ok.expect("a pane may be given less than the default")
-                .config
-                .terminal
-                .image_memory_mb,
-            64
-        );
-    }
-
-    #[test]
-    fn line_spacing_is_whole_percent_and_says_so_when_it_is_not() {
-        // The unit is in the key's name for this reason: somebody who writes
-        // the multiplier they know from elsewhere gets a located error naming
-        // the range, rather than a value silently taken for something else.
-        let e = expect_error("[terminal]\nline_height_percent = 1.2\n");
-        assert_eq!(e.line, 2);
-        let ok = load_from_paths(&[write(
-            tempfile::tempdir().expect("tempdir").path(),
-            "c.toml",
-            "[terminal]\nline_height_percent = 100\n",
-        )]);
-        assert_eq!(
-            ok.expect("the tightest spacing is allowed")
-                .config
-                .terminal
-                .line_height_percent,
-            100
-        );
-    }
-
-    #[test]
-    fn any_family_name_is_accepted_because_this_side_cannot_see_the_fonts() {
-        // The machine's fonts are the interface's to see (src/term/
-        // fontProbe.ts measures them and says so on the spot). Refusing a
-        // name here would refuse the ordinary case of setting a font before
-        // installing it — and would need a list of installed families in the
-        // one process that has no way to get one.
-        let dir = tempfile::tempdir().expect("tempdir");
-        for name in ["Fira Code", "Nothing Anybody Has", "A, B"] {
-            let path = write(
-                dir.path(),
-                "config.toml",
-                &format!("[terminal]\nfont_family = \"{name}\"\n"),
-            );
-            assert_eq!(
-                load_from_paths(&[path])
-                    .expect("any family name loads")
-                    .config
-                    .terminal
-                    .font_family,
-                name
-            );
-        }
-    }
-
-    #[test]
-    fn writing_a_network_key_drops_the_composed_dns_policy() {
+    fn database_network_writes_replace_the_live_dns_policy() {
         use crate::http::{cached_policy, lock_policy_for_test, set_policy, DnsPolicy};
         let _serialized = lock_policy_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let store = tabverse_state::AppStateStore::open(dir.path()).unwrap();
 
-        // Without this hook a saved change would be reported as saved and act
-        // on nothing until the next launch — the settings page would be
-        // telling the truth about the file and a lie about the program.
         set_policy(DnsPolicy::Doh("https://doh.example/dns-query".into()));
-        note_written("appearance.theme");
-        assert!(
-            cached_policy().is_some(),
-            "a write to another section must not disturb the composed policy"
-        );
-        note_written("network.dns_mode");
+        set_with_store(&store, "appearance.theme", &json!("dark")).unwrap();
         assert_eq!(
             cached_policy(),
-            None,
-            "a write under [network] must drop the policy so the next client recomposes"
+            Some(DnsPolicy::Doh("https://doh.example/dns-query".into())),
+            "a non-network setting must not disturb the policy"
         );
+
+        set_with_store(
+            &store,
+            "network.dns_custom_url",
+            &json!("https://resolver.example/dns-query"),
+        )
+        .unwrap();
+        set_with_store(&store, "network.dns_mode", &json!("custom")).unwrap();
+        assert_eq!(
+            cached_policy(),
+            Some(DnsPolicy::Doh("https://resolver.example/dns-query".into()))
+        );
+
+        reset_with_store(&store, "network.dns_mode").unwrap();
+        assert_eq!(cached_policy(), Some(DnsPolicy::System));
     }
 
     // ---- unknown keys warn, and cost nothing else
-
-    #[test]
-    fn unknown_keys_warn_without_disturbing_the_rest() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = write(
-            dir.path(),
-            "typos.toml",
-            "# line 1\n\
-             [appearance]\n\
-             theme = \"dark\"\n\
-             sidebar_wdith = 300\n\
-             \n\
-             [browser]\n\
-             serch_engine = \"google\"\n\
-             archive_after = \"7d\"\n\
-             \n\
-             [nonsense]\n\
-             whatever = 1\n",
-        );
-        let loaded = load_from_paths(&[path]).expect("unknown keys must not stop the load");
-
-        assert_eq!(loaded.config.appearance.theme, ThemePref::Named("dark"));
-        assert_eq!(loaded.config.browser.archive_after, ArchiveAfter::Days7);
-        // The misspelled key did not take effect anywhere.
-        assert_eq!(
-            loaded.config.appearance.sidebar_width,
-            Config::default().appearance.sidebar_width
-        );
-        assert_eq!(
-            loaded.config.browser.search_engine,
-            Config::default().browser.search_engine
-        );
-
-        let seen: Vec<(String, usize)> = loaded
-            .warnings
-            .iter()
-            .map(|w| (w.key.clone(), w.line))
-            .collect();
-        assert_eq!(
-            seen,
-            vec![
-                ("appearance.sidebar_wdith".to_string(), 4),
-                ("browser.serch_engine".to_string(), 7),
-                ("nonsense".to_string(), 10),
-            ]
-        );
-    }
-
-    // ---- the registry and the struct stay in step
 
     #[test]
     fn every_registered_key_names_a_real_field() {
@@ -3033,42 +2538,6 @@ mod tests {
     }
 
     #[test]
-    fn the_file_judges_a_template_by_exactly_the_registrys_rule() {
-        // The wiring, asserted rather than assumed: for every candidate, the
-        // file's verdict and `check_text(registry rule, …)` agree. A rule
-        // hand-written into the deserializer would be free to differ, and
-        // this is the test that would catch it — including on the two cases
-        // that have actually gone wrong here, an uppercase scheme and a
-        // missing placeholder.
-        let rule = match text_rule(KEY_CUSTOM_SEARCH_TEMPLATE) {
-            Some(rule) => rule,
-            None => panic!("no rule to compare against"),
-        };
-        let dir = tempfile::tempdir().expect("tempdir");
-        for candidate in [
-            "",
-            "https://e.test/?q=%s",
-            "HTTPS://e.test/?q=%s",
-            "HtTp://e.test/?q=%s",
-            "ftp://e.test/?q=%s",
-            "javascript:alert('%s')",
-            "e.test/?q=%s",
-            "https://e.test/?q=query",
-            "https://e.test/%s/and/%s",
-        ] {
-            let body = format!("[browser]\ncustom_search_template = \"{candidate}\"\n");
-            let path = write(dir.path(), "candidate.toml", &body);
-            let loaded = load_from_paths(&[path]).is_ok();
-            let allowed = check_text(rule, candidate).is_ok();
-            assert_eq!(
-                loaded, allowed,
-                "the file said {loaded} for {candidate:?} and the registry's \
-                 own rule said {allowed}"
-            );
-        }
-    }
-
-    #[test]
     fn the_three_cases_the_two_copies_used_to_disagree_about() {
         // Named separately from the property above so a run says which one
         // moved. An uppercase scheme is an address (RFC 3986 §3.1); a scheme
@@ -3112,75 +2581,14 @@ mod tests {
     }
 
     #[test]
-    fn the_sample_file_from_the_design_loads_as_written() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = write(
-            dir.path(),
-            "sample.toml",
-            "# Tabverse configuration. Delete this file to return to defaults.\n\
-             \n\
-             [appearance]\n\
-             theme = \"system\"           # system | light | dark\n\
-             sidebar_width = 248        # 180-520\n\
-             sidebar_pinned = true\n\
-             \n\
-             [browser]\n\
-             search_engine = \"duckduckgo\"   # duckduckgo | google | bing | custom\n\
-             custom_search_template = \"\"    # must contain %s, http(s) only\n\
-             archive_after = \"24h\"          # 12h | 24h | 7d | off\n\
-             \n\
-             [terminal]\n\
-             # reserved\n\
-             \n\
-             [files]\n\
-             # Directory-name globs added to the built-in noise list the\n\
-             # search, quick-open and the tree watcher all share. One per\n\
-             # entry; empty (or absent) means the built-ins alone:\n\
-             # exclude = [\"vendor\", \"*-generated\"]\n\
-             # respect_gitignore = false\n\
-             \n\
-             [keys]\n\
-             # reserved\n",
-        );
-        let loaded = load_from_paths(&[path]).expect("the documented sample loads");
-        assert_eq!(loaded.config, Config::default());
-        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
-    }
-
-    // ---- several files, later wins
-
-    #[test]
-    fn a_later_file_overrides_earlier_ones_key_by_key() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let first = write(
-            dir.path(),
-            "first.toml",
-            "[appearance]\ntheme = \"dark\"\nsidebar_width = 200\n",
-        );
-        let second = write(
-            dir.path(),
-            "second.toml",
-            "[appearance]\nsidebar_width = 400\n\n[browser]\nsearch_engine = \"bing\"\n",
-        );
-        let loaded = load_from_paths(&[first, second]).expect("both files load");
-        // The later file replaced one key and left its neighbour alone.
-        assert_eq!(loaded.config.appearance.sidebar_width, 400);
-        assert_eq!(loaded.config.appearance.theme, ThemePref::Named("dark"));
-        assert_eq!(loaded.config.browser.search_engine, SearchEngine::Bing);
-        assert_eq!(loaded.sources.len(), 2);
-    }
-
-    // ---- the command-line entry
-
-    #[test]
     fn validate_reports_zero_one_and_two() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let good = write(dir.path(), "good.toml", "[appearance]\ntheme = \"dark\"\n");
-        let bad = write(
+        let good = write(
             dir.path(),
-            "bad.toml",
-            "[appearance]\nsidebar_width = 999\n",
+            "good.toml",
+            "[files]\nrespect_gitignore = true\n",
         );
+        let bad = write(dir.path(), "bad.toml", "[files]\nexclude = 999\n");
         let odd = write(dir.path(), "odd.toml", "[appearance]\nthme = \"dark\"\n");
 
         let mut out = String::new();
@@ -3224,7 +2632,11 @@ mod tests {
     #[test]
     fn the_flag_takes_its_path_either_way() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let good = write(dir.path(), "good.toml", "[appearance]\ntheme = \"light\"\n");
+        let good = write(
+            dir.path(),
+            "good.toml",
+            "[files]\nrespect_gitignore = true\n",
+        );
         let text = good.display().to_string();
         assert_eq!(
             validate_from_args(vec![VALIDATE_FLAG.to_string(), text.clone()]),
@@ -3297,20 +2709,11 @@ archive_after = "24h"          # 12h | 24h | 7d | off
         }
     }
 
-    /// Every section header and key name, in the order the file writes them.
-    fn key_order(text: &str) -> Vec<String> {
-        text.lines()
-            .filter_map(|line| {
-                let line = line.trim();
-                if line.starts_with('#') {
-                    return None;
-                }
-                if line.starts_with('[') {
-                    return Some(line.to_string());
-                }
-                line.split_once('=').map(|(key, _)| key.trim().to_string())
-            })
-            .collect()
+    fn a_command() -> String {
+        match crate::keys::defaults().first() {
+            Some(binding) => binding.command.clone(),
+            None => panic!("the shortcut table is empty"),
+        }
     }
 
     #[test]
@@ -3346,226 +2749,6 @@ archive_after = "24h"          # 12h | 24h | 7d | off
         for sample in [DIRTY, "", "# just a comment\n", "[appearance]\n"] {
             let doc: DocumentMut = sample.parse().expect("the sample parses");
             assert_eq!(doc.to_string(), sample, "re-rendering changed {sample:?}");
-        }
-    }
-
-    #[test]
-    fn one_write_changes_one_line_and_leaves_the_file_byte_for_byte_otherwise() {
-        let (_dir, path) = dirty_file();
-        set_in_file(&path, "appearance.theme", &json!("dark")).expect("the write succeeds");
-
-        // The expectation is built by substituting one line in the source
-        // text — a different construction from the one under test, which
-        // edits a parse tree. It is not the same transformation spelled
-        // twice.
-        let expected = DIRTY.replace(
-            r#"theme = "system"           # system | light | dark"#,
-            r#"theme = "dark"           # system | light | dark"#,
-        );
-        assert_eq!(
-            differing_lines(DIRTY, &expected).len(),
-            1,
-            "the expected text must differ from the input on exactly one line, or this \
-             test would be comparing the file with itself"
-        );
-
-        let actual = read_back(&path);
-        assert_eq!(
-            actual,
-            expected,
-            "the write disturbed something other than its own line:\n{}",
-            damage(&expected, &actual)
-        );
-    }
-
-    #[test]
-    fn the_trailing_comment_on_the_edited_line_survives() {
-        // The named landing point for the mutation this family exists to
-        // catch: swapping the decor-preserving setter for a plain
-        // assignment. The format-selection round measured that a plain
-        // assignment eats the comment, so this is a defect that has actually
-        // been observed rather than one imagined for the test's sake.
-        let (_dir, path) = dirty_file();
-        set_in_file(&path, "appearance.theme", &json!("dark")).expect("the write succeeds");
-        let actual = read_back(&path);
-        let line = match actual.lines().find(|l| l.trim_start().starts_with("theme")) {
-            Some(line) => line,
-            None => panic!("the theme line is no longer in the file:\n{actual}"),
-        };
-        assert!(
-            line.contains(r#"theme = "dark""#),
-            "the edited line does not carry the new value: {line:?}"
-        );
-        assert!(
-            line.contains("# system | light | dark"),
-            "the trailing comment on the edited line was eaten; the line now reads \
-             {line:?}. The value's suffix decor is where that comment lives, and a \
-             plain assignment replaces it with the new value's empty one."
-        );
-        // The comments on the lines that were *not* edited are a separate
-        // failure, asserted separately so a run says which one happened.
-        assert!(
-            actual.contains("# 180-520") && actual.contains("# indented on purpose"),
-            "a comment on an untouched line was lost:\n{actual}"
-        );
-    }
-
-    #[test]
-    fn writing_the_value_that_is_already_there_changes_no_byte() {
-        let (_dir, path) = dirty_file();
-        set_in_file(&path, "appearance.theme", &json!("system")).expect("the write succeeds");
-        let actual = read_back(&path);
-        assert_eq!(
-            actual,
-            DIRTY,
-            "an assignment that changes nothing still rewrote the file:\n{}",
-            damage(DIRTY, &actual)
-        );
-    }
-
-    #[test]
-    fn three_writes_across_two_sections_disturb_only_their_own_lines() {
-        let (_dir, path) = dirty_file();
-        set_in_file(&path, "appearance.sidebar_width", &json!(300)).expect("width");
-        set_in_file(&path, "browser.archive_after", &json!("7d")).expect("archive_after");
-        set_in_file(&path, "appearance.sidebar_pinned", &json!(false)).expect("sidebar_pinned");
-
-        let expected = DIRTY
-            .replace(
-                "sidebar_width = 248        # 180-520",
-                "sidebar_width = 300        # 180-520",
-            )
-            .replace(
-                "  sidebar_pinned = true    # indented on purpose",
-                "  sidebar_pinned = false    # indented on purpose",
-            )
-            .replace(
-                r#"archive_after = "24h"          # 12h | 24h | 7d | off"#,
-                r#"archive_after = "7d"          # 12h | 24h | 7d | off"#,
-            );
-        assert_eq!(
-            differing_lines(DIRTY, &expected).len(),
-            3,
-            "the expectation must differ from the input on exactly the three edited lines"
-        );
-
-        let actual = read_back(&path);
-        assert_eq!(
-            actual,
-            expected,
-            "three writes disturbed something other than their own lines:\n{}",
-            damage(&expected, &actual)
-        );
-
-        // Each named separately, so a failure says which property broke
-        // rather than only that some byte moved.
-        assert!(
-            actual.starts_with("# Tabverse configuration. Delete this file"),
-            "the header comment no longer opens the file:\n{actual}"
-        );
-        assert!(
-            actual.contains("# Hand-edited - please keep these notes."),
-            "the second header line went missing:\n{actual}"
-        );
-        assert!(
-            actual.contains(r#"homepage = "https://example.com"   # not a setting Tabverse knows"#),
-            "the key Tabverse does not know was rewritten or dropped:\n{actual}"
-        );
-        assert!(
-            actual.contains("[terminal]"),
-            "the empty hand-written section was dropped:\n{actual}"
-        );
-        assert_eq!(
-            key_order(&actual),
-            key_order(DIRTY),
-            "the entries were reordered"
-        );
-        assert_eq!(
-            actual.matches("\n\n").count(),
-            DIRTY.matches("\n\n").count(),
-            "the blank lines between the groups changed:\n{actual}"
-        );
-
-        // And the file still says what was written to it.
-        let loaded = load_from_paths(&[path]).expect("the edited file still loads");
-        assert_eq!(loaded.config.appearance.sidebar_width, 300);
-        assert!(!loaded.config.appearance.sidebar_pinned);
-        assert_eq!(loaded.config.browser.archive_after, ArchiveAfter::Days7);
-        assert_eq!(
-            loaded.config.appearance.theme,
-            ThemePref::System,
-            "a key nobody wrote to changed value"
-        );
-        assert_eq!(
-            loaded.warnings.len(),
-            1,
-            "the unknown key must still be there, warned about exactly once: {:?}",
-            loaded.warnings
-        );
-    }
-
-    #[test]
-    fn a_reset_deletes_the_line_and_leaves_the_rest_byte_for_byte() {
-        let (_dir, path) = dirty_file();
-        reset_in_file(&path, "appearance.theme").expect("the reset succeeds");
-
-        let expected = DIRTY.replace("theme = \"system\"           # system | light | dark\n", "");
-        assert_eq!(
-            expected.lines().count(),
-            DIRTY.lines().count() - 1,
-            "the expectation must be the input with exactly one line removed"
-        );
-
-        let actual = read_back(&path);
-        assert_eq!(
-            actual,
-            expected,
-            "the reset disturbed more than the line it removed:\n{}",
-            damage(&expected, &actual)
-        );
-        // The judgement this criterion is written against: the key is gone,
-        // not rewritten as the default's literal value. A default written
-        // into the file would be frozen there for ever.
-        assert!(
-            !actual.contains("theme"),
-            "the key is still named in the file after a reset:\n{actual}"
-        );
-        assert!(
-            actual.contains("[appearance]"),
-            "the reset took the section header with it:\n{actual}"
-        );
-
-        let loaded = load_from_paths(&[path]).expect("the file still loads");
-        assert_eq!(
-            loaded.config.appearance.theme,
-            Config::default().appearance.theme
-        );
-        assert_eq!(
-            loaded.config.appearance.sidebar_width, 248,
-            "a neighbour changed"
-        );
-    }
-
-    #[test]
-    fn resetting_a_key_that_is_not_set_writes_nothing() {
-        let (_dir, path) = dirty_file();
-        // Registered, but this file never sets it.
-        reset_in_file(&path, "browser.custom_search_template").expect("a no-op reset succeeds");
-        assert_eq!(read_back(&path), DIRTY, "a no-op reset rewrote the file");
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let missing = dir.path().join("never").join("config.toml");
-        reset_in_file(&missing, "appearance.theme").expect("a reset on a missing file succeeds");
-        assert!(!missing.exists(), "a reset created the file");
-    }
-
-    /// A command the shipped table really has, taken from the table rather
-    /// than typed here — a test that named a command by hand would go on
-    /// passing after that command was renamed, testing nothing.
-    fn a_command() -> String {
-        match crate::keys::defaults().first() {
-            Some(binding) => binding.command.clone(),
-            None => panic!("the shortcut table is empty"),
         }
     }
 
@@ -3738,381 +2921,6 @@ archive_after = "24h"          # 12h | 24h | 7d | off
     // ---- what a write refuses
 
     #[test]
-    fn an_unregistered_key_is_refused_and_never_reaches_the_file() {
-        let (_dir, path) = dirty_file();
-        for key in [
-            "appearance.thme",
-            // In the file already, but not ours to write.
-            "browser.homepage",
-            "nonsense.thing",
-            "appearance",
-            "appearance.theme.extra",
-            "",
-        ] {
-            let e = match set_in_file(&path, key, &json!("dark")) {
-                Ok(()) => panic!("`{key}` was written even though no setting has that name"),
-                Err(e) => e,
-            };
-            assert!(e.contains(key), "the refusal must name the key: {e}");
-            assert_eq!(read_back(&path), DIRTY, "`{key}` reached the file anyway");
-
-            match reset_in_file(&path, key) {
-                Ok(()) => panic!("`{key}` was reset even though no setting has that name"),
-                Err(e) => assert!(e.contains(key), "{e}"),
-            }
-            assert_eq!(
-                read_back(&path),
-                DIRTY,
-                "resetting `{key}` changed the file"
-            );
-        }
-    }
-
-    #[test]
-    fn a_value_the_file_would_reject_is_rejected_before_anything_is_written() {
-        let (_dir, path) = dirty_file();
-        for (key, value, why) in [
-            (
-                "appearance.theme",
-                json!("solarized"),
-                "a token no enum has",
-            ),
-            ("appearance.sidebar_width", json!(999), "above the range"),
-            ("appearance.sidebar_width", json!(0), "below the range"),
-            ("appearance.sidebar_width", json!(-8), "negative"),
-            (
-                "appearance.sidebar_width",
-                json!("wide"),
-                "text where a number goes",
-            ),
-            (
-                "appearance.sidebar_width",
-                json!(248.5),
-                "a fraction of a point",
-            ),
-            (
-                "appearance.sidebar_pinned",
-                json!("yes"),
-                "text where true/false goes",
-            ),
-            (
-                "browser.custom_search_template",
-                json!("https://example.com/?q=QUERY"),
-                "no %s for the query to go in",
-            ),
-            (
-                "browser.custom_search_template",
-                json!("ftp://example.com/?q=%s"),
-                "not an http address",
-            ),
-            (
-                "browser.search_engine",
-                json!(3),
-                "a number where a token goes",
-            ),
-            (
-                "appearance.theme",
-                json!(["dark"]),
-                "a list, which no setting is",
-            ),
-            ("appearance.theme", json!(null), "nothing at all"),
-        ] {
-            let e = match set_in_file(&path, key, &value) {
-                Ok(()) => panic!("{key} = {value} ({why}) was accepted"),
-                Err(e) => e,
-            };
-            assert!(
-                !e.is_empty(),
-                "{key} = {value} was refused without saying why"
-            );
-            assert_eq!(
-                read_back(&path),
-                DIRTY,
-                "{key} = {value} ({why}) reached the file before it was judged"
-            );
-        }
-
-        // The positive control: the loop above is not passing because the
-        // write path refuses everything.
-        set_in_file(&path, "appearance.theme", &json!("dark")).expect("a good value still lands");
-        assert_ne!(read_back(&path), DIRTY, "no write ever succeeds");
-    }
-
-    #[test]
-    fn a_write_refuses_what_the_schema_does_not_offer() {
-        // Driven off the registry, so a setting added to SETTINGS is covered
-        // by this the moment it is added rather than when someone remembers.
-        for setting in SETTINGS {
-            let (_dir, path) = dirty_file();
-            let refused: Vec<serde_json::Value> = match setting.kind {
-                Kind::Choice { .. } => vec![json!("not-one-of-them"), json!(true)],
-                Kind::Number { min, max } => {
-                    vec![json!(min - 1), json!(max + 1), json!("wide")]
-                }
-                Kind::Toggle => vec![json!("true"), json!(1)],
-                // The wrong type, and — built out of the rule the row itself
-                // declares — one string per clause that rule states. A
-                // clause added to the registry is covered here the moment it
-                // is added, not when somebody remembers to add a case.
-                Kind::Text(rule) => {
-                    let mut out = vec![json!(1), json!(true)];
-                    out.extend(text_violations(rule).into_iter().map(|v| json!(v)));
-                    out
-                }
-            };
-            for value in refused {
-                assert!(
-                    set_in_file(&path, setting.key, &value).is_err(),
-                    "{} accepted {value}, which its own schema does not offer",
-                    setting.key
-                );
-                assert_eq!(
-                    read_back(&path),
-                    DIRTY,
-                    "{} let {value} reach the file",
-                    setting.key
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_file_that_does_not_parse_is_never_overwritten() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        // One unclosed quote — and, below it, everything else the user ever
-        // wrote. Rewriting this file from the defaults would delete all of
-        // it to fix a typo.
-        let broken = "# my settings\n[appearance]\ntheme = \"dark\nsidebar_width = 300\n";
-        let path = write(dir.path(), "config.toml", broken);
-
-        let e = match set_in_file(&path, "appearance.theme", &json!("light")) {
-            Ok(()) => panic!("a write into an unreadable file succeeded"),
-            Err(e) => e,
-        };
-        assert!(
-            e.contains("does not parse"),
-            "the refusal must say why: {e}"
-        );
-        assert_eq!(
-            read_back(&path),
-            broken,
-            "the unreadable file was overwritten — the user's settings are gone"
-        );
-
-        let e = match reset_in_file(&path, "appearance.theme") {
-            Ok(()) => panic!("a reset in an unreadable file succeeded"),
-            Err(e) => e,
-        };
-        assert!(e.contains("does not parse"), "{e}");
-        assert_eq!(read_back(&path), broken);
-    }
-
-    // ---- creating what is not there yet
-
-    #[test]
-    fn a_first_write_creates_the_file_and_its_directory_with_a_real_section() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir
-            .path()
-            .join("nested")
-            .join("tabverse")
-            .join("config.toml");
-        set_in_file(&path, "browser.archive_after", &json!("7d")).expect("the first write");
-
-        let actual = read_back(&path);
-        assert_eq!(actual, "[browser]\narchive_after = \"7d\"\n");
-        assert!(
-            !actual.contains('{'),
-            "the new section degraded into an inline table: {actual:?}"
-        );
-
-        let loaded = load_from_paths(&[path]).expect("what was written loads back");
-        assert_eq!(loaded.config.browser.archive_after, ArchiveAfter::Days7);
-        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
-    }
-
-    #[test]
-    fn a_new_section_is_appended_below_what_the_file_already_says() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let before = "# my own notes, first line\n# and the second\n\n[appearance]\n\
-                      theme = \"dark\"   # keep me\n";
-        let path = write(dir.path(), "config.toml", before);
-        set_in_file(&path, "browser.archive_after", &json!("7d")).expect("the write succeeds");
-        let actual = read_back(&path);
-
-        assert!(
-            actual.starts_with("# my own notes, first line\n# and the second\n"),
-            "the header comments no longer open the file:\n{actual}"
-        );
-        assert!(
-            !actual.contains("browser = "),
-            "the new section was written as an inline assignment:\n{actual}"
-        );
-        let head = match actual.split_once("[browser]") {
-            Some((head, _)) => head,
-            None => panic!("the new section is not in the file:\n{actual}"),
-        };
-        assert!(
-            head.contains("[appearance]"),
-            "the new section jumped above the section that was already there:\n{actual}"
-        );
-        assert!(
-            actual.contains("theme = \"dark\"   # keep me"),
-            "an untouched line was rewritten:\n{actual}"
-        );
-        assert!(load_from_paths(&[path]).is_ok(), "the result must load");
-    }
-
-    #[test]
-    fn a_new_key_lands_inside_its_own_section() {
-        let (_dir, path) = dirty_file();
-        let template = "https://example.com/search?q=%s";
-        set_in_file(&path, "browser.custom_search_template", &json!(template))
-            .expect("the write succeeds");
-
-        let actual = read_back(&path);
-        let head = match actual.split_once("[terminal]") {
-            Some((head, _)) => head,
-            None => panic!("the terminal section went missing:\n{actual}"),
-        };
-        assert!(
-            head.contains("custom_search_template"),
-            "the new key landed outside the section it belongs to:\n{actual}"
-        );
-        let loaded = load_from_paths(&[path]).expect("the result loads");
-        assert_eq!(loaded.config.browser.custom_search_template, template);
-    }
-
-    #[test]
-    fn a_section_written_as_an_inline_table_is_refused_rather_than_mangled() {
-        // A shape a load accepts but a write does not, pinned here so it is
-        // a decision on the record instead of a surprise: the documented file
-        // format is one `[section]` header per section, and editing an inline
-        // table in place would mean a second assignment path with its own
-        // formatting rules. The refusal is safe — the file is untouched and
-        // the message says what to change — but it is a refusal, and the
-        // user hears about it rather than losing the line.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let before = "appearance = { theme = \"dark\" }\n";
-        let path = write(dir.path(), "config.toml", before);
-        assert_eq!(
-            load_from_paths(std::slice::from_ref(&path))
-                .expect("a load accepts this shape")
-                .config
-                .appearance
-                .theme,
-            ThemePref::Named("dark"),
-            "if a load ever stops accepting this, the refusal below stops mattering"
-        );
-
-        let e = match set_in_file(&path, "appearance.theme", &json!("light")) {
-            Ok(()) => panic!(
-                "the inline table was edited in place:\n{}",
-                read_back(&path)
-            ),
-            Err(e) => e,
-        };
-        assert!(
-            e.contains("[appearance]"),
-            "the refusal must say what to change: {e}"
-        );
-        assert_eq!(read_back(&path), before, "the file was touched anyway");
-    }
-
-    // ---- the registry drives the write path
-
-    #[test]
-    fn every_registered_setting_can_be_written_and_read_back() {
-        for setting in SETTINGS {
-            for sample in write_samples(setting) {
-                let (_dir, path) = dirty_file();
-                match set_in_file(&path, setting.key, &sample) {
-                    Ok(()) => {}
-                    Err(e) => panic!("{} could not be set to {sample}: {e}", setting.key),
-                }
-                let loaded = match load_from_paths(std::slice::from_ref(&path)) {
-                    Ok(loaded) => loaded,
-                    Err(e) => panic!(
-                        "{} = {sample} produced a file that will not load: {e}",
-                        setting.key
-                    ),
-                };
-                let json = serde_json::to_value(&loaded.config).expect("config serializes");
-                let pointer = format!("/{}", setting.key.replace('.', "/"));
-                assert_eq!(
-                    json.pointer(&pointer),
-                    Some(&sample),
-                    "{} was written as {sample} and read back as something else",
-                    setting.key
-                );
-            }
-        }
-    }
-
-    /// A valid sample for each kind, taken from the registry row itself
-    /// rather than from a list kept by hand beside it.
-    fn write_samples(setting: &Setting) -> Vec<serde_json::Value> {
-        match setting.kind {
-            Kind::Choice { options } => options.get().iter().map(|o| json!(o)).collect(),
-            Kind::Number { min, max } => vec![json!(min), json!(max), json!((min + max) / 2)],
-            Kind::Toggle => vec![json!(true), json!(false)],
-            // Built from the rule the row declares: whatever that rule now
-            // says, this is a value it accepts — plus the empty string when
-            // the rule says "nothing configured" is a state.
-            Kind::Text(rule) => {
-                let mut out = Vec::new();
-                if rule.allow_empty {
-                    out.push(json!(""));
-                }
-                out.push(json!(text_sample(rule)));
-                out
-            }
-        }
-    }
-
-    /// A value the rule accepts, assembled from the rule.
-    ///
-    /// The host is a literal because no rule in the registry says anything
-    /// about hosts; everything the rule *does* say — the scheme it offers,
-    /// the substring it demands — is read out of the rule, so this sample
-    /// follows the registry rather than agreeing with today's copy of it.
-    fn text_sample(rule: TextRule) -> String {
-        let scheme = match rule.schemes.and_then(|s| s.first()) {
-            Some(scheme) => format!("{scheme}://"),
-            None => String::new(),
-        };
-        format!("{scheme}sample.test/?q={}", rule.must_contain.unwrap_or(""))
-    }
-
-    /// One value per clause the rule states, each breaking exactly that
-    /// clause and satisfying the others.
-    fn text_violations(rule: TextRule) -> Vec<String> {
-        let mut out = Vec::new();
-        if let Some(schemes) = rule.schemes {
-            // A scheme the rule does not offer, built out of the ones it
-            // does so it cannot accidentally become one of them.
-            let unoffered = format!("not{}", schemes.join(""));
-            out.push(format!(
-                "{unoffered}://sample.test/?q={}",
-                rule.must_contain.unwrap_or("")
-            ));
-        }
-        if rule.must_contain.is_some() {
-            let scheme = match rule.schemes.and_then(|s| s.first()) {
-                Some(scheme) => format!("{scheme}://"),
-                None => String::new(),
-            };
-            // Nothing after the scheme but digits and dots, so the substring
-            // the rule demands cannot be in here by accident.
-            out.push(format!("{scheme}0.0/"));
-        }
-        if !rule.allow_empty {
-            out.push(String::new());
-        }
-        out
-    }
-
-    #[test]
     fn every_registered_key_is_a_section_and_a_bare_leaf() {
         for setting in SETTINGS {
             let (section, leaf) = match split_key(setting.key) {
@@ -4169,61 +2977,6 @@ archive_after = "24h"          # 12h | 24h | 7d | off
             write_target(Platform::MacOs, &env),
             Ok(PathBuf::from("/tmp/pinned.toml"))
         );
-    }
-
-    // ---- the commands themselves
-
-    #[test]
-    fn the_commands_write_where_the_next_read_will_look() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let (_dir, path) = dirty_file();
-        let previous = std::env::var(ENV_CONFIG_FILE).ok();
-        std::env::set_var(ENV_CONFIG_FILE, &path);
-
-        tauri::async_runtime::block_on(config_file_set(
-            "appearance.theme".to_string(),
-            json!("dark"),
-        ))
-        .expect("config_set succeeds");
-        let snapshot =
-            tauri::async_runtime::block_on(config_file_get()).expect("config_get succeeds");
-        assert_eq!(
-            snapshot.values.appearance.theme,
-            ThemePref::Named("dark"),
-            "config_get did not see what config_set had just written"
-        );
-
-        tauri::async_runtime::block_on(config_file_reset("appearance.theme".to_string()))
-            .expect("config_reset succeeds");
-        let snapshot =
-            tauri::async_runtime::block_on(config_file_get()).expect("config_get succeeds");
-        assert_eq!(
-            snapshot.values.appearance.theme,
-            Config::default().appearance.theme,
-            "the reset did not return the setting to its built-in default"
-        );
-        assert!(
-            snapshot
-                .warnings
-                .iter()
-                .any(|w| w.key == "browser.homepage"),
-            "the key Tabverse does not know was lost across a write and a reset: {:?}",
-            snapshot.warnings
-        );
-
-        let e = match tauri::async_runtime::block_on(config_file_set(
-            "appearance.thme".to_string(),
-            json!("dark"),
-        )) {
-            Ok(()) => panic!("an unknown key was accepted at the command boundary"),
-            Err(e) => e,
-        };
-        assert!(e.contains("appearance.thme"), "{e}");
-
-        match previous {
-            Some(v) => std::env::set_var(ENV_CONFIG_FILE, v),
-            None => std::env::remove_var(ENV_CONFIG_FILE),
-        }
     }
 
     #[test]
@@ -4409,27 +3162,41 @@ archive_after = "24h"          # 12h | 24h | 7d | off
     }
 
     #[test]
-    fn migrated_file_scalars_stop_overriding_database_resets() {
-        let mut file = Config::default();
-        file.appearance.theme = ThemePref::Named("dark");
-        file.terminal.font_size = 18;
-        file.files.exclude = vec!["vendor".into()];
-        file.keys.bindings.insert("new-tab".into(), "Cmd+N".into());
-
-        let projected = declarative_file_config(file);
-        assert_eq!(
-            projected.appearance.theme,
-            Config::default().appearance.theme
+    fn config_file_owns_only_declarative_structures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "config.toml",
+            "[appearance]\ntheme = 'not-a-current-theme'\n\
+             [terminal]\nfont_size = -1\n\
+             [files]\nexclude = ['vendor']\n\
+             [keys]\nnew-tab = 'Cmd+N'\n",
         );
+
+        let loaded = load_from_paths(&[path]).expect("obsolete scalars cannot block the file");
+        assert_eq!(loaded.config.appearance, Config::default().appearance);
         assert_eq!(
-            projected.terminal.font_size,
+            loaded.config.terminal.font_size,
             Config::default().terminal.font_size
         );
-        assert_eq!(projected.files.exclude, ["vendor"]);
+        assert_eq!(loaded.config.files.exclude, ["vendor"]);
         assert_eq!(
-            projected.keys.bindings.get("new-tab").map(String::as_str),
+            loaded
+                .config
+                .keys
+                .bindings
+                .get("new-tab")
+                .map(String::as_str),
             Some("Cmd+N")
         );
+        assert!(loaded
+            .warnings
+            .iter()
+            .any(|warning| warning.key == "appearance.theme"));
+        assert!(loaded
+            .warnings
+            .iter()
+            .any(|warning| warning.key == "terminal.font_size"));
     }
 
     #[test]
@@ -4454,27 +3221,5 @@ archive_after = "24h"          # 12h | 24h | 7d | off
             Some(value) => std::env::set_var(ENV_CONFIG_FILE, value),
             None => std::env::remove_var(ENV_CONFIG_FILE),
         }
-    }
-
-    #[test]
-    fn legacy_import_reads_only_explicit_registered_values() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = write(
-            dir.path(),
-            "first.toml",
-            "[appearance]\ntheme = \"dark\"\n[keys]\nnew-tab = \"Cmd+N\"\n",
-        );
-        let second = write(
-            dir.path(),
-            "second.toml",
-            "[appearance]\ntheme = \"light\"\n[files]\nrespect_gitignore = true\n",
-        );
-        let values =
-            explicit_legacy_settings(&[first.display().to_string(), second.display().to_string()])
-                .unwrap();
-        assert_eq!(
-            values,
-            [("appearance.theme".to_string(), r#""light""#.to_string())]
-        );
     }
 }

@@ -11,9 +11,9 @@ The v0.0.2 Plugin Kernel solved that problem together with a much larger runtime
 ## Decision
 Built-in capabilities use a compile-time `BuiltInFeatureModuleDefinition` / future `TabModule<State>` model.
 
-The first migration step centralizes built-in feature identity, presentation metadata and close-lifecycle intent. Existing Workbench APIs are projected from that catalog so behavior can migrate incrementally without a big-bang UI rewrite.
+The built-in feature registry centralizes identity, presentation metadata and close-lifecycle intent. Existing Workbench APIs are projected from that single catalog.
 
-Future module contracts may add explicit state codecs/migrations, runtime definitions, remote definitions and commands as real consumers are migrated.
+Module contracts may add runtime definitions, remote definitions and commands when concrete consumers require them. State codecs accept only their current representation; old-format migration is not part of the module contract.
 
 ## Non-goal
 This is not the architecture for untrusted third-party extensions. If Tabverse later commits to an external plugin ecosystem, distribution, signatures, sandboxing, capability grants and compatibility will be designed as a separate trust problem.

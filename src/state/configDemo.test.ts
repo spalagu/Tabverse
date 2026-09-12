@@ -125,14 +125,7 @@ describe("the demo is given the registry, not a copy of it", () => {
     expect(snap.warnings).toEqual([]);
   });
 
-  it("names a source once its carrier exists, so the migration is once", async () => {
-    // The store treats "no source at all" as "this user has no configuration
-    // file yet" and moves their old session-held settings in — once, marked
-    // done by the file it just created. Reporting no source forever would
-    // re-run that on every read, and the damage is specific and visible: the
-    // theme's reset appears to do nothing, because the migration writes the
-    // old stored preference straight back over it. The carrier is this
-    // demo's equivalent of that file, so it is named once it is there.
+  it("names its persistent source after the first edit", async () => {
     expect((await configGet()).sources).toEqual([]);
     await configSet(CONFIG_KEYS.sidebarPinned, false);
     expect((await configGet()).sources.length).toBe(1);

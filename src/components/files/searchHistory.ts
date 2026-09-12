@@ -2,7 +2,7 @@ import {
   SEARCH_HISTORY_SCOPE,
   createSearchHistoryController,
 } from "@tabverse/workbench/files/search-history";
-import { deleteState, loadState, saveState } from "../../persist";
+import { deleteState, loadState, markStateInvalid, saveState } from "../../persist";
 import { isFreshRun } from "../../state/store";
 
 export {
@@ -19,6 +19,7 @@ const controller = createSearchHistoryController({
   save: (value) => saveState(SEARCH_HISTORY_SCOPE, value),
   remove: () => deleteState(SEARCH_HISTORY_SCOPE),
   isFreshRun,
+  invalid: (reason) => markStateInvalid(SEARCH_HISTORY_SCOPE, reason),
 });
 
 export const searchHistory = controller.load;

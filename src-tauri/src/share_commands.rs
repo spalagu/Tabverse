@@ -457,7 +457,6 @@ fn register_app_rpc_steer_commands(
                 .ok_or("config_set needs a string 'key'")?;
             let value = args.get("value").ok_or("config_set needs a 'value'")?;
             crate::config::set_with_store(&app_db, key, value)?;
-            crate::config::project_network_setting(key, Some(value))?;
             Ok(serde_json::Value::Null)
         }),
     );

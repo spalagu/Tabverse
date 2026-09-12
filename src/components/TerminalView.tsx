@@ -17,7 +17,13 @@ import {
 import { b64encode } from "../backend/b64";
 import { fsApi } from "../backend/fs";
 import { coreLog } from "../errlog";
-import { deleteState, flushAll, loadState, saveState } from "../persist";
+import {
+  deleteState,
+  flushAll,
+  loadState,
+  markStateInvalid,
+  saveState,
+} from "../persist";
 import { notifyCommandFinished } from "../notify";
 import {
   openDirectoryInFilesPane,
@@ -212,7 +218,13 @@ export function TerminalView({ tab, active, paneId }: Props) {
 
     const scope = termScope(tab.id, paneKey);
     const memoryLoad = loadState<unknown>(scope)
-      .then(readTermMemory)
+      .then((raw) => {
+        const memory = readTermMemory(raw);
+        if (raw !== null && memory === null) {
+          markStateInvalid(scope, "invalid current Terminal memory record");
+        }
+        return memory;
+      })
       .catch(() => null);
 
     const ligatures = terminalLigatures(profileRef.current) === true;

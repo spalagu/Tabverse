@@ -1,4 +1,4 @@
-//! Tauri adapter for credential authorization, password portability and app migration.
+//! Tauri adapter for credential authorization and password portability.
 
 use tauri::AppHandle;
 #[cfg(target_os = "windows")]
@@ -8,7 +8,7 @@ use tauri::Manager;
 use crate::user_presence;
 #[cfg(target_os = "windows")]
 use crate::user_presence_win;
-use crate::{app_state_store, credentials, migrate, pw_portable, state_dir};
+use crate::{credentials, pw_portable};
 
 #[tauri::command]
 pub(crate) async fn pw_authorize_view(app: AppHandle) -> Result<(), String> {
@@ -104,83 +104,4 @@ pub(crate) fn pw_export(path: String) -> Result<usize, String> {
 #[tauri::command]
 pub(crate) fn pw_import(path: String) -> Result<pw_portable::ImportReport, String> {
     pw_portable::import_csv(std::path::Path::new(&path))
-}
-
-#[tauri::command]
-pub(crate) async fn migrate_authorize_export() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        tauri::async_runtime::spawn_blocking(|| {
-            user_presence::ask("export everything to move Tabverse to another computer")
-        })
-        .await
-        .map_err(|e| e.to_string())?
-    }
-    #[cfg(not(target_os = "macos"))]
-    Ok(())
-}
-
-#[tauri::command]
-pub(crate) async fn migrate_export(
-    app: AppHandle,
-    path: String,
-    passphrase: String,
-) -> Result<migrate::Summary, String> {
-    #[cfg(target_os = "windows")]
-    if !user_presence_win::authorized_recently() {
-        return Err("that export was not authorized, or the authorization expired".into());
-    }
-    #[cfg(target_os = "macos")]
-    if !user_presence::authorized_recently() {
-        return Err("that export was not authorized, or the authorization expired".into());
-    }
-    let dir = state_dir(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let scopes = app_state_store(&app)?
-            .dump_scopes()
-            .map_err(|error| format!("reading app.db for export: {error:#}"))?;
-        migrate::export_to_path(&dir, &scopes, std::path::Path::new(&path), &passphrase)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub(crate) async fn migrate_import_check(
-    app: AppHandle,
-    path: String,
-    passphrase: String,
-    stamp: String,
-) -> Result<serde_json::Value, String> {
-    let dir = state_dir(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let summary = migrate::check_bundle(std::path::Path::new(&path), &passphrase)?;
-        let backup = migrate::backup_dir(&dir, &stamp)?;
-        Ok(serde_json::json!({
-            "summary": summary,
-            "backupPath": backup.display().to_string(),
-        }))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub(crate) async fn migrate_import_apply(
-    app: AppHandle,
-    path: String,
-    passphrase: String,
-    stamp: String,
-) -> Result<migrate::ImportResult, String> {
-    let dir = state_dir(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let result =
-            migrate::import_bundle(&dir, std::path::Path::new(&path), &passphrase, &stamp)?;
-        app_state_store(&app)?
-            .replace_scopes_from_legacy(&dir)
-            .map_err(|error| format!("updating app.db after import: {error:#}"))?;
-        Ok(result)
-    })
-    .await
-    .map_err(|e| e.to_string())?
 }

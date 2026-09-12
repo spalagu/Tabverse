@@ -39,6 +39,14 @@ pub struct Entry {
     pub text: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredEntry {
+    version: u32,
+    id: u32,
+    text: String,
+}
+
 /// A file of remembered things.
 ///
 /// Rewritten whole on each change rather than appended to, because entries are
@@ -53,23 +61,47 @@ pub struct MemoryStore {
 impl MemoryStore {
     /// Open a store, reading whatever is already there.
     ///
-    /// A file that cannot be parsed is treated as empty rather than as a
-    /// failure: losing memory degrades the agent, refusing to start stops it.
-    pub fn open(path: impl Into<PathBuf>) -> Self {
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        let entries = std::fs::read_to_string(&path)
-            .ok()
-            .map(|text| {
-                text.lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .filter_map(|l| serde_json::from_str::<Entry>(l).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", path.display()))
+            }
+        };
+        let mut entries = Vec::new();
+        for (index, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                anyhow::bail!("{}:{}: empty memory record", path.display(), index + 1);
+            }
+            let stored: StoredEntry = serde_json::from_str(line).with_context(|| {
+                format!("{}:{}: invalid memory record", path.display(), index + 1)
+            })?;
+            if stored.version != 1 || stored.id == 0 || stored.text.trim().is_empty() {
+                anyhow::bail!(
+                    "{}:{}: unsupported memory record",
+                    path.display(),
+                    index + 1
+                );
+            }
+            if entries.iter().any(|entry: &Entry| entry.id == stored.id) {
+                anyhow::bail!(
+                    "{}:{}: duplicate memory id {}",
+                    path.display(),
+                    index + 1,
+                    stored.id
+                );
+            }
+            entries.push(Entry {
+                id: stored.id,
+                text: stored.text,
+            });
+        }
+        Ok(Self {
             path,
             entries: Mutex::new(entries),
-        }
+        })
     }
 
     pub fn entries(&self) -> Vec<Entry> {
@@ -92,23 +124,27 @@ impl MemoryStore {
             return Ok(existing.id);
         }
         let id = entries.iter().map(|e| e.id).max().unwrap_or(0) + 1;
-        entries.push(Entry {
+        let mut next = entries.clone();
+        next.push(Entry {
             id,
             text: text.to_string(),
         });
-        write_all(&self.path, &entries)?;
+        write_all(&self.path, &next)?;
+        *entries = next;
         Ok(id)
     }
 
     /// Forget one. Returns whether there was anything there to forget.
     pub fn remove(&self, id: u32) -> Result<bool> {
         let mut entries = self.entries.lock().unwrap();
-        let before = entries.len();
-        entries.retain(|e| e.id != id);
-        if entries.len() == before {
+        let mut next = entries.clone();
+        let before = next.len();
+        next.retain(|e| e.id != id);
+        if next.len() == before {
             return Ok(false);
         }
-        write_all(&self.path, &entries)?;
+        write_all(&self.path, &next)?;
+        *entries = next;
         Ok(true)
     }
 
@@ -139,10 +175,28 @@ fn write_all(path: &Path, entries: &[Entry]) -> Result<()> {
     }
     let mut out = String::new();
     for entry in entries {
-        out.push_str(&serde_json::to_string(entry)?);
+        out.push_str(&serde_json::to_string(&StoredEntry {
+            version: 1,
+            id: entry.id,
+            text: entry.text.clone(),
+        })?);
         out.push('\n');
     }
-    std::fs::write(path, out).with_context(|| format!("failed to write {}", path.display()))
+    let file_name = path.file_name().context("memory path has no file name")?;
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+    if let Err(error) = std::fs::write(&temporary, out) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("failed to write {}", temporary.display()));
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("failed to replace {}", path.display()));
+    }
+    Ok(())
 }
 
 /// The tool the model uses to remember and forget.
@@ -245,7 +299,7 @@ mod tests {
 
     fn store() -> (tempfile::TempDir, MemoryStore) {
         let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(dir.path().join("memory.jsonl"));
+        let store = MemoryStore::open(dir.path().join("memory.jsonl")).unwrap();
         (dir, store)
     }
 
@@ -276,12 +330,12 @@ mod tests {
         // the same file sees it.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("memory.jsonl");
-        let first = MemoryStore::open(&path);
+        let first = MemoryStore::open(&path).unwrap();
         first
             .add("this project builds with `cargo xtask dist`")
             .unwrap();
 
-        let second = MemoryStore::open(&path);
+        let second = MemoryStore::open(&path).unwrap();
         let text = match second.preamble().unwrap() {
             Message::User { text } => text,
             other => panic!("{other:?}"),
@@ -306,13 +360,13 @@ mod tests {
     fn forgetting_removes_it_from_the_file_as_well() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("memory.jsonl");
-        let store = MemoryStore::open(&path);
+        let store = MemoryStore::open(&path).unwrap();
         let id = store.add("temporary").unwrap();
         store.add("permanent").unwrap();
 
         assert!(store.remove(id).unwrap());
 
-        let reopened = MemoryStore::open(&path);
+        let reopened = MemoryStore::open(&path).unwrap();
         assert_eq!(reopened.entries().len(), 1);
         assert_eq!(reopened.entries()[0].text, "permanent");
     }
@@ -321,9 +375,9 @@ mod tests {
     fn forgetting_something_that_is_not_there_is_answered_not_raised() {
         let (_dir, store) = store();
         assert!(!store.remove(99).unwrap());
-        let tool = MemoryTool::new(std::sync::Arc::new(MemoryStore::open(
-            tempfile::tempdir().unwrap().path().join("m.jsonl"),
-        )));
+        let tool = MemoryTool::new(std::sync::Arc::new(
+            MemoryStore::open(tempfile::tempdir().unwrap().path().join("m.jsonl")).unwrap(),
+        ));
         assert!(run(&tool, json!({ "action": "forget", "id": 99 })).contains("no [99]"));
     }
 
@@ -340,26 +394,23 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_line_costs_that_line_and_nothing_else() {
+    fn a_corrupt_record_refuses_the_whole_store_without_rewriting_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("memory.jsonl");
         std::fs::write(
             &path,
-            "{\"id\":1,\"text\":\"good\"}\nnot json at all\n{\"id\":2,\"text\":\"also good\"}\n",
+            "{\"version\":1,\"id\":1,\"text\":\"good\"}\nnot json at all\n",
         )
         .unwrap();
-        let store = MemoryStore::open(&path);
-        assert_eq!(
-            store.entries().len(),
-            2,
-            "a bad line must not lose the good ones"
-        );
+        let original = std::fs::read(&path).unwrap();
+        assert!(MemoryStore::open(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     #[test]
     fn the_tool_reports_what_it_did() {
         let dir = tempfile::tempdir().unwrap();
-        let store = std::sync::Arc::new(MemoryStore::open(dir.path().join("m.jsonl")));
+        let store = std::sync::Arc::new(MemoryStore::open(dir.path().join("m.jsonl")).unwrap());
         let tool = MemoryTool::new(std::sync::Arc::clone(&store));
 
         assert!(run(&tool, json!({ "action": "add", "text": "uses pnpm" })).contains("[1]"));
@@ -372,7 +423,7 @@ mod tests {
     #[test]
     fn add_without_text_is_refused_rather_than_storing_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let store = std::sync::Arc::new(MemoryStore::open(dir.path().join("m.jsonl")));
+        let store = std::sync::Arc::new(MemoryStore::open(dir.path().join("m.jsonl")).unwrap());
         let tool = MemoryTool::new(store);
         let env_dir = tempfile::tempdir().unwrap();
         let env = LocalEnv::new(env_dir.path());

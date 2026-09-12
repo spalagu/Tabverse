@@ -14,27 +14,30 @@ export type SessionRecoveryOutcome = "restored" | "initialized" | "preserved";
  * A file the carrier explicitly reports missing is a first launch. Every
  * other recovery failure is evidence of an existing session, so the default
  * path preserves it until its owner chooses replacement. Keeping this choice
- * here prevents another startup hook from silently creating `session.json`.
+ * here prevents another startup hook from silently replacing the `session`
+ * scope in app.db.
  */
 export async function recoverOrInitializeSession(options: {
   fresh: boolean;
   restore: () => Promise<SessionRestoreResult>;
-  initialize: () => void;
+  initialize: () => void | Promise<void>;
+  replace: () => void | Promise<void>;
   ask: (reason: SessionRecoveryFailure) => Promise<boolean>;
 }): Promise<SessionRecoveryOutcome> {
   if (options.fresh) {
-    options.initialize();
+    await options.initialize();
     return "initialized";
   }
 
   const result = await options.restore();
   if (result === "restored") return "restored";
   if (result === "missing") {
-    options.initialize();
+    await options.initialize();
     return "initialized";
   }
   if (await options.ask(result)) {
-    options.initialize();
+    await options.replace();
+    await options.initialize();
     return "initialized";
   }
   return "preserved";

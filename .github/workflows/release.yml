@@ -221,13 +221,13 @@ jobs:
 
           Tabverse V3 combines a desktop workbench, recoverable runtimes, a unified content system, and semantic Remote capabilities. Browser is local-only; Join supports Terminal, Agent, Files, Settings, and Whole-App semantic actions without carrying Browser pixels, state, or network traffic.
 
-          ### macOS 安装提示
+          ### macOS installation
 
-          macOS DMG 使用 ad-hoc 签名，**没有 Apple Developer ID，也没有 notarize**。首次打开时，请在 Finder 中右键 `Tabverse.app` 选择“打开”，或在“系统设置 → 隐私与安全性”中仅允许 Tabverse。不要全局关闭 Gatekeeper。详细步骤见 release 中的 `distribution.md`。
+          macOS DMGs are ad-hoc signed. They do not use an Apple Developer ID and are not notarized. On first launch, use Finder's Open command or allow only Tabverse in System Settings → Privacy & Security. Do not disable Gatekeeper globally. See `distribution.md` in this release for detailed steps.
 
-          ### 产物校验
+          ### Artifact verification
 
-          下载与设备架构匹配的安装包，并使用本 release 的 `SHA256SUMS` 校验文件。
+          Download the installer matching the device architecture and verify it with this release's `SHA256SUMS` file.
           EOF
           else
             cat >> release-notes.md <<'EOF'

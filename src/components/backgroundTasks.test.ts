@@ -58,7 +58,7 @@ describe("background terminal tasks", () => {
     expect(useStore.getState().backgroundTasks).toEqual([]);
   });
 
-  it("does not duplicate helper truth into session.json", () => {
+  it("does not duplicate helper truth into the session scope", () => {
     useStore.getState().setBackgroundTasks([task("44".repeat(16))]);
     expect(JSON.stringify(sessionSnapshot(useStore.getState()))).not.toContain(
       "backgroundTasks"

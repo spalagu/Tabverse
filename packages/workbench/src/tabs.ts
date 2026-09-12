@@ -12,12 +12,7 @@ export interface TabDefinition {
   readonly hint: string;
 }
 
-/**
- * Compatibility projection used by the existing Workbench while V3 migrates
- * tab behavior incrementally to BuiltInFeatureModuleDefinition.
- *
- * There is one source of built-in feature identity/metadata: featureModules.
- */
+/** The public projection of the built-in feature registry. */
 export const TAB_DEFINITIONS: readonly TabDefinition[] = BUILT_IN_FEATURE_MODULES.map(
   ({ kind, label, hint }) => ({ type: kind, label, hint }),
 );

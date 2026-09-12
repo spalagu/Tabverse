@@ -243,7 +243,9 @@ pub fn answer(
                         COREWEBVIEW2_PERMISSION_STATE_DENY
                     });
                     if remember_choice {
-                        page_prompts::remember(&for_memory, &host, kind, ok);
+                        if let Err(error) = page_prompts::remember(&for_memory, &host, kind, ok) {
+                            eprintln!("[prompts] {error}");
+                        }
                     }
                     let _ = deferral.Complete();
                 }

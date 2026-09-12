@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use tauri::AppHandle;
 #[cfg(target_os = "windows")]
@@ -21,16 +22,27 @@ pub fn ask(app: &AppHandle, event: DialogEvent) {
     let _ = app.emit("browser-page-dialog", event);
 }
 
-const MEDIA_FILE: &str = "media-permissions.json";
+const MEDIA_SCOPE: &str = "media-permissions";
+static MEDIA_WRITE: Mutex<()> = Mutex::new(());
 
-fn media_map(app: &AppHandle) -> HashMap<String, bool> {
-    let Ok(dir) = crate::state_dir(app) else {
-        return HashMap::new();
-    };
-    std::fs::read(dir.join(MEDIA_FILE))
-        .ok()
-        .and_then(|d| serde_json::from_slice(&d).ok())
-        .unwrap_or_default()
+fn media_map(app: &AppHandle) -> Result<HashMap<String, bool>, String> {
+    let store = crate::app_state_store(app)?;
+    match store
+        .load_scope(MEDIA_SCOPE)
+        .map_err(|e| format!("read media permissions from app.db: {e:#}"))?
+    {
+        Some(json) => serde_json::from_str(&json)
+            .map_err(|e| format!("media permissions in app.db are invalid: {e}")),
+        None => Ok(HashMap::new()),
+    }
+}
+
+fn save_media_map(app: &AppHandle, map: &HashMap<String, bool>) -> Result<(), String> {
+    let json =
+        serde_json::to_string(map).map_err(|e| format!("serialize media permissions: {e}"))?;
+    crate::app_state_store(app)?
+        .save_scope(MEDIA_SCOPE, &json)
+        .map_err(|e| format!("write media permissions to app.db: {e:#}"))
 }
 
 /// What this site was allowed or refused before, if anyone has said.
@@ -38,22 +50,26 @@ pub fn remembered(app: &AppHandle, host: &str, kind: &str) -> Option<bool> {
     if host.is_empty() {
         return None;
     }
-    media_map(app).get(&format!("{host}|{kind}")).copied()
+    match media_map(app) {
+        Ok(map) => map.get(&format!("{host}|{kind}")).copied(),
+        Err(error) => {
+            eprintln!("[prompts] {error}");
+            None
+        }
+    }
 }
 
 /// Remember it, so the same site does not ask twice.
-pub fn remember(app: &AppHandle, host: &str, kind: &str, allow: bool) {
+pub fn remember(app: &AppHandle, host: &str, kind: &str, allow: bool) -> Result<(), String> {
     if host.is_empty() {
-        return;
+        return Ok(());
     }
-    let mut map = media_map(app);
+    let _write = MEDIA_WRITE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut map = media_map(app)?;
     map.insert(format!("{host}|{kind}"), allow);
-    if let Ok(dir) = crate::state_dir(app) {
-        let _ = std::fs::create_dir_all(&dir);
-        if let Ok(json) = serde_json::to_vec(&map) {
-            let _ = std::fs::write(dir.join(MEDIA_FILE), json);
-        }
-    }
+    save_media_map(app, &map)
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -70,7 +86,7 @@ pub struct MediaGrant {
 /// install has answered nothing yet.
 #[tauri::command]
 pub fn media_list(app: AppHandle) -> Result<Vec<MediaGrant>, String> {
-    let mut list: Vec<MediaGrant> = media_map(&app)
+    let mut list: Vec<MediaGrant> = media_map(&app)?
         .into_iter()
         .filter_map(|(key, allow)| {
             // Entries are written by `remember` as "host|kind"; anything
@@ -93,14 +109,12 @@ pub fn media_revoke(app: AppHandle, host: String, kind: String) -> Result<(), St
     if host.is_empty() {
         return Err("no host".into());
     }
-    let mut map = media_map(&app);
+    let _write = MEDIA_WRITE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut map = media_map(&app)?;
     map.remove(&format!("{host}|{kind}"));
-    if let Ok(dir) = crate::state_dir(&app) {
-        let _ = std::fs::create_dir_all(&dir);
-        if let Ok(json) = serde_json::to_vec(&map) {
-            let _ = std::fs::write(dir.join(MEDIA_FILE), json);
-        }
-    }
+    save_media_map(&app, &map)?;
     eprintln!("[prompts] revoked the remembered {kind} answer for {host}");
     Ok(())
 }

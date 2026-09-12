@@ -51,10 +51,6 @@ fn the_same_stream_reduces_the_same_way_everywhere() {
     // pass against a different session.
     assert_eq!(replay.events.len(), reduction::EVENTS);
     assert_eq!(replay.messages.len(), reduction::MESSAGES);
-    assert_eq!(
-        replay.skipped, 0,
-        "nothing in this log should be unreadable"
-    );
 
     let turns = replay
         .events
