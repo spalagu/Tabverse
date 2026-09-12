@@ -140,9 +140,9 @@ struct Shared {
     /// The DoH resolver, cached under the URL of the policy that built it —
     /// a held client is the difference between one connection to the
     /// endpoint per process and one per tunnel. The POLICY is not cached
-    /// here: each connection reads `http::policy()` fresh, so a settings
-    /// write that calls `http::forget()` is picked up by the next connection
-    /// without this module hearing about it.
+    /// here: each connection reads `http::policy()` fresh, so a database
+    /// settings write is picked up by the next connection without this
+    /// module hearing about it.
     doh: Mutex<Option<(String, Arc<http::DohResolver>)>>,
 }
 

@@ -2771,30 +2771,6 @@ table.kv td:first-child {
   gap: var(--sp-8);
 }
 
-.migrate-pass-input {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  margin: 0 0 var(--sp-8);
-  padding: var(--sp-8) var(--sp-8);
-  font-size: var(--fs-base);
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--bg);
-  color: var(--fg);
-}
-
-.migrate-pass-hint {
-  margin: 0 0 var(--sp-12);
-  font-size: var(--fs-sm);
-  line-height: var(--lh-normal);
-  color: var(--muted);
-}
-
-.migrate-pass-hint.danger-text {
-  color: var(--danger);
-}
-
 /* The button that does the irreversible thing looks like it. */
 .btn.danger {
   border-color: var(--danger);

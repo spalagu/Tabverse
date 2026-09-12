@@ -1,52 +1,55 @@
-# V3 模块模型
+# V3 Module Model
 
-## 目标
+## Goal
 
-Tabverse V3 使用内置 Feature Module，不提供可安装 Plugin Kernel。模块负责声明产品能力；运行环境通过端口和适配器提供能力。
+Tabverse V3 uses built-in feature modules and does not provide an installable Plugin Kernel. Modules declare product capabilities; runtimes provide those capabilities through ports and adapters.
 
-## 当前分层
+## Current layers
 
 ```text
-packages/runtime-contracts   可移植 DTO 和端口
-packages/workbench           环境无关的产品界面和交互
-packages/runtime-desktop     Desktop 端口适配器
-packages/runtime-remote      Join/Remote 端口适配器
-src-tauri                    Tauri 命令、组合根和 OS 适配器
-crates/tabverse-*            可复用 Rust Core
+packages/runtime-contracts   Portable DTOs and ports
+packages/workbench           Runtime-independent product UI and interactions
+packages/runtime-desktop     Desktop port adapters
+packages/runtime-remote      Join/Remote port adapters
+src-tauri                    Tauri commands, composition root, and OS adapters
+crates/tabverse-*            Reusable Rust core
 ```
 
-`packages/workbench/src/tabView.tsx` 的 renderer catalog 是内置模块组合点。Files、Browser、Terminal、Agent、Remote、Settings 都通过明确 renderer 注册，不经过动态包安装或 Plugin 生命周期。
+The renderer catalog in `packages/workbench/src/tabView.tsx` is the composition point for built-in modules. Files, Browser, Terminal, Agent, Remote, and Settings register explicit renderers without dynamic package installation or a Plugin lifecycle.
 
-## 依赖方向
+## Dependency direction
 
-- Workbench 不依赖 Tauri、Desktop runtime 或 Remote runtime。
-- `runtime-contracts` 不依赖 React、Workbench 或具体 runtime。
-- Desktop/Remote runtime 可以依赖 contracts，不能反向依赖应用源码。
-- `crates/tabverse-*` 不依赖 Tauri；`src-tauri` 负责组装。
-- 模块不得取得未声明的 privileged API；所有环境能力通过类型化 context/port 传入。
+- Workbench does not depend on Tauri, the Desktop runtime, or the Remote runtime.
+- `runtime-contracts` does not depend on React, Workbench, or a concrete runtime.
+- Desktop and Remote runtimes may depend on contracts; contracts cannot depend on application source.
+- `crates/tabverse-*` does not depend on Tauri; `src-tauri` assembles the application.
+- Modules cannot obtain undeclared privileged APIs. All runtime capabilities enter through typed contexts and ports.
 
-`tools/check-workbench-boundary.mjs` 在 `npm run check:architecture` 中自动执行以上边界。
+`tools/check-workbench-boundary.mjs` enforces these boundaries through `npm run check:architecture`.
 
-## Desktop 组合根
+## Desktop composition root
 
-`src-tauri/src/lib.rs` 是进程启动、共享状态组装、插件注册和命令清单的组合根；尚未迁出的适配器按功能继续拆分。Files 命令适配器位于 `src-tauri/src/fs_commands.rs`：阻塞池选择、IPC 参数和 watch 事件属于适配器，目录读取、搜索、替换、归档和检查语义仍由 `tabverse-fs` 实现。新增 Files 行为不得重新写回组合根。
+`src-tauri/src/lib.rs` is the composition root for process startup, shared-state assembly, plugin registration, and command registration. Remaining adapters continue to split by capability. The Files command adapter is in `src-tauri/src/fs_commands.rs`: blocking-pool selection, IPC parameters, and watch events belong to the adapter, while `tabverse-fs` implements directory reads, search, replacement, archives, and inspection semantics. New Files behavior must not move back into the composition root.
 
-`src-tauri/src/state_commands.rs` 持有 `AppDatabase`、数据库路径解析以及 state/config IPC 适配器。其他 Desktop 适配器只能通过该模块公开的窄入口取得 `AppStateStore`；Workbench 和 Rust Core 不接触数据库句柄。
+`src-tauri/src/state_commands.rs` owns `AppDatabase`, database-path resolution, and the state/config IPC adapters. Other Desktop adapters can obtain `AppStateStore` only through the narrow entry point exposed by this module. Workbench and the Rust core never access database handles.
 
-`src-tauri/src/terminal_commands.rs` 持有 Terminal IPC、helper 事件缓冲、GUI channel 适配和共享源接线。终端进程与协议语义仍由 `tabverse-term` 实现，远程会话排序与权限语义仍由 `tabverse-remote` 实现。新增 Terminal 命令不得重新写回组合根。
+`src-tauri/src/terminal_commands.rs` owns Terminal IPC, helper event buffering, GUI channel adaptation, and shared-source wiring. `tabverse-term` continues to implement terminal process and protocol semantics, while `tabverse-remote` implements remote-session ordering and permission semantics. New Terminal commands must not move back into the composition root.
 
 `src-tauri/src/remote_commands.rs` owns the Remote Join IPC and GUI channel adapter. `tabverse-remote` owns connections, encrypted transport, control/file streams, and Host-side authorization.
 
-`src-tauri/src/agent_commands.rs` 持有 Agent 登录、Agent Tab IPC、Runtime Supervisor 接线和共享源注册。Agent 事件与回合语义属于 `tabverse-agent`，runtime 身份和进程生命周期属于 `tabverse-runtime`；适配器不保存恢复状态，也不伪造进程恢复。
+`src-tauri/src/agent_commands.rs` owns Agent login, Agent tab IPC, Runtime Supervisor wiring, and shared-source registration. Agent events and turn semantics belong to `tabverse-agent`; runtime identity and process lifecycle belong to `tabverse-runtime`. The adapter neither stores recovery state nor fabricates process recovery.
 
-`src-tauri/src/credential_commands.rs` 持有本机用户确认、密码导入导出和整机迁移 IPC。凭据存储与加密属于 credential adapter 和 `app.db` vault；迁移包格式与备份恢复语义属于 `migrate` 模块，组合根不得直接处理明文凭据。
+`src-tauri/src/credential_commands.rs` owns local user confirmation and password CSV import/export IPC. Credential storage and encryption belong to the credential adapter and the `app.db` vault. The composition root never handles plaintext credentials.
 
-`src-tauri/src/appearance_commands.rs` 持有窗口全屏、macOS traffic lights、主题背景、主题偏好和 webview 日志 IPC。平台调用只存在于带 target 条件的适配器分支，主题偏好仍写入 `app.db` scope。
+`src-tauri/src/appearance_commands.rs` owns window fullscreen, macOS traffic lights, applying
+the resolved theme to windows, and WebView-log IPC. Platform calls exist only in target-gated
+adapter branches. The config/state adapter persists theme preference as a registered setting
+in `app.db.settings`.
 
 `src-tauri/src/browser_commands.rs` is the official Tauri/Wry Browser adapter. It owns webview creation, navigation, find, snapshots, local page proxying, and Browser IPC wiring. It does not introduce CEF or a custom Tauri runtime. Browser is local-only.
 
-## 非目标
+## Non-goals
 
-- 外部插件安装、更新、签名和包管理。
-- Plugin Kernel、Resident Runtime 或 CEF runtime。
-- 为未来能力预建动态生命周期框架。
+- External plugin installation, updates, signing, or package management.
+- A Plugin Kernel, Resident Runtime, or CEF runtime.
+- A speculative dynamic lifecycle framework for future capabilities.

@@ -109,11 +109,20 @@ describe("browser-demo carrier (localStorage fallback)", () => {
     expect(await p.loadState("s")).toBeNull();
   });
 
-  it("returns null for a corrupt payload instead of throwing", async () => {
+  it("blocks writes to a corrupt scope until it is explicitly deleted", async () => {
     const p = await importPersist(false);
     localStorage.setItem("tabverse.state.bad", "{ not json");
     expect(await p.loadState("bad")).toBeNull();
     expect(await p.loadStateResult("bad")).toEqual({ kind: "invalid-json" });
+    p.saveState("bad", { replacement: true });
+    await p.flushAll();
+    expect(localStorage.getItem("tabverse.state.bad")).toBe("{ not json");
+    await p.deleteStateNow("bad");
+    p.saveState("bad", { replacement: true });
+    await p.flushAll();
+    expect(JSON.parse(localStorage.getItem("tabverse.state.bad")!)).toEqual({
+      replacement: true,
+    });
   });
 
   it("distinguishes a missing scope from a failed carrier read", async () => {
@@ -252,19 +261,17 @@ describe("desktop carrier (state_* commands)", () => {
     expect(second).toBe(true);
   });
 
-  it("a failing carrier never throws at callers", async () => {
+  it("explicit persistence operations propagate carrier failures", async () => {
     mocks.invoke.mockImplementation(async (cmd) => {
       if (cmd.startsWith("state_")) throw new Error("disk on fire");
     });
     const p = await importPersist(true);
-    p.saveState("s", { v: 1 }); // must not blow up when the write fails
+    p.saveState("s", { v: 1 });
     await vi.advanceTimersByTimeAsync(300);
     await settle();
-    await expect(p.flushAll()).resolves.toBeUndefined();
-    expect(await p.loadState("s")).toBeNull();
-    expect(await p.listScopes()).toEqual([]);
-    p.deleteState("s");
-    await settle();
+    await expect(p.flushAll()).rejects.toThrow("disk on fire");
+    await expect(p.listScopes()).rejects.toThrow("disk on fire");
+    await expect(p.deleteStateNow("s")).rejects.toThrow("disk on fire");
   });
 
 });

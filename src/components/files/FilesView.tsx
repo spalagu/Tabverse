@@ -12,7 +12,7 @@ import { keysFor } from "../../shortcuts";
 import { filesKeyAction, onLocalKeys } from "../../localKeys";
 import { formatKeys, HINT_KEYS } from "../../strings/formatKeys";
 import { coreLog } from "../../errlog";
-import { loadState, saveState, tabScope } from "../../persist";
+import { loadState, markStateInvalid, saveState, tabScope } from "../../persist";
 import { useStore, type Tab } from "../../state/store";
 import {
   buildFilesSession,
@@ -274,20 +274,24 @@ export function FilesView({ tab, active }: Props) {
   useEffect(() => {
     let alive = true;
     void (async () => {
-      const saved = normalizeFilesState(await loadState<unknown>(scope));
+      const raw = await loadState<unknown>(scope);
+      const saved = normalizeFilesState(raw);
       if (!alive) return;
+      if (raw !== null && saved === null) {
+        markStateInvalid(scope, "invalid current Files tab record");
+        setRestored(true);
+        return;
+      }
       if (!saved) {
         setRestored(true);
         return;
       }
       setShowDiff(saved.showDiff);
-      setPanelMode(saved.panelMode ?? "tree");
+      setPanelMode(saved.panelMode);
       // Every pane restores on its own and drops on its own: between two
       // runs directories are renamed and files move, and a session where
       // half the paths are gone must still open with the half that
-      // survived — silently, never as a wall of errors. A payload with no
-      // `panes` is one pane here, parsed by the same reader a stored pair
-      // uses, so the legacy shape restores field for field.
+      // survived — silently, never as a wall of errors.
       const stored = storedPanes(saved);
       const live = new Map<string, FileMeta>();
       await Promise.all(

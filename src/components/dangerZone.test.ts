@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 
-import { flushAll, SESSION_SCOPE, THEME_SCOPE } from "../persist";
+import { flushAll, SESSION_SCOPE } from "../persist";
 import { CONFIG_KEYS, flushConfigWrites } from "../state/config";
 import { useStore } from "../state/store";
 import { STR } from "../strings";
@@ -240,15 +240,28 @@ describe("every one of them asks first, and asks alike", () => {
 // --------------------------------------------------------- factory reset
 
 describe("restoring factory settings", () => {
+  it("reports a settings-reset failure and never claims the reset finished", async () => {
+    localStorage.setItem(carrier(SESSION_SCOPE), JSON.stringify({ tabs: [] }));
+    const notes: Array<string | object> = [];
+    mocks.invoke.mockImplementation(async (cmd) => {
+      if (cmd === "config_keys_clear") throw new Error("disk is read-only");
+      return undefined;
+    });
+    const factory = dangerActions((note) => notes.push(note)).find(
+      (action) => action.id === "factory"
+    )!;
+    await factory.perform();
+    expect(localStorage.getItem(carrier(SESSION_SCOPE))).not.toBeNull();
+    expect(notes).toHaveLength(1);
+    expect(notes).not.toContain(STR.settings.danger.factoryDone);
+  });
+
   it("clears the scopes, the key overlay and the theme — and nothing else", async () => {
     // The harness, written here so it is plain that the three "scopes"
     // below are this test's own and that no file is involved.
     localStorage.setItem(carrier(SESSION_SCOPE), JSON.stringify({ tabs: [] }));
-    localStorage.setItem(
-      carrier(THEME_SCOPE),
-      JSON.stringify({ preference: "midnight" })
-    );
     localStorage.setItem(carrier("browser-history"), "[]");
+    localStorage.setItem(carrier("default-apps-backup"), "{}");
     setKeyOverrides({ "duplicate-tab": "⌃⌥Z" });
 
     const factory = dangerActions(() => {}).find((a) => a.id === "factory");
@@ -259,11 +272,11 @@ describe("restoring factory settings", () => {
     await flushAll();
     await settle();
 
-    // ① every scope, the theme snapshot included — unlike forgetting the
-    // session, which spares it.
-    for (const scope of [SESSION_SCOPE, THEME_SCOPE, "browser-history"]) {
-      expect(localStorage.getItem(carrier(scope)), `${scope} is gone`).toBeNull();
+    // User data scopes are not settings and survive the reset.
+    for (const scope of [SESSION_SCOPE, "browser-history"]) {
+      expect(localStorage.getItem(carrier(scope)), `${scope} survives`).not.toBeNull();
     }
+    expect(localStorage.getItem(carrier("default-apps-backup"))).toBe("{}");
     // ② the key overlay, in the file and in memory.
     const commands = mocks.invoke.mock.calls.map(([cmd]) => cmd);
     expect(commands, "the overlay is dropped in the file").toContain(
@@ -271,7 +284,7 @@ describe("restoring factory settings", () => {
     );
     // ③ the theme, by deleting its line — never by writing a theme name in,
     // which would freeze today's default into somebody's file.
-    expect(mocks.invoke.mock.calls).toContainEqual([
+    expect(mocks.invoke.mock.calls).not.toContainEqual([
       "config_reset",
       { key: CONFIG_KEYS.theme },
     ]);

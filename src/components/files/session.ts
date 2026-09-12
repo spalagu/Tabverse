@@ -44,39 +44,14 @@ export interface StoredTermPanel {
 
 /** The whole persisted payload of one file tab, under scope files:<tabId>. */
 export interface FilesSessionState {
-  /** Payload version, so a future shape change can be recognized, not eaten. */
+  /** Current payload version. */
   v: 1;
-  /**
-   * The single-pane shape, unchanged since the first payload. When two
-   * panes exist these mirror pane 0 and `panes` below carries the real
-   * pair; when they do not exist, these ARE the workspace. Keeping the
-   * mirror costs one small copy and buys the compatibility rule outright:
-   * a payload written by any earlier version of this app restores here
-   * with nothing dropped and nothing reinterpreted.
-   */
-  root: string;
-  expanded: string[];
-  open: string[];
-  active: string | null;
-  /** path → "preview" | "split" | "source"; absent means the default. */
-  viewModes: Record<string, string>;
   showDiff: boolean;
-  drafts: Record<string, StoredDraft>;
-  /**
-   * Added after the first shipped payload, and on purpose NOT behind a
-   * version bump: `v` is what tells a payload apart from one this code cannot
-   * read, and raising it would make every workspace saved before the terminal
-   * panel existed unreadable — the user would lose their open files to gain a
-   * closed panel. A field that can be defaulted is not a shape change.
-   */
   term: StoredTermPanel;
-  sort?: StoredSort;
-  treeModes?: Record<string, string>;
-  panes?: StoredPane[];
-  layout?: PaneLayout;
-  /** Which pane was in front; meaningful only with two. */
-  activePane?: number;
-  panelMode?: FilesPanelMode;
+  panes: StoredPane[];
+  layout: PaneLayout;
+  activePane: number;
+  panelMode: FilesPanelMode;
 }
 
 /** The parts of a FileMeta this module reasons about. */
@@ -185,8 +160,7 @@ function buildPane(
     viewModes,
     drafts,
     treeModes,
-    // Omitted when default, so a pane that never touched the option is
-    // byte-identical to one written before the option existed.
+    // Omitted when default to keep the current record compact.
     ...(sameSort(snap.sort, DEFAULT_SORT) ? {} : { sort: { ...snap.sort } }),
   };
 }
@@ -204,19 +178,9 @@ export function buildFilesSession(snap: FilesSnapshot): {
   const skippedDrafts: string[] = [];
   const budget = { left: MAX_DRAFTS_BYTES };
   const stored = panes.map((p) => buildPane(p, budget, skippedDrafts));
-  const first = stored[0];
-
   const state: FilesSessionState = {
     v: 1,
-    // The single-pane shape always describes pane 0, so the oldest reader
-    // of this payload (and the compat rule) sees a complete workspace.
-    root: first.root,
-    expanded: first.expanded,
-    open: first.open,
-    active: first.active,
-    viewModes: first.viewModes,
     showDiff: snap.showDiff,
-    drafts: first.drafts,
     term: {
       open: snap.term.open,
       // Stored already legal, so a restore never has to reason about a
@@ -224,20 +188,11 @@ export function buildFilesSession(snap: FilesSnapshot): {
       height: clampPanelHeight(snap.term.height),
       cwd: snap.term.cwd,
     },
+    panes: stored,
+    layout: snap.layout,
+    activePane: stored.length === 2 && snap.activePane === 1 ? 1 : 0,
+    panelMode: snap.panelMode,
   };
-  if (first.sort) state.sort = first.sort;
-  if (Object.keys(first.treeModes).length > 0) state.treeModes = first.treeModes;
-  // Written only when it differs from the default, like every other
-  // defaultable field: a tab that left the tree showing is byte-identical
-  // to one written before panels could be remembered.
-  if (snap.panelMode !== "tree") state.panelMode = snap.panelMode;
-  // One pane: no `panes` at all — the payload is the shape it always was.
-  // Two: the pair, the arrangement, and which one was in front.
-  if (stored.length === 2) {
-    state.panes = stored;
-    state.layout = snap.layout;
-    state.activePane = snap.activePane === 1 ? 1 : 0;
-  }
   return { state, skippedDrafts };
 }
 
@@ -247,52 +202,92 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 const strings = (v: unknown): string[] =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+function isCurrentPane(raw: unknown): raw is Record<string, unknown> {
+  if (
+    !isRecord(raw) ||
+    typeof raw.root !== "string" ||
+    !isStringArray(raw.expanded) ||
+    raw.expanded.length > MAX_EXPANDED ||
+    !isStringArray(raw.open) ||
+    !isRecord(raw.viewModes) ||
+    !isRecord(raw.drafts) ||
+    !isRecord(raw.treeModes) ||
+    Object.keys(raw.treeModes).length > MAX_TREE_MODES ||
+    !(raw.active === null || typeof raw.active === "string")
+  ) return false;
+  const open = new Set(raw.open);
+  if (raw.active !== null && !open.has(raw.active)) return false;
+  if (
+    Object.entries(raw.viewModes).some(
+      ([path, mode]) => typeof mode !== "string" || !open.has(path)
+    ) ||
+    Object.entries(raw.treeModes).some(
+      ([, mode]) => mode !== "miller" && mode !== "tree"
+    ) ||
+    Object.entries(raw.drafts).some(
+      ([path, draft]) =>
+        !open.has(path) ||
+        !isRecord(draft) ||
+        typeof draft.text !== "string" ||
+        !(draft.modified === null ||
+          (typeof draft.modified === "number" && Number.isFinite(draft.modified)))
+    )
+  ) return false;
+  if (!("sort" in raw)) return true;
+  return (
+    isRecord(raw.sort) &&
+    SORT_KEYS.includes(raw.sort.key as SortKey) &&
+    typeof raw.sort.asc === "boolean" &&
+    typeof raw.sort.dirsFirst === "boolean"
+  );
+}
+
 /**
- * Turn whatever came back from storage into a state we are willing to act on.
- * A payload written by another version, hand-edited, or half-corrupt must not
- * throw its way into the mount path — anything unrecognizable is simply a
- * fresh start, and anything partly usable keeps the parts that are.
+ * Validate and sanitize the current files-session representation.
  */
 export function normalizeFilesState(raw: unknown): FilesSessionState | null {
   if (!isRecord(raw)) return null;
   if (raw.v !== 1) return null;
-  const top = normalizePaneFields(raw);
+  if (!Array.isArray(raw.panes) || raw.panes.length < 1 || raw.panes.length > 2) {
+    return null;
+  }
+  if (
+    typeof raw.showDiff !== "boolean" ||
+    !isRecord(raw.term) ||
+    typeof raw.term.open !== "boolean" ||
+    typeof raw.term.height !== "number" ||
+    typeof raw.term.cwd !== "string" ||
+    (raw.layout !== "row" && raw.layout !== "column") ||
+    (raw.activePane !== 0 && raw.activePane !== 1) ||
+    (raw.panelMode !== "tree" &&
+      raw.panelMode !== "search" &&
+      raw.panelMode !== "changes")
+  ) {
+    return null;
+  }
+  if (
+    !raw.panes.every(isCurrentPane) ||
+    (raw.activePane === 1 && raw.panes.length !== 2)
+  ) return null;
+  const panes = raw.panes.map((pane) =>
+    isRecord(pane) ? normalizePaneFields(pane) : null
+  );
+  if (panes.some((pane) => pane === null)) return null;
   const state: FilesSessionState = {
     v: 1,
-    showDiff: raw.showDiff !== false,
+    showDiff: raw.showDiff,
     term: normalizeTermPanel(raw.term),
-    root: top.root,
-    expanded: top.expanded,
-    open: top.open,
-    active: top.active,
-    viewModes: top.viewModes,
-    drafts: top.drafts,
+    panes: panes as StoredPane[],
+    layout: raw.layout,
+    activePane: raw.activePane === 1 && panes.length === 2 ? 1 : 0,
+    panelMode: raw.panelMode,
   };
-  if (top.sort) state.sort = top.sort;
-  state.panelMode =
-    raw.panelMode === "search" || raw.panelMode === "changes"
-      ? raw.panelMode
-      : "tree";
-  // The dual-pane extension: only a real pair counts. One stored pane, a
-  // truncated array or junk falls back to the single-pane shape above —
-  // a pane set that half-loaded would silently lose a window's files.
-  if (Array.isArray(raw.panes) && raw.panes.length === 2) {
-    const second = isRecord(raw.panes[1]) ? normalizePaneFields(raw.panes[1]) : null;
-    if (second) {
-      state.panes = [top, second];
-      state.layout = raw.layout === "column" ? "column" : "row";
-      state.activePane = raw.activePane === 1 ? 1 : 0;
-    }
-  }
   return state;
 }
 
-/**
- * One pane's fields out of whatever record holds them — the SAME reader for
- * the legacy top level and for an entry of `panes`, because they describe
- * the same thing. That is the compat rule made mechanical: a payload with no
- * `panes` parses its one pane through the very code path a stored pair uses.
- */
 function normalizePaneFields(raw: Record<string, unknown>): StoredPane {
   const open = strings(raw.open);
   const openSet = new Set(open);
@@ -343,30 +338,12 @@ function normalizePaneFields(raw: Record<string, unknown>): StoredPane {
   };
 }
 
-/**
- * The panes a restore actually replays: the stored pair when there is one,
- * else the legacy single-pane shape as a one-element list. Callers never
- * reason about "which shape is this" — that decision lives here.
- */
 export function storedPanes(s: FilesSessionState): StoredPane[] {
-  return s.panes ?? [
-    {
-      root: s.root,
-      expanded: s.expanded,
-      open: s.open,
-      active: s.active,
-      viewModes: s.viewModes,
-      drafts: s.drafts,
-      treeModes: s.treeModes ?? {},
-      sort: s.sort,
-    },
-  ];
+  return s.panes;
 }
 
 /**
- * The remembered ordering, or the default for a payload written before the
- * option existed. Anything half-recognizable falls back field by field, the
- * same tolerance every other optional field shows a hand-edited payload.
+ * The remembered ordering, normalized field by field.
  */
 function normalizeSort(raw: unknown): StoredSort {
   const r = isRecord(raw) ? raw : {};
@@ -379,11 +356,7 @@ function normalizeSort(raw: unknown): StoredSort {
 }
 
 /**
- * The terminal panel's remembered state, or the state a tab that never had
- * one starts in. Every field defaults on its own: a workspace written before
- * the panel existed has no `term` at all, and must still restore its files.
- * Closed is the right default for an absent field — a panel nobody asked for
- * must not appear on its own after an update.
+ * The terminal panel's remembered state, normalized field by field.
  */
 function normalizeTermPanel(raw: unknown): StoredTermPanel {
   const r = isRecord(raw) ? raw : {};

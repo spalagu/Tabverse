@@ -1,8 +1,10 @@
-//! Tauri adapter for window appearance, theme persistence and webview logging.
+//! Tauri adapter for window appearance and webview logging.
 
-use tauri::{AppHandle, Window};
+use tauri::Window;
 
-use crate::{app_state_store, config, theme_gen};
+#[cfg(test)]
+use crate::config;
+use crate::theme_gen;
 #[cfg(target_os = "macos")]
 use crate::{ui_plane, TRAFFIC_LIGHT_X, TRAFFIC_LIGHT_Y};
 
@@ -72,46 +74,7 @@ pub(crate) fn toggle_simple_fullscreen(window: Window) -> Result<(), String> {
     }
 }
 
-const THEME_SCOPE: &str = "theme";
-
-/// The saved theme preference. Anything unreadable — no file, bad JSON, an
-/// unknown value — is "system": a first launch and a corrupt file both get
-/// the follow-the-OS default rather than an error.
-pub(crate) fn theme_preference(app: &AppHandle) -> String {
-    let fallback = || "system".to_string();
-    let Ok(store) = app_state_store(app) else {
-        return fallback();
-    };
-    let Ok(Some(json)) = store.load_scope(THEME_SCOPE) else {
-        return fallback();
-    };
-    theme_preference_json(&json)
-}
-
-fn theme_preference_json(json: &str) -> String {
-    let fallback = || "system".to_string();
-    serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|v| {
-            v.get("preference")
-                .and_then(|p| p.as_str())
-                .map(String::from)
-        })
-        .filter(|p| is_theme_preference(p))
-        .unwrap_or_else(fallback)
-}
-
-/// The disk half of [`theme_preference`], split on the state directory so a
-/// test can drive it against a sandbox dir without an [`AppHandle`].
 #[cfg(test)]
-pub(crate) fn theme_preference_in(dir: &std::path::Path) -> String {
-    let fallback = || "system".to_string();
-    let Ok(Some(json)) = tabverse_fs::state::load(dir, THEME_SCOPE) else {
-        return fallback();
-    };
-    theme_preference_json(&json)
-}
-
 pub(crate) fn is_theme_preference(p: &str) -> bool {
     config::ThemePref::from_token(p).is_some()
 }
@@ -143,30 +106,6 @@ pub(crate) fn set_theme(window: tauri::Window, theme: String) -> Result<(), Stri
         let _ = (window, entry);
         Ok(())
     }
-}
-
-// Theme preference is also an app.db scope; the synchronous startup reader
-// and asynchronous settings writer share one source of truth.
-#[tauri::command]
-pub(crate) async fn theme_pref_save(app: AppHandle, pref: String) -> Result<(), String> {
-    if !is_theme_preference(&pref) {
-        return Err(format!("unknown theme preference {pref:?}"));
-    }
-    let json = serde_json::json!({ "preference": pref }).to_string();
-    tauri::async_runtime::spawn_blocking(move || {
-        app_state_store(&app)?
-            .save_scope(THEME_SCOPE, &json)
-            .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub(crate) async fn theme_pref_load(app: AppHandle) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || Ok(theme_preference(&app)))
-        .await
-        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

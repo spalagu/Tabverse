@@ -13,9 +13,8 @@
 //! are not in the messages — so both are written and each is read by whoever
 //! needs it.
 //!
-//! Every line carries a version. A reader that meets a line it does not
-//! understand skips it and keeps going: a log written by a newer build must
-//! still open in an older one, minus whatever it cannot represent.
+//! Every line carries the current version. Records with any other version are
+//! rejected from the replay instead of being reinterpreted.
 
 use crate::event::SessionEvent;
 use crate::provider::Message;
@@ -42,10 +41,6 @@ pub struct Replay {
     pub events: Vec<SessionEvent>,
     /// For continuing the conversation with the model.
     pub messages: Vec<Message>,
-    /// Lines that could not be understood. Non-zero is not an error — a newer
-    /// build may have written records this one has no type for — but it is
-    /// worth surfacing rather than hiding.
-    pub skipped: usize,
 }
 
 pub struct SessionLog {
@@ -107,20 +102,33 @@ impl SessionLog {
         let file = File::open(path)
             .with_context(|| format!("failed to read the session log at {}", path.display()))?;
         let mut replay = Replay::default();
-        for line in BufReader::new(file).lines() {
-            let Ok(line) = line else {
-                replay.skipped += 1;
-                continue;
-            };
+        for (index, line) in BufReader::new(file).lines().enumerate() {
+            let line = line.with_context(|| {
+                format!("failed to read line {} from {}", index + 1, path.display())
+            })?;
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<Record>(&line) {
-                Ok(Record::Event { data, .. }) => replay.events.push(data),
-                Ok(Record::Message { data, .. }) => replay.messages.push(data),
-                // A truncated final line (the crash this format exists for) and
-                // a record kind from a newer build both land here.
-                Err(_) => replay.skipped += 1,
+            match serde_json::from_str::<Record>(&line).with_context(|| {
+                format!(
+                    "invalid current transcript record at {}:{}",
+                    path.display(),
+                    index + 1
+                )
+            })? {
+                Record::Event {
+                    v: LOG_VERSION,
+                    data,
+                } => replay.events.push(data),
+                Record::Message {
+                    v: LOG_VERSION,
+                    data,
+                } => replay.messages.push(data),
+                _ => anyhow::bail!(
+                    "noncurrent transcript record at {}:{}",
+                    path.display(),
+                    index + 1
+                ),
             }
         }
         Ok(replay)
@@ -159,7 +167,6 @@ mod tests {
 
         let replay = SessionLog::replay(&path).unwrap();
         assert_eq!(replay.events.len(), 4);
-        assert_eq!(replay.skipped, 0);
         assert_eq!(
             replay.events[0],
             SessionEvent::UserPrompt {
@@ -248,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn a_truncated_last_line_costs_only_that_line() {
+    fn a_truncated_last_line_rejects_the_transcript() {
         // Exactly what a crash mid-write leaves behind.
         let (_dir, path) = temp_log();
         let mut log = SessionLog::open(&path).unwrap();
@@ -263,17 +270,12 @@ mod tests {
         raw.push_str("{\"kind\":\"event\",\"v\":1,\"data\":{\"type\":\"assis");
         std::fs::write(&path, raw).unwrap();
 
-        let replay = SessionLog::replay(&path).unwrap();
-        assert_eq!(
-            replay.events.len(),
-            2,
-            "whole records before the tear survive"
-        );
-        assert_eq!(replay.skipped, 1);
+        let error = SessionLog::replay(&path).unwrap_err();
+        assert!(error.to_string().contains(":3"), "{error:#}");
     }
 
     #[test]
-    fn a_record_kind_from_a_newer_build_is_skipped_not_fatal() {
+    fn a_noncurrent_record_rejects_the_transcript() {
         let (_dir, path) = temp_log();
         let mut log = SessionLog::open(&path).unwrap();
         log.append_event(&SessionEvent::TurnStarted { turn: 1 })
@@ -294,13 +296,8 @@ mod tests {
         raw.push('\n');
         std::fs::write(&path, raw).unwrap();
 
-        let replay = SessionLog::replay(&path).unwrap();
-        assert_eq!(
-            replay.events.len(),
-            2,
-            "reading must continue past the unknown kind"
-        );
-        assert_eq!(replay.skipped, 1);
+        let error = SessionLog::replay(&path).unwrap_err();
+        assert!(error.to_string().contains(":2"), "{error:#}");
     }
 
     #[test]

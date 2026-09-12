@@ -294,22 +294,23 @@ describe("what a restart brings back", () => {
     expect(tabOf(id).zoomedPaneId).toBeUndefined();
   });
 
-  it("reads a hand-broken layout back as no layout at all", async () => {
+  it("rejects a session containing a hand-broken layout", async () => {
     const id = terminalWithShell();
     useStore.getState().splitTerminalPane(id, false);
     await flushAll();
 
     const raw = JSON.parse(localStorage.getItem("tabverse.state.session") as string);
     // Two panes sharing an id would share a screen-memory file and a
-    // registry entry; the tab must come back as a single terminal instead
-    // of as a layout with a pane nobody can address.
+    // registry entry. The current format is atomic, so the whole malformed
+    // session is rejected rather than silently rewritten.
     const tree = raw.tabs.find((t: { id: string }) => t.id === id).panes;
     tree.children[1].id = tree.children[0].id;
     localStorage.setItem("tabverse.state.session", JSON.stringify(raw));
 
     useStore.setState({ tabs: [], groups: withPresetGroups([]), activeTabId: null });
-    expect(await useStore.getState().restoreSession()).toBe(true);
-    expect(tabOf(id).panes).toBeUndefined();
+    expect(await useStore.getState().restoreSession()).toBe(false);
+    expect(useStore.getState().sessionRestoreResult).toBe("invalid-shape");
+    expect(useStore.getState().tabs).toEqual([]);
   });
 
   it("keeps the layout when a pinned tab is put to sleep, drops the shells", () => {

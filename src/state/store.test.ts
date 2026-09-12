@@ -12,10 +12,10 @@ import {
   useStore,
   visibleOrdered,
   withPresetGroups,
-  type PersistedState,
 } from "./store";
 import {
   SESSION_SCOPE,
+  deleteStateNow,
   flushAll,
   listScopes,
   saveState,
@@ -33,6 +33,8 @@ const CARRIER_KEY = "tabverse.state.session";
 
 const reset = async () => {
   await flushAll(); // drain buffered writes so they cannot leak forward
+  await deleteStateNow(SESSION_SCOPE);
+  await deleteStateNow(ARCHIVE_SCOPE);
   localStorage.clear();
   useStore.setState({
     tabs: [],
@@ -56,7 +58,10 @@ describe("session persistence", () => {
     ["{ not json", "invalid-json"],
     [JSON.stringify({ version: 2, tabs: [] }), "unsupported-version"],
     [JSON.stringify({ version: 1, tabs: "not-an-array" }), "invalid-shape"],
-    [JSON.stringify({ version: 1, tabs: [] }), "empty-tabs"],
+    [
+      JSON.stringify({ version: 1, zones: 3, tabs: [], groups: [], activeTabId: null }),
+      "empty-tabs",
+    ],
   ] as const)(
     "records %s as %s without changing the in-memory session",
     async (raw, expected) => {
@@ -69,6 +74,37 @@ describe("session persistence", () => {
     }
   );
 
+  it("rejects malformed records inside the current session envelope", async () => {
+    const first = useStore.getState().addTab({ type: "terminal" });
+    const second = useStore.getState().addTab({ type: "browser", url: "https://example.test" });
+    useStore.getState().createGroup("current", second);
+    await flushAll();
+    const current = JSON.parse(localStorage.getItem(CARRIER_KEY)!);
+    const cases: unknown[] = [];
+
+    const nullTab = structuredClone(current);
+    nullTab.tabs[0] = null;
+    cases.push(nullTab);
+    const duplicateTab = structuredClone(current);
+    duplicateTab.tabs[1].id = duplicateTab.tabs[0].id;
+    cases.push(duplicateTab);
+    const badGroup = structuredClone(current);
+    badGroup.groups[0].colorIndex = -1;
+    cases.push(badGroup);
+    const danglingGroup = structuredClone(current);
+    danglingGroup.tabs[0].groupId = "missing-group";
+    cases.push(danglingGroup);
+    const badSplit = structuredClone(current);
+    badSplit.split = { ids: [first, second], ratios: [0.8, 0.8], vertical: false };
+    cases.push(badSplit);
+
+    for (const malformed of cases) {
+      localStorage.setItem(CARRIER_KEY, JSON.stringify(malformed));
+      expect(await useStore.getState().restoreSession()).toBe(false);
+      expect(useStore.getState().sessionRestoreResult).toBe("invalid-shape");
+    }
+  });
+
   it("blocks every session write after recovery is declined until replacement is authorized", async () => {
     const raw = "{ not json";
     localStorage.setItem(CARRIER_KEY, raw);
@@ -78,6 +114,7 @@ describe("session persistence", () => {
     await flushAll();
     expect(localStorage.getItem(CARRIER_KEY)).toBe(raw);
 
+    await deleteStateNow(SESSION_SCOPE);
     useStore.setState({ sessionRestoreResult: "missing" });
     useStore.getState().addTab({ type: "terminal" });
     await flushAll();
@@ -123,6 +160,16 @@ describe("session persistence", () => {
     // No empty shell in the sidebar — presets are the only groups that
     // survive without members, because new tabs still need somewhere to land.
     expect(s.groups.filter((g) => !g.preset)).toHaveLength(0);
+  });
+
+  it("does not persist a remote active id or remote split member", () => {
+    const local = useStore.getState().addTab({ type: "terminal" });
+    const remote = useStore.getState().addTab({ type: "remote" });
+    useStore.setState({ activeTabId: remote, split: { ids: [local, remote], ratios: [0.5, 0.5], vertical: false } });
+
+    const snapshot = sessionSnapshot(useStore.getState());
+    expect(snapshot.activeTabId).toBe(local);
+    expect(snapshot.split).toBeUndefined();
   });
 
   it("a pinned front tab restores awake and front; every awake pin stays awake", async () => {
@@ -877,7 +924,7 @@ describe("today zone and auto-archive, all kinds", () => {
     ]);
   });
 
- it("carries a -era archive forward as browser entries, zero loss", async () => {
+ it("rejects archive records outside the current format", async () => {
     localStorage.setItem(
       `tabverse.state.${ARCHIVE_SCOPE}`,
       JSON.stringify([
@@ -890,11 +937,7 @@ describe("today zone and auto-archive, all kinds", () => {
       ])
     );
     await useStore.getState().restoreArchive();
-    const [entry] = useStore.getState().archive;
-    expect(entry.type).toBe("browser");
-    expect(entry.url).toBe("https://legacy.test/");
-    expect(entry.title).toBe("Legacy");
-    expect(typeof entry.id).toBe("string");
+    expect(useStore.getState().archive).toEqual([]);
   });
 
  it("the boot sweep counts archived ids as alive", async () => {
@@ -988,163 +1031,7 @@ describe("the divider's Clear", () => {
   });
 });
 
-describe("old-session compatibility and the two-zone migration", () => {
-  beforeEach(reset);
-
- it("migrates a pre- session: custom stays, anchored stays, auto-filed moves to today", async () => {
-    const old = {
-      version: 1,
-      tabs: [
-        {
-          id: "11111111-1111-4111-8111-111111111111",
-          type: "terminal",
-          title: "Terminal 1",
-          groupId: "preset-terminal",
-        },
-        {
-          id: "22222222-2222-4222-8222-222222222222",
-          type: "browser",
-          title: "Docs",
-          groupId: "old-custom",
-          url: "https://docs.test/",
-        },
-        {
-          id: "44444444-4444-4444-8444-444444444444",
-          type: "browser",
-          title: "Home",
-          groupId: "preset-browser",
-          url: "https://home.test/now",
-          pinnedUrl: "https://home.test/",
-        },
-        {
-          id: "55555555-5555-4555-8555-555555555555",
-          type: "browser",
-          title: "Passing",
-          groupId: "preset-browser",
-          url: "https://passing.test/",
-        },
-      ],
-      groups: [
-        {
-          id: "preset-terminal",
-          name: "Terminals",
-          color: "#7aa2ff",
-          collapsed: false,
-          preset: "terminal",
-        },
-        { id: "old-custom", name: "Reading", color: "#52d98a", collapsed: false },
-      ],
-      activeTabId: "22222222-2222-4222-8222-222222222222",
-    } satisfies Record<string, unknown>;
-    localStorage.setItem(CARRIER_KEY, JSON.stringify(old));
-
-    expect(await useStore.getState().restoreSession()).toBe(true);
-    const s = useStore.getState();
-    // Zero loss: every tab survived; only placement changed.
-    expect(s.tabs).toHaveLength(4);
-    const byTitle = (title: string) => s.tabs.find((t) => t.title === title)!;
-    // Branch 1: a custom folder is the user's own arrangement.
-    expect(byTitle("Docs").groupId).toBe("old-custom");
-    // Branch 2: an anchored browser tab in a preset was promoted by hand.
-    expect(byTitle("Home").groupId).toBe("preset-browser");
-    expect(byTitle("Home").pinnedUrl).toBe("https://home.test/");
-    // Branch 3: everything else in a preset was auto-filed — today now.
-    expect(byTitle("Terminal 1").groupId).toBeNull();
-    expect(byTitle("Passing").groupId).toBeNull();
-    // The clock starts at restore, so nothing reads as idle-forever.
-    expect(s.tabs.every((t) => typeof t.lastActiveAt === "number")).toBe(true);
-    expect(s.archive).toHaveLength(0);
-    expect(s.archiveThreshold).toBe("24h");
-  });
-
-  it("runs the migration once: a zones-marked session keeps promoted tabs put", async () => {
-    const st = useStore.getState();
-    const term = st.addTab({ type: "terminal" });
-    const preset = useStore.getState().groups.find((g) => g.preset === "terminal")!;
-    useStore.getState().assignToGroup(term, preset.id);
-    useStore.setState({ tabs: [], groups: withPresetGroups([]), activeTabId: null });
-    expect(await useStore.getState().restoreSession()).toBe(true);
-    expect(
-      useStore.getState().tabs.find((t) => t.id === term)?.groupId
-    ).toBe(preset.id);
-  });
-
- it("maps a pre- group's color value to its palette slot at restore", async () => {
-    const old = {
-      version: 1,
-      zones: 3,
-      tabs: [
-        {
-          id: "66666666-6666-4666-8666-666666666666",
-          type: "terminal",
-          title: "Terminal 1",
-          groupId: "legacy-exact",
-        },
-        {
-          id: "77777777-7777-4777-8777-777777777777",
-          type: "terminal",
-          title: "Terminal 2",
-          groupId: "legacy-edited",
-        },
-        {
-          id: "88888888-8888-4888-8888-888888888888",
-          type: "terminal",
-          title: "Terminal 3",
-          groupId: "legacy-broken",
-        },
-      ],
-      groups: [
-        // A palette value as saved: an exact lookup.
-        { id: "legacy-exact", name: "Amber", color: "#e0a458", collapsed: false },
-        // A hand-edited off-palette value: nearest slot, not a crash.
-        { id: "legacy-edited", name: "Lilac", color: "#c890e8", collapsed: false },
-        // Not a color at all: the first slot, not a crash.
-        { id: "legacy-broken", name: "Junk", color: "teal-ish", collapsed: false },
-      ],
-      activeTabId: null,
-    } satisfies Record<string, unknown>;
-    localStorage.setItem(CARRIER_KEY, JSON.stringify(old));
-
-    expect(await useStore.getState().restoreSession()).toBe(true);
-    const byId = (id: string) =>
-      useStore.getState().groups.find((g) => g.id === id)!;
-    // Slot order is the dark palette: 0 #93a6ff · 1 #55dc90 · 2 #e2a856 ·
-    // 3 #cf9df0 · 4 #5fd6d6 · 5 #ff8f98 (2026-08-22 Deep Console recolor).
-    expect(byId("legacy-exact").colorIndex).toBe(2);
-    expect(byId("legacy-edited").colorIndex).toBe(3);
-    expect(byId("legacy-broken").colorIndex).toBe(0);
-    // The old field does not ride along into the live store.
-    expect("color" in byId("legacy-exact")).toBe(false);
-  });
-
-  it("cuts a corrupt parent cycle loose instead of hiding its tabs", async () => {
-    const cycled: PersistedState = {
-      version: 1,
-      tabs: [
-        {
-          id: "33333333-3333-4333-8333-333333333333",
-          type: "terminal",
-          title: "Trapped",
-          groupId: "g-a",
-        },
-      ],
-      groups: [
-        { id: "g-a", name: "A", color: "#7aa2ff", collapsed: false, parentId: "g-b" },
-        { id: "g-b", name: "B", color: "#52d98a", collapsed: false, parentId: "g-a" },
-      ],
-      activeTabId: null,
-    };
-    localStorage.setItem(CARRIER_KEY, JSON.stringify(cycled));
-    expect(await useStore.getState().restoreSession()).toBe(true);
-    const s = useStore.getState();
-    // Both ends of the cycle were cut to the root; the tab is reachable.
-    expect(
-      visibleOrdered(s.tabs, s.groups).some((t) => t.title === "Trapped")
-    ).toBe(true);
-  });
-});
-
-describe("pinned items: dormancy, wake and migration", () => {
+describe("pinned items: dormancy and wake", () => {
   beforeEach(reset);
 
   const tabOf = (id: string) => useStore.getState().tabs.find((t) => t.id === id);
@@ -1280,55 +1167,7 @@ describe("pinned items: dormancy, wake and migration", () => {
       "/Users/x/new"
     );
   });
- it("backfills a zones-2 session's pinned payloads once", async () => {
-    localStorage.setItem(
-      CARRIER_KEY,
-      JSON.stringify({
-        version: 1,
-        zones: 2,
-        tabs: [
-          {
-            id: "66666666-6666-4666-8666-666666666666",
-            type: "browser",
-            title: "Docs",
-            groupId: "preset-browser",
-            url: "https://docs.test/page",
-          },
-          {
-            id: "77777777-7777-4777-8777-777777777777",
-            type: "terminal",
-            title: "Work",
-            groupId: "preset-terminal",
-            cwd: "/tmp/work",
-          },
-          {
-            id: "88888888-8888-4888-8888-888888888888",
-            type: "browser",
-            title: "Today page",
-            groupId: null,
-            url: "https://today.test/",
-          },
-        ],
-        groups: [],
-        activeTabId: "88888888-8888-4888-8888-888888888888",
-      })
-    );
-    expect(await useStore.getState().restoreSession()).toBe(true);
-    const s = useStore.getState();
-    expect(s.tabs).toHaveLength(3); // zero loss
-    const byTitle = (title: string) => s.tabs.find((t) => t.title === title)!;
-    // The payload came from where the tab was; placement did not change.
-    expect(byTitle("Docs").pinnedUrl).toBe("https://docs.test/page");
-    expect(byTitle("Docs").groupId).toBe("preset-browser");
-    expect(byTitle("Docs").dormant).toBeUndefined();
-    expect(byTitle("Work").cwd).toBe("/tmp/work");
-    expect(byTitle("Work").dormant).toBeUndefined();
-    // A today tab gains nothing and sleeps never.
-    expect(byTitle("Today page").pinnedUrl).toBeUndefined();
-    expect(byTitle("Today page").dormant).toBeUndefined();
-  });
-
-  it("writes the zones-3 marker, so the backfill cannot run twice", () => {
+  it("writes the current zones marker", () => {
     useStore.getState().addTab({ type: "terminal" });
     expect(sessionSnapshot(useStore.getState()).zones).toBe(3);
   });
@@ -1675,31 +1514,6 @@ describe("search engine setting", () => {
     expect(useStore.getState().customSearchTemplate).toBe("https://s.test/?q=%s");
   });
 
-  it("ignores an old session's engine rather than letting it win over the file", async () => {
-    useStore.getState().addTab({ type: "terminal" });
-    // A session written before the configuration file still carries these
-    // two fields. Restore must walk past them: the migration is what reads
-    // them, once, and it only writes where the file has said nothing.
-    const old = {
-      ...sessionSnapshot(useStore.getState()),
-      searchEngine: "bing" as const,
-      customSearchTemplate: "https://stale.test/?q=%s",
-    };
-    saveState(SESSION_SCOPE, old);
-    await flushAll();
-    useStore.setState({
-      tabs: [],
-      groups: withPresetGroups([]),
-      activeTabId: null,
-      searchEngine: "custom",
-      customSearchTemplate: "https://from-the-file.test/?q=%s",
-    });
-    expect(await useStore.getState().restoreSession()).toBe(true);
-    expect(useStore.getState().searchEngine).toBe("custom");
-    expect(useStore.getState().customSearchTemplate).toBe(
-      "https://from-the-file.test/?q=%s"
-    );
-  });
 });
 
 describe("the command bar is an overlay", () => {

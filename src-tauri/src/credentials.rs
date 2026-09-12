@@ -108,43 +108,35 @@ impl KeyBundleCache {
 #[cfg(not(test))]
 static KEY_BUNDLE: KeyBundleCache = KeyBundleCache::new();
 
-/// Where app.db and the legacy encrypted login store live. Set once at startup, because
-/// resolving it needs the app handle and this module deliberately has no
-/// idea what a Tauri app is.
+/// Where app.db lives. Set once at startup because resolving it needs the app
+/// handle and this module deliberately has no idea what a Tauri app is.
+#[cfg(not(test))]
 static APP_DATA_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
+#[cfg(test)]
+static TEST_APP_DATA_DIR: std::sync::RwLock<Option<std::path::PathBuf>> =
+    std::sync::RwLock::new(None);
+
+#[cfg(not(test))]
 pub fn set_app_data_dir(dir: std::path::PathBuf) {
     let _ = APP_DATA_DIR.set(dir);
 }
 
+#[cfg(test)]
+pub fn set_app_data_dir(_dir: std::path::PathBuf) {}
+
 /// Serialises the tests that use the vault, and hands each one an empty one.
-///
-/// `APP_DATA_DIR` is a `OnceLock`, so only the first setup of a test
-/// binary takes effect and every later test silently shares that first
-/// directory. Sharing it is survivable; sharing it *concurrently* is not —
-/// one test storing an agent token is enough to send another test's session
-/// thread down the signed-in path and out to the real network, where it waits
-/// out a connect timeout and then a minute of socket idle.
 ///
 /// Hold the returned guard for the whole test.
 #[cfg(test)]
 pub(crate) fn test_vault_guard(
-    _preferred: std::path::PathBuf,
+    preferred: std::path::PathBuf,
 ) -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     // A test that panicked while holding this poisoned it; the next test still
     // wants a clean directory, so take it anyway.
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let stable =
-        std::env::temp_dir().join(format!("tabverse-credential-tests-{}", std::process::id()));
-    let _ = APP_DATA_DIR.set(stable);
-    if let Some(dir) = APP_DATA_DIR.get() {
-        let _ = std::fs::create_dir_all(dir);
-        let _ = std::fs::remove_file(dir.join("app.db"));
-        let _ = std::fs::remove_file(dir.join("app.db-wal"));
-        let _ = std::fs::remove_file(dir.join("app.db-shm"));
-        let _ = std::fs::remove_dir_all(dir.join("state"));
-    }
+    *TEST_APP_DATA_DIR.write().unwrap_or_else(|e| e.into_inner()) = Some(preferred);
     guard
 }
 
@@ -162,7 +154,7 @@ fn account(host: &str, username: &str) -> Result<String, String> {
     Ok(format!("{host}{SEP}{username}"))
 }
 
-/// One bundle in the system store, everything else encrypted beside it.
+/// One bundle in the system store, everything else encrypted in app.db.
 ///
 /// Logins used to be one system credential each, and that is what made
 /// macOS ask for permission **once per password**: an item's access list
@@ -172,30 +164,36 @@ fn account(host: &str, username: &str) -> Result<String, String> {
 ///
 /// So the arrangement is the one browsers use: a single key lives where the
 /// system keeps secrets — one item, one permission, once — and the logins
-/// live next to it in a file that key seals.
+/// live in the credential vault that key seals.
 mod vault {
     use super::*;
 
     const MAGIC: &[u8] = b"TABVERSEVAULT2";
-    const FILE: &str = "logins.v2.vault";
-    const ID: &str = "browser-logins-v2";
+    pub const WEB_ID: &str = "browser-logins-v2";
+    pub const AGENT_ID: &str = "agent-sign-in-v1";
 
     /// service -> "host\u{1}username" -> password
     pub type Store = BTreeMap<String, BTreeMap<String, String>>;
 
-    fn app_data_dir() -> Result<&'static std::path::Path, String> {
+    #[cfg(not(test))]
+    fn app_data_dir() -> Result<std::path::PathBuf, String> {
         APP_DATA_DIR
             .get()
-            .map(std::path::PathBuf::as_path)
+            .cloned()
+            .ok_or_else(|| "the login store has no directory yet".to_string())
+    }
+
+    #[cfg(test)]
+    fn app_data_dir() -> Result<std::path::PathBuf, String> {
+        TEST_APP_DATA_DIR
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
             .ok_or_else(|| "the login store has no directory yet".to_string())
     }
 
     fn store() -> Result<tabverse_state::AppStateStore, String> {
-        tabverse_state::AppStateStore::open(app_data_dir()?).map_err(|e| format!("app.db: {e:#}"))
-    }
-
-    fn legacy_path() -> Result<std::path::PathBuf, String> {
-        Ok(app_data_dir()?.join("state").join(FILE))
+        tabverse_state::AppStateStore::open(&app_data_dir()?).map_err(|e| format!("app.db: {e:#}"))
     }
 
     fn key() -> Result<[u8; 32], String> {
@@ -230,55 +228,87 @@ mod vault {
             .map_err(|_| "the login store does not open with this machine's key".to_string())
     }
 
-    pub fn read() -> Result<Store, String> {
+    pub fn read(id: &str) -> Result<Store, String> {
         let database = store()?;
         let data = if let Some(data) = database
-            .load_credential_vault(ID)
+            .load_credential_vault(id)
             .map_err(|e| format!("read credential vault from app.db: {e:#}"))?
         {
             data
-        } else if let Ok(data) = std::fs::read(legacy_path()?) {
-            // Import only ciphertext that authenticates and decodes. The old
-            // file remains untouched until a later release can drop rollback.
-            let plain = unseal(&key()?, &data)?;
-            serde_json::from_slice::<Store>(&plain)
-                .map_err(|e| format!("legacy login store is damaged: {e}"))?;
-            database
-                .save_credential_vault(ID, &data)
-                .map_err(|e| format!("import credential vault into app.db: {e:#}"))?;
-            data
         } else {
-            // Nothing yet: an empty store, written so the next read has a
-            // database row to open.
-            let store = Store::new();
-            write(&store)?;
-            return Ok(store);
+            return Ok(Store::new());
         };
         let plain = unseal(&key()?, &data)?;
         serde_json::from_slice(&plain).map_err(|e| format!("login store is damaged: {e}"))
     }
 
-    pub fn write(contents: &Store) -> Result<(), String> {
+    pub fn write(id: &str, contents: &Store) -> Result<(), String> {
         let plain = serde_json::to_vec(contents).map_err(|e| format!("login store: {e}"))?;
         let sealed = seal(&key()?, &plain)?;
         store()?
-            .save_credential_vault(ID, &sealed)
+            .save_credential_vault(id, &sealed)
             .map_err(|e| format!("write credential vault to app.db: {e:#}"))
+    }
+
+    pub fn compare_exchange(
+        id: &str,
+        service: &str,
+        account: &str,
+        expected_value: &str,
+        replacement_value: &str,
+    ) -> Result<bool, String> {
+        let database = store()?;
+        let Some(current_ciphertext) = database
+            .load_credential_vault(id)
+            .map_err(|e| format!("read credential vault from app.db: {e:#}"))?
+        else {
+            return Ok(false);
+        };
+        let plain = unseal(&key()?, &current_ciphertext)?;
+        let mut contents: Store =
+            serde_json::from_slice(&plain).map_err(|e| format!("login store is damaged: {e}"))?;
+        let Some(value) = contents
+            .get_mut(service)
+            .and_then(|entries| entries.get_mut(account))
+        else {
+            return Ok(false);
+        };
+        if value != expected_value {
+            return Ok(false);
+        }
+        *value = replacement_value.to_string();
+        let replacement_plain =
+            serde_json::to_vec(&contents).map_err(|e| format!("login store: {e}"))?;
+        let replacement_ciphertext = seal(&key()?, &replacement_plain)?;
+        database
+            .compare_exchange_credential_vault(id, &current_ciphertext, &replacement_ciphertext)
+            .map_err(|e| format!("update credential vault in app.db: {e:#}"))
     }
 }
 
-fn save(service: &str, host: &str, username: &str, password: &str) -> Result<(), String> {
+fn web_write_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn save(
+    vault_id: &str,
+    service: &str,
+    host: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
     let acct = account(host, username)?;
-    let mut store = vault::read()?;
+    let mut store = vault::read(vault_id)?;
     store
         .entry(service.to_string())
         .or_default()
         .insert(acct, password.to_string());
-    vault::write(&store)
+    vault::write(vault_id, &store)
 }
 
-fn accounts(service: &str) -> Result<Vec<(String, String)>, String> {
-    let store = vault::read()?;
+fn accounts(vault_id: &str, service: &str) -> Result<Vec<(String, String)>, String> {
+    let store = vault::read(vault_id)?;
     Ok(store
         .get(service)
         .map(|m| {
@@ -290,8 +320,8 @@ fn accounts(service: &str) -> Result<Vec<(String, String)>, String> {
         .unwrap_or_default())
 }
 
-fn find(service: &str, host: &str) -> Result<Vec<WebCredential>, String> {
-    let store = vault::read()?;
+fn find(vault_id: &str, service: &str, host: &str) -> Result<Vec<WebCredential>, String> {
+    let store = vault::read(vault_id)?;
     let Some(entries) = store.get(service) else {
         return Ok(Vec::new());
     };
@@ -312,13 +342,13 @@ fn find(service: &str, host: &str) -> Result<Vec<WebCredential>, String> {
     Ok(out)
 }
 
-fn delete(service: &str, host: &str, username: &str) -> Result<(), String> {
+fn delete(vault_id: &str, service: &str, host: &str, username: &str) -> Result<(), String> {
     let acct = account(host, username)?;
-    let mut store = vault::read()?;
+    let mut store = vault::read(vault_id)?;
     if let Some(entries) = store.get_mut(service) {
         entries.remove(&acct);
     }
-    vault::write(&store)
+    vault::write(vault_id, &store)
 }
 
 /// Where the agent keeps its sign-in.
@@ -330,80 +360,66 @@ const AGENT_SERVICE: &str = "tabverse.agent";
 
 /// Store one secret for the agent under a name of its own.
 ///
-/// Goes through the same sealed vault as everything else — one system
-/// credential, one permission prompt, the rest encrypted beside it.
+/// Uses a separate encrypted database row from browser logins so GUI password
+/// writes and Supervisor token refreshes cannot overwrite each other.
 pub fn save_agent_secret(name: &str, value: &str) -> Result<(), String> {
-    save(AGENT_SERVICE, name, "", value)
+    save(vault::AGENT_ID, AGENT_SERVICE, name, "", value)
 }
 
 pub fn read_agent_secret(name: &str) -> Result<Option<String>, String> {
     let acct = account(name, "")?;
-    Ok(vault::read()?
+    Ok(vault::read(vault::AGENT_ID)?
         .get(AGENT_SERVICE)
         .and_then(|entries| entries.get(&acct))
         .cloned())
 }
 
 pub fn delete_agent_secret(name: &str) -> Result<(), String> {
-    delete(AGENT_SERVICE, name, "")
+    delete(vault::AGENT_ID, AGENT_SERVICE, name, "")
+}
+
+pub fn compare_exchange_agent_secret(
+    name: &str,
+    expected: &str,
+    replacement: &str,
+) -> Result<bool, String> {
+    let acct = account(name, "")?;
+    vault::compare_exchange(vault::AGENT_ID, AGENT_SERVICE, &acct, expected, replacement)
 }
 
 pub fn save_web(host: &str, username: &str, password: &str) -> Result<(), String> {
-    save(WEB_SERVICE, host, username, password)
+    let _lock = web_write_lock();
+    save(vault::WEB_ID, WEB_SERVICE, host, username, password)
 }
 pub fn list_web() -> Result<Vec<(String, String)>, String> {
-    accounts(WEB_SERVICE)
+    accounts(vault::WEB_ID, WEB_SERVICE)
 }
 pub fn find_web(host: &str) -> Result<Vec<WebCredential>, String> {
-    find(WEB_SERVICE, host)
+    find(vault::WEB_ID, WEB_SERVICE, host)
 }
 pub fn delete_web(host: &str, username: &str) -> Result<(), String> {
-    delete(WEB_SERVICE, host, username)
+    let _lock = web_write_lock();
+    delete(vault::WEB_ID, WEB_SERVICE, host, username)
 }
 
 /// Forget every saved web login.
 pub fn forget_all_web() -> Result<usize, String> {
-    let mut store = vault::read()?;
+    let _lock = web_write_lock();
+    let mut store = vault::read(vault::WEB_ID)?;
     let gone = store.get(WEB_SERVICE).map(|m| m.len()).unwrap_or(0);
     store.remove(WEB_SERVICE);
-    vault::write(&store)?;
+    vault::write(vault::WEB_ID, &store)?;
     Ok(gone)
-}
-
-pub type VaultDump = BTreeMap<String, BTreeMap<String, String>>;
-
-/// Read out the entire store, in the clear, for the migration exporter.
-///
-/// The plaintext this returns is handed straight into the passphrase-sealed
-/// archive and nowhere else — never a file on its own, never a log line. The
-/// bundle key that opens the store here belongs to the source install; the
-/// destination re-seals under its own via [`replace_vault`].
-pub fn export_vault() -> Result<VaultDump, String> {
-    vault::read()
-}
-
-/// Replace the whole store with `dump`, sealed under THIS machine's key.
-///
-/// Used by the migration importer on the destination: the archive carried
-/// the logins in the clear (under its own encryption), and here they re-enter
-/// the local store the same way a freshly-saved login would — bound to this
-/// machine's key, readable by nothing that lacks it.
-pub fn replace_vault(dump: &VaultDump) -> Result<(), String> {
-    vault::write(dump)
-}
-
-/// How many logins a dump carries, across every service.
-pub fn vault_len(dump: &VaultDump) -> usize {
-    dump.values().map(|m| m.len()).sum()
 }
 
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub fn save_http_auth(key: &str, username: &str, password: &str) -> Result<(), String> {
-    save(AUTH_SERVICE, key, username, password)
+    let _lock = web_write_lock();
+    save(vault::WEB_ID, AUTH_SERVICE, key, username, password)
 }
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub fn find_http_auth(key: &str) -> Result<Vec<WebCredential>, String> {
-    find(AUTH_SERVICE, key)
+    find(vault::WEB_ID, AUTH_SERVICE, key)
 }
 
 #[cfg(test)]
@@ -719,46 +735,20 @@ mod key_bundle_tests {
     fn legacy_vault_file_is_ignored_without_being_modified() {
         let preferred = tempfile::tempdir().unwrap();
         let _guard = test_vault_guard(preferred.path().to_path_buf());
-        let dir = APP_DATA_DIR.get().unwrap();
+        let dir = preferred.path();
         std::fs::create_dir_all(dir.join("state")).unwrap();
         let legacy = dir.join("state/logins.vault");
         let marker = b"legacy-vault-must-remain-untouched";
         std::fs::write(&legacy, marker).unwrap();
 
-        assert!(vault::read().unwrap().is_empty());
+        assert!(vault::read(vault::WEB_ID).unwrap().is_empty());
         assert_eq!(std::fs::read(&legacy).unwrap(), marker);
         assert!(!dir.join("state/logins.v2.vault").exists());
         assert!(tabverse_state::AppStateStore::open(dir)
             .unwrap()
             .load_credential_vault("browser-logins-v2")
             .unwrap()
-            .is_some());
-    }
-
-    #[test]
-    fn authenticated_v2_file_imports_once_without_being_deleted() {
-        let preferred = tempfile::tempdir().unwrap();
-        let _guard = test_vault_guard(preferred.path().to_path_buf());
-        let dir = APP_DATA_DIR.get().unwrap();
-        std::fs::create_dir_all(dir.join("state")).unwrap();
-        let mut original = vault::Store::new();
-        original
-            .entry(WEB_SERVICE.into())
-            .or_default()
-            .insert(account("example.test", "me").unwrap(), "secret".into());
-        let plain = serde_json::to_vec(&original).unwrap();
-        let sealed = vault::seal(&key_bundle().unwrap().login_vault, &plain).unwrap();
-        let legacy = dir.join("state/logins.v2.vault");
-        std::fs::write(&legacy, &sealed).unwrap();
-
-        assert_eq!(vault::read().unwrap(), original);
-        assert_eq!(std::fs::read(&legacy).unwrap(), sealed);
-        let imported = tabverse_state::AppStateStore::open(dir)
-            .unwrap()
-            .load_credential_vault("browser-logins-v2")
-            .unwrap()
-            .unwrap();
-        assert_eq!(imported, sealed);
+            .is_none());
     }
 
     #[test]
@@ -790,7 +780,7 @@ mod key_bundle_tests {
         assert_eq!(find_web("example.test").unwrap().len(), 1);
         assert_eq!(find_web("other.test").unwrap().len(), 1);
 
-        let database = std::fs::read(APP_DATA_DIR.get().unwrap().join("app.db")).unwrap();
+        let database = std::fs::read(preferred.path().join("app.db")).unwrap();
         for secret in [&alice_first, &alice_updated, &bob, &other] {
             assert!(
                 !database

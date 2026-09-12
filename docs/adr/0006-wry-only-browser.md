@@ -1,23 +1,23 @@
-# ADR-0006：Desktop Browser 只使用 Wry
+# ADR-0006: Desktop Browser Uses Wry Only
 
-## 状态
-已接受。
+## Status
+Accepted.
 
-## 需求与上下文
-Desktop Browser 需要使用各平台原生 WebView，同时避免 CEF、双 Runtime 和自定义 Tauri fork。
+## Context and requirements
+Desktop Browser must use each platform's native WebView while avoiding CEF, dual runtimes, and a custom Tauri fork.
 
-## 决策
-使用官方 Tauri + Wry：macOS 使用 WKWebView，Windows 使用 WebView2，Linux 使用 WebKitGTK。平台事件只在 `src-tauri` adapter 内处理。
+## Decision
+Use upstream Tauri and Wry: WKWebView on macOS, WebView2 on Windows, and WebKitGTK on Linux. Handle platform events only in `src-tauri` adapters.
 
-## 备选与拒绝原因
-- CEF：增加第二套运行时、打包链和安全更新责任。
-- 自定义 Tauri fork：扩大长期维护面，现有能力不需要。
+## Alternatives rejected
+- CEF: adds a second runtime, packaging chain, and security-update responsibility.
+- Custom Tauri fork: expands long-term maintenance without a current capability requirement.
 
-## 跨平台影响
-产品语义相同；WebView 事件接线允许按平台实现。
+## Cross-platform impact
+Product semantics are shared; WebView event wiring may be platform-specific.
 
-## Remote 带宽影响
+## Remote bandwidth impact
 The local Browser engine does not enter the Remote data plane. Browser tabs are unavailable on Join.
 
-## 迁移影响与可逆性
-V3 不迁入 CEF 状态或 helper。未来更换 engine 属于新的架构决策，不能在现有 adapter 内暗中增加第二套 runtime。
+## Migration impact and reversibility
+V3 does not import CEF state or helpers. A future engine change requires a new architecture decision and cannot silently add a second runtime inside an existing adapter.

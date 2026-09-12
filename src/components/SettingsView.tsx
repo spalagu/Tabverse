@@ -1,7 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { SEARCH_ENGINES, validSearchTemplate } from "../search";
 import { confirmAsk } from "./Confirm";
-import { passphraseAsk } from "./Passphrase";
 import { BackgroundTasksSection } from "./BackgroundTasksSection";
 import { UserScriptsSection } from "./UserScriptsSection";
 import { ProfilesSection } from "./ProfilesSection";
@@ -834,18 +833,28 @@ export function SettingsView({
       ? STR.settings.network.coverDownWebview
       : STR.settings.network.uncoveredWebview;
 
-  const [trusted, setTrusted] = useState<string[]>([]);
+  const [siteNote, setSiteNote] = useState<ErrorDescription | null>(null);
+  const siteError = (error: unknown) =>
+    setSiteNote(describeError(error, STR.errors.actions.manageSiteMemory));
+  const [trusted, setTrusted] = useState<string[] | null>(null);
   useEffect(() => {
     if (!isTauri) return;
     import("@tauri-apps/api/core").then(({ invoke }) =>
-      invoke<string[]>("list_trusted_hosts").then(setTrusted).catch(() => {})
+      invoke<string[]>("list_trusted_hosts")
+        .then(setTrusted)
+        .catch(siteError)
     );
   }, []);
 
   const revokeTrust = async (host: string) => {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("revoke_trusted_host", { host }).catch(() => {});
-    setTrusted((list) => list.filter((h) => h !== host));
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("revoke_trusted_host", { host });
+      setTrusted((list) => list?.filter((h) => h !== host) ?? null);
+      setSiteNote(null);
+    } catch (error) {
+      siteError(error);
+    }
   };
 
   /** Mirrors `MediaGrant` in src-tauri/src/page_prompts.rs. */
@@ -860,18 +869,21 @@ export function SettingsView({
   const loadMedia = async () => {
     if (!isTauri) return;
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke<MediaGrant[]>("media_list")
-      .then(setMedia)
-      .catch(() => setMedia([]));
+    setMedia(await invoke<MediaGrant[]>("media_list"));
   };
   useEffect(() => {
-    void loadMedia();
+    void loadMedia().catch(siteError);
   }, []);
 
   const revokeMedia = async (host: string, kind: string) => {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("media_revoke", { host, kind }).catch(() => {});
-    await loadMedia();
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("media_revoke", { host, kind });
+      await loadMedia();
+      setSiteNote(null);
+    } catch (error) {
+      siteError(error);
+    }
   };
 
   // Per-site zoom lives in the frontend module (zoomMemory), not behind a
@@ -893,20 +905,21 @@ export function SettingsView({
   const loadScripts = async () => {
     if (!isTauri) return;
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke<GrantedScript[]>("userscripts_list")
-      .then(setScripts)
-      .catch(() => setScripts([]));
+    setScripts(await invoke<GrantedScript[]>("userscripts_list"));
   };
   useEffect(() => {
-    void loadScripts();
+    void loadScripts().catch(siteError);
   }, []);
 
   const revokeScriptGrant = async (scriptId: string, host: string) => {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("userscript_revoke_grant", { scriptId, host }).catch(
-      () => {}
-    );
-    await loadScripts();
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("userscript_revoke_grant", { scriptId, host });
+      await loadScripts();
+      setSiteNote(null);
+    } catch (error) {
+      siteError(error);
+    }
   };
 
   // The script→host[] shape the scripts are stored in, flattened into the
@@ -936,27 +949,31 @@ export function SettingsView({
       }))
     )
       return;
-    const { invoke } = await import("@tauri-apps/api/core");
-    for (const host of trusted) {
-      await invoke("revoke_trusted_host", { host }).catch(() => {});
-    }
-    for (const g of media ?? []) {
-      await invoke("media_revoke", { host: g.host, kind: g.kind }).catch(
-        () => {}
-      );
-    }
-    for (const row of scriptGrants) {
-      for (const s of row.granted) {
-        await invoke("userscript_revoke_grant", {
-          scriptId: s.id,
-          host: row.host,
-        }).catch(() => {});
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      for (const host of trusted ?? []) {
+        await invoke("revoke_trusted_host", { host });
       }
+      for (const g of media ?? []) {
+        await invoke("media_revoke", { host: g.host, kind: g.kind });
+      }
+      for (const row of scriptGrants) {
+        for (const s of row.granted) {
+          await invoke("userscript_revoke_grant", {
+            scriptId: s.id,
+            host: row.host,
+          });
+        }
+      }
+      clearZoomMemory();
+      setTrusted([]);
+      setZooms(zoomEntries());
+      await Promise.all([loadMedia(), loadScripts()]);
+      setSiteNote(null);
+    } catch (error) {
+      siteError(error);
+      await Promise.allSettled([loadMedia(), loadScripts()]);
     }
-    clearZoomMemory();
-    setTrusted([]);
-    setZooms(zoomEntries());
-    await Promise.all([loadMedia(), loadScripts()]);
   };
 
   /**
@@ -1100,126 +1117,6 @@ export function SettingsView({
       setTransferNote(describeError(e, STR.errors.actions.importPasswords));
     }
   };
-
-  // What came of the last migration export or import. Counts and a backup
-  // path only — the archive's contents never come up to this layer.
-  const [migrateNote, setMigrateNote] = useState<
-    string | ErrorDescription | null
-  >(null);
-
-  // A filesystem-safe timestamp for the backup directory name. Generated
-  // here because the core keeps no clock (it names the directory from what
-  // this passes it), matching how the rest of the state layer stamps things.
-  const stampNow = (): string => {
-    const d = new Date();
-    const p = (n: number) => String(n).padStart(2, "0");
-    return (
-      `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
-      `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
-    );
-  };
-
-  const exportEverything = async () => {
-    const { invoke } = await import("@tauri-apps/api/core");
-    try {
-      await invoke("migrate_authorize_export");
-    } catch (e) {
-      setMigrateNote(
-        errorText(e).includes("not authorized")
-          ? STR.settings.exportNotAuthorized
-          : describeError(e, STR.errors.actions.exportBackup)
-      );
-      return;
-    }
-    const passphrase = await passphraseAsk({
-      title: STR.settings.migrate.exportPassTitle,
-      note: STR.settings.migrate.exportPassNote,
-      confirm: true,
-      submitLabel: STR.common.proceed,
-    });
-    if (!passphrase) return;
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const path = await save({
-      defaultPath: "tabverse-migration.tabverse",
-      filters: [
-        { name: STR.settings.migrate.filterName, extensions: ["tabverse"] },
-      ],
-    });
-    if (!path) return;
-    try {
-      const s = await invoke<{ scopes: number; passwords: number }>(
-        "migrate_export",
-        { path, passphrase }
-      );
-      setMigrateNote(
-        STR.settings.migrate.exportedResult({
-          scopes: s.scopes,
-          passwords: s.passwords,
-        })
-      );
-    } catch (e) {
-      setMigrateNote(describeError(e, STR.errors.actions.exportBackup));
-    }
-  };
-
-  const importEverything = async () => {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const { invoke } = await import("@tauri-apps/api/core");
-    const path = await open({
-      multiple: false,
-      filters: [
-        { name: STR.settings.migrate.filterName, extensions: ["tabverse"] },
-      ],
-    });
-    if (typeof path !== "string") return;
-    const passphrase = await passphraseAsk({
-      title: STR.settings.migrate.importPassTitle,
-      note: STR.settings.migrate.importPassNote,
-      confirm: false,
-      submitLabel: STR.settings.migrate.openLabel,
-    });
-    if (!passphrase) return;
-    // One stamp, used for both the check (so the confirm box can show the
-    // real backup path) and the apply.
-    const stamp = stampNow();
-    // Validate first: a wrong passphrase, a truncated file or an unknown
-    // version fails here, before a single byte of current state is touched.
-    let preview: {
-      summary: { scopes: number; passwords: number };
-      backupPath: string;
-    };
-    try {
-      preview = await invoke("migrate_import_check", { path, passphrase, stamp });
-    } catch (e) {
-      setMigrateNote(describeError(e, STR.errors.actions.importBackup));
-      return;
-    }
-    const ok = await confirmAsk(
-      STR.settings.migrate.replaceQuestion({
-        scopes: preview.summary.scopes,
-        passwords: preview.summary.passwords,
-        backupPath: preview.backupPath,
-      }),
-      { confirmLabel: STR.settings.migrate.replaceLabel }
-    );
-    if (!ok) return;
-    try {
-      const res = await invoke<{
-        summary: { scopes: number; passwords: number };
-        backupPath: string;
-      }>("migrate_import_apply", { path, passphrase, stamp });
-      setMigrateNote(
-        STR.settings.migrate.importedResult({
-          scopes: res.summary.scopes,
-          passwords: res.summary.passwords,
-          backupPath: res.backupPath,
-        })
-      );
-    } catch (e) {
-      setMigrateNote(describeError(e, STR.errors.actions.importBackup));
-    }
-  };
-
 
   const danger = useMemo(() => dangerActions(setDangerNote), []);
 
@@ -2114,9 +2011,10 @@ export function SettingsView({
           <section id="sites" hidden={hidden("sites")}>
             <h3>{STR.settings.sites.heading}</h3>
             <p>{STR.settings.sites.blurb}</p>
+            {siteNote && <ErrorState inline error={siteNote} />}
 
             <h4>{STR.settings.sites.permissionsHeading}</h4>
-            {media === null || media.length === 0 ? (
+            {media === null ? null : media.length === 0 ? (
               <p className="pw-empty">{STR.settings.sites.permissionsNone}</p>
             ) : (
               <table className="pw-table">
@@ -2146,12 +2044,12 @@ export function SettingsView({
 
             <h4>{STR.settings.sites.certsHeading}</h4>
             <p>{STR.settings.sites.certsBlurb}</p>
-            {trusted.length === 0 ? (
+            {trusted === null ? null : trusted.length === 0 ? (
               <p className="pw-empty">{STR.settings.sites.certsNone}</p>
             ) : (
               <table className="pw-table">
                 <tbody>
-                  {trusted.map((host) => (
+                  {(trusted ?? []).map((host) => (
                     <tr key={host}>
                       <td>{host}</td>
                       <td>
@@ -2193,7 +2091,7 @@ export function SettingsView({
             )}
 
             <h4>{STR.settings.sites.scriptsHeading}</h4>
-            {scriptGrants.length === 0 ? (
+            {scripts === null ? null : scriptGrants.length === 0 ? (
               <p className="pw-empty">{STR.settings.sites.scriptsNone}</p>
             ) : (
               <table className="pw-table">
@@ -2359,25 +2257,6 @@ export function SettingsView({
             ))}
           </section>
 
-
-          <section id="backup" hidden={hidden("backup")}>
-            <h3>{STR.settings.migrate.heading}</h3>
-            <p>{STR.settings.migrate.blurb}</p>
-            <div className="btn-row">
-              <button className="btn" onClick={exportEverything}>
-                {STR.settings.migrate.exportBtn}
-              </button>
-              <button className="btn" onClick={importEverything}>
-                {STR.settings.migrate.importBtn}
-              </button>
-            </div>
-            {migrateNote &&
-              (typeof migrateNote === "string" ? (
-                <p className="pw-empty">{migrateNote}</p>
-              ) : (
-                <ErrorState inline error={migrateNote} />
-              ))}
-          </section>
 
           {/* The one section rendered from another file, so the search
               hides it from outside rather than from within — the slot is

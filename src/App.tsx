@@ -31,7 +31,6 @@ import { TabMenu } from "./components/TabMenu";
 import { SidebarMenu } from "./components/SidebarMenu";
 import { GroupMenu } from "./components/GroupMenu";
 import { ConfirmHost, confirmChoose } from "./components/Confirm";
-import { PassphraseHost } from "./components/Passphrase";
 import { SaveTemplateDialog } from "./components/SaveTemplateDialog";
 import { PasswordPanel } from "./components/PasswordPanel";
 import { ArchivePanel } from "./components/ArchivePanel";
@@ -42,7 +41,7 @@ import { detachTerminalTab, listenToMenuCommands } from "./appCommands";
 import { initDownloads } from "./downloads";
 import { loadZoomMemory } from "./zoomMemory";
 import { coreLog } from "./errlog";
-import { flushAll } from "./persist";
+import { deleteStateNow, flushAll, SESSION_SCOPE } from "./persist";
 import {
   configGet,
   flushConfigWrites,
@@ -78,9 +77,9 @@ const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
 
 function DesktopApp() {
   useGlobalKeys();
-  // Startup effects that open tabs must wait until recovery has decided whether session.json is
-  // absent or must be preserved, otherwise any one could write over a broken
-  // existing session before the recovery dialog appears.
+  // Startup effects that open tabs must wait until session recovery decides
+  // whether state is absent or must be preserved, otherwise any one could
+  // write over a broken session before the recovery dialog appears.
   const sessionBoot = useRef<Promise<SessionRecoveryOutcome> | null>(null);
   const resolveSessionBoot = useRef<
     ((outcome: SessionRecoveryOutcome) => void) | null
@@ -607,8 +606,8 @@ function DesktopApp() {
       try {
         const st = useStore.getState();
         if (fresh) markFreshRun();
-        await initTheme();
         await st.initConfig();
+        await initTheme();
         if (st.tabs.length === 0) {
           outcome = await recoverOrInitializeSession({
             fresh,
@@ -619,10 +618,13 @@ function DesktopApp() {
                 : (useStore.getState().sessionRestoreResult ?? "read-failed");
             },
             initialize: () => {
-              // This is the one explicit transition from “preserve the
-              // unusable file” to “replace it with a new session”.
-              useStore.setState({ sessionRestoreResult: "missing" });
               st.addTab({ type: "terminal" });
+            },
+            replace: async () => {
+              // This is the one explicit transition from “preserve the
+              // unusable record” to “replace it with a new session”.
+              await deleteStateNow(SESSION_SCOPE);
+              useStore.setState({ sessionRestoreResult: "missing" });
             },
             ask: async (reason) =>
               (await confirmChoose(STR.dialogs.sessionRecovery.problem({ reason }), [
@@ -782,7 +784,7 @@ function DesktopApp() {
 
   // The helper is the sole truth for sessions that outlive a tab or this
   // process. Refresh once on startup, then only on helper lifecycle events —
-  // no timer polls and no session.json copy to reconcile.
+  // no timer polls and no duplicate session copy to reconcile.
   useEffect(() => {
     if (!isTauri) return;
     let unlisten: (() => void) | null = null;
@@ -872,7 +874,6 @@ function DesktopApp() {
       }}
     >
       <ConfirmHost />
-      <PassphraseHost />
       <SaveTemplateDialog />
       {passwordsOpen && (
         <PasswordPanel onClose={() => setPasswordsOpen(false)} />

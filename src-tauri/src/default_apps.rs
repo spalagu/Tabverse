@@ -27,10 +27,10 @@
 //!
 //! **Whoever held it before must be recoverable.** Turning a switch off has to
 //! put the previous handler back, so the first time a switch goes on, every
-//! target's current owner is written to a backup file. It is written once and
+//! target's current owner is written to app.db. It is written once and
 //! never overwritten while the switch stays on -- a second write would record
 //! Tabverse as the previous owner and the way back would be gone for good.
-//! Losing that file is the one failure in this module that nothing reports:
+//! Losing that record is the one failure in this module that nothing reports:
 //! the user finds out weeks later, when a double-click still opens Tabverse
 //! and turning the switch off does nothing.
 //!
@@ -41,7 +41,6 @@
 //! declined in the system's own prompt -- and none of them return an error.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -200,42 +199,35 @@ struct Backup {
     kinds: BTreeMap<String, BTreeMap<String, Option<String>>>,
 }
 
-/// Guards the backup file against two switches being flipped at once.
+/// Guards the backup record against two switches being flipped at once.
 static BACKUP_LOCK: Mutex<()> = Mutex::new(());
+const BACKUP_SCOPE: &str = "default-apps-backup";
 
-fn backup_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+fn backup_store<R: Runtime>(app: &AppHandle<R>) -> Result<tabverse_state::AppStateStore, String> {
     let dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("no app data dir: {e}"))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    Ok(dir.join("default-apps-backup.json"))
+    tabverse_state::AppStateStore::open(&dir).map_err(|e| format!("app.db: {e:#}"))
 }
 
-fn read_backup<R: Runtime>(app: &AppHandle<R>) -> Backup {
-    let Ok(path) = backup_path(app) else {
-        return Backup::default();
-    };
-    // A missing or unreadable backup is not an error to report here: the
-    // caller's next step decides what it means. Turning a switch ON treats it
-    // as "nothing recorded yet, record now"; turning one OFF treats it as
-    // "nothing to restore", which is the unrecoverable case the module doc
-    // warns about.
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+fn read_backup<R: Runtime>(app: &AppHandle<R>) -> Result<Backup, String> {
+    let store = backup_store(app)?;
+    match store
+        .load_scope(BACKUP_SCOPE)
+        .map_err(|e| format!("read default-app backup from app.db: {e:#}"))?
+    {
+        Some(json) => serde_json::from_str(&json)
+            .map_err(|e| format!("default-app backup in app.db is invalid: {e}")),
+        None => Ok(Backup::default()),
+    }
 }
 
 fn write_backup<R: Runtime>(app: &AppHandle<R>, b: &Backup) -> Result<(), String> {
-    let path = backup_path(app)?;
-    let json = serde_json::to_string_pretty(b).map_err(|e| e.to_string())?;
-    // Temp file plus rename, the same way saved sessions are written: a crash
-    // midway through must not leave a truncated file, because a truncated
-    // backup is indistinguishable from no backup and costs the way home.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
+    let json = serde_json::to_string(b).map_err(|e| e.to_string())?;
+    backup_store(app)?
+        .save_scope(BACKUP_SCOPE, &json)
+        .map_err(|e| format!("write default-app backup to app.db: {e:#}"))
 }
 
 /// Every target a switch owns, derived from what the bundle actually declares.
@@ -386,7 +378,7 @@ pub fn set<R: Runtime>(app: &AppHandle<R>, kind: Kind, enabled: bool) -> Result<
         // if this switch has no record yet. Re-recording would capture
         // Tabverse as the previous owner of anything already taken.
         let me = imp::self_id();
-        let mut backup = read_backup(app);
+        let mut backup = read_backup(app)?;
         if !backup.kinds.contains_key(kind.as_str()) {
             let mut owners = BTreeMap::new();
             for t in &targets {
@@ -408,7 +400,7 @@ pub fn set<R: Runtime>(app: &AppHandle<R>, kind: Kind, enabled: bool) -> Result<
             }
         }
     } else {
-        let backup = read_backup(app);
+        let backup = read_backup(app)?;
         let owners = backup.kinds.get(kind.as_str()).cloned().unwrap_or_default();
         // Counts only the ones that had a real owner and did not get it back.
         // Failing to release something nobody owned is a different thing --

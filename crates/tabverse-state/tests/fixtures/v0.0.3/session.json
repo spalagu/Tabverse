@@ -1,1 +1,0 @@
-{"version":2,"zones":3,"tabs":[{"id":"v003-browser","kind":"browser","title":"Browser","groupId":null,"url":"https://intranet.example.test","residentPolicy":"on"},{"id":"v003-terminal","kind":"terminal","title":"Terminal","groupId":null,"cwd":"/tmp","pluginState":{"version":1,"state":{"profile":"default"}}}],"groups":[],"activeTabId":"v003-browser"}

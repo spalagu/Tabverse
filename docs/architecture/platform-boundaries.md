@@ -1,34 +1,34 @@
-# V3 平台边界
+# V3 Platform Boundaries
 
-## Core 与适配器
+## Core and adapters
 
-跨平台语义位于 `packages/runtime-contracts`、`packages/workbench` 和 `crates/tabverse-*`。Tauri、WebView、Keychain/Credential Manager/Secret Service、Launch Services、Windows Registry 和 Linux desktop integration 只位于外层适配器。
+Cross-platform semantics live in `packages/runtime-contracts`, `packages/workbench`, and `crates/tabverse-*`. Tauri, WebView, Keychain/Credential Manager/Secret Service, Launch Services, Windows Registry, and Linux desktop integration exist only in outer adapters.
 
-`tools/check-workbench-boundary.mjs` 禁止 Core Rust crate 依赖 Tauri，并检查 Workbench、contracts、Desktop runtime 和 Join 的反向依赖。
+`tools/check-workbench-boundary.mjs` prevents core Rust crates from depending on Tauri and checks reverse dependencies across Workbench, contracts, the Desktop runtime, and Join.
 
 ## Browser
 
-- Desktop 使用官方 Tauri + Wry。
-- macOS 使用 WKWebView；Windows 使用 WebView2；Linux 使用 WebKitGTK。
-- 不包含 CEF、custom Tauri fork 或双 Runtime。
+- Desktop uses upstream Tauri and Wry.
+- macOS uses WKWebView, Windows uses WebView2, and Linux uses WebKitGTK.
+- The product contains no CEF, custom Tauri fork, or dual runtime.
 - Browser is local-only. Join does not render Browser content or proxy Browser traffic through the Host.
 
-## 凭据
+## Credentials
 
-凭据记录加密后保存到 `app.db`。机器 master-key bundle 由 macOS Keychain、Windows Credential Manager 或 Linux Secret Service 保护。凭据不写入明文配置或迁移包。
+Credential records are encrypted in `app.db`. macOS Keychain, Windows Credential Manager, or Linux Secret Service protects the machine master-key bundle. Credentials are never written to plaintext configuration or migration packages.
 
 ## Runtime IPC
 
-Unix 使用本地 socket，Windows 使用 Named Pipe；不得改成 localhost TCP 服务。Host health、lease 和 generation 语义保持跨平台，平台代码只负责 transport 与系统集成。
+Unix uses a local socket and Windows uses a Named Pipe; this must not become a localhost TCP service. Host health, lease, and generation semantics remain cross-platform. Platform code owns only transport and system integration.
 
-## 系统集成
+## System integration
 
-- macOS：Launch Services。
-- Windows：当前用户 ProgId/capabilities 与系统默认应用界面。
-- Linux：XDG desktop/mime 工具。
+- macOS: Launch Services.
+- Windows: per-user ProgId/capabilities and the system default-applications UI.
+- Linux: XDG desktop and MIME tools.
 
-OS-specific 实现必须留在 `src-tauri` adapter 或明确的 target module；产品规则、路由、状态 schema 和 Remote 权限不得按 OS 分叉。
+OS-specific implementations must remain in `src-tauri` adapters or explicit target modules. Product rules, routing, state schemas, and Remote permissions must not fork by operating system.
 
-## 验收边界
+## Acceptance boundary
 
-本地开发必须通过 TypeScript、Vitest、Rust fmt/clippy/test、架构检查和当前平台进程级测试。Windows/Linux 的真实 WebView、凭据库、默认应用和 Runtime Host health 只能由对应 runner 或设备证明，不能用 macOS 单测替代。
+Local development must pass TypeScript, Vitest, Rust fmt/clippy/test, architecture checks, and current-platform process tests. Only the corresponding runner or device can prove real Windows/Linux WebView, credential-store, default-application, and Runtime Host health behavior; macOS unit tests cannot replace that evidence.

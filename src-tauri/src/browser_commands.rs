@@ -1167,8 +1167,8 @@ pub(crate) async fn browser_create(
     } else {
         builder
     };
-    let cover_on = config::load()
-        .map(|loaded| loaded.config.network.cover_page_traffic)
+    let cover_on = config::registered_config(&app.state::<AppDatabase>().0)
+        .map(|values| values.network.cover_page_traffic)
         .unwrap_or(false);
     let proxy = ensure_page_proxy(&app, &state, cover_on, is_coverable_platform());
     if proxy.is_none() {

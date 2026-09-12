@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// make a prompt save another tab's password.
 type PendingKey = (String, String, String);
 static PENDING: Mutex<Option<HashMap<PendingKey, String>>> = Mutex::new(None);
+static NEVER_WRITE: Mutex<()> = Mutex::new(());
 
 fn pending_insert(tab_id: String, host: String, username: String, password: String) {
     let mut p = PENDING.lock().unwrap();
@@ -26,23 +27,31 @@ fn pending_take(tab_id: &str, host: &str, username: &str) -> Option<String> {
 
 const NEVER_SCOPE: &str = "password-never";
 
-fn never_list(app: &AppHandle) -> Vec<String> {
-    crate::app_state_store(app)
-        .ok()
-        .and_then(|store| store.load_scope(NEVER_SCOPE).ok().flatten())
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_default()
+fn never_list(app: &AppHandle) -> Result<Vec<String>, String> {
+    let Some(json) = crate::app_state_store(app)?
+        .load_scope(NEVER_SCOPE)
+        .map_err(|e| format!("read password exclusions from app.db: {e:#}"))?
+    else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(&json)
+        .map_err(|e| format!("password exclusions in app.db are invalid: {e}"))
 }
 
-fn never_add(app: &AppHandle, host: &str) {
-    let mut list = never_list(app);
+fn never_add(app: &AppHandle, host: &str) -> Result<(), String> {
+    let _write = NEVER_WRITE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut list = never_list(app)?;
     if list.iter().any(|h| h == host) {
-        return;
+        return Ok(());
     }
     list.push(host.to_string());
-    if let (Ok(store), Ok(json)) = (crate::app_state_store(app), serde_json::to_string(&list)) {
-        let _ = store.save_scope(NEVER_SCOPE, &json);
-    }
+    let json =
+        serde_json::to_string(&list).map_err(|e| format!("serialize password exclusions: {e}"))?;
+    crate::app_state_store(app)?
+        .save_scope(NEVER_SCOPE, &json)
+        .map_err(|e| format!("save password exclusions to app.db: {e:#}"))
 }
 
 #[derive(serde::Deserialize)]
@@ -64,8 +73,13 @@ pub fn handle_capture(app: &AppHandle, tab_id: &str, data_b64: &str) {
     if cap.host.is_empty() || cap.password.is_empty() {
         return;
     }
-    if never_list(app).iter().any(|h| h == &cap.host) {
-        return;
+    match never_list(app) {
+        Ok(list) if list.iter().any(|h| h == &cap.host) => return,
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("[passwords] {error}");
+            return;
+        }
     }
     // Already saved with this exact value: nothing to offer. A different
     // value for the same user is an update worth asking about.
@@ -223,7 +237,7 @@ pub fn pw_offer_dismiss(
 ) -> Result<(), String> {
     let _ = pending_take(&tab_id, &host, &username);
     if never {
-        never_add(&app, &host);
+        never_add(&app, &host)?;
         eprintln!("[passwords] never offering for {host}");
     }
     Ok(())

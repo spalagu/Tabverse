@@ -1,9 +1,9 @@
 import { clearHistory } from "../history";
-import { deleteState, flushAll, listScopes } from "../persist";
+import { deleteStateNow, listScopes } from "../persist";
 import {
-  CONFIG_KEYS,
   clearKeyOverrides,
-  configReset,
+  factoryResetSettings,
+  pauseConfigWrites,
 } from "../state/config";
 import { forgetSessionScopes, useStore } from "../state/store";
 import { STR } from "../strings";
@@ -55,7 +55,7 @@ export function dangerActions(note: DangerNote): DangerAction[] {
       label: S.session,
       confirmLabel: S.sessionConfirm,
       question: S.question({ erases: S.sessionErases }),
-      perform: forgetSession,
+      perform: () => forgetSession(note),
     },
     {
       id: "history",
@@ -102,40 +102,34 @@ export async function runDangerAction(
 }
 
 /**
- * Forget the saved session: every scope except the theme snapshot.
+ * Forget the saved session and per-tab module scopes.
  *
- * Every scope, not just the tab list: the point of a reset is that the next
+ * Every session-owned scope, not just the tab list: the point of a reset is that the next
  * launch starts clean, and per-tab workspace state (open files, drafts,
  * terminal history) outlives the tab list otherwise.
  *
  * What this no longer erases is the user's settings. Six of them used to ride
  * in the session scope and went with it — pressing this button once reset the
  * theme, the sidebar, the search engine and the archive threshold, none of
- * which is a saved session. They live in the configuration file now, which
- * this does not touch, and `forgetSessionScopes` keeps the one remaining
- * setting-derived file (theme.json, the cold-start snapshot) out of the
- * sweep.
+ * which is a saved session. They live in `app.db.settings`, which this sweep
+ * does not touch.
  */
-async function forgetSession(): Promise<void> {
+async function forgetSession(note: DangerNote): Promise<void> {
   try {
     for (const scope of forgetSessionScopes(await listScopes())) {
-      deleteState(scope);
+      await deleteStateNow(scope);
     }
-    // Deletes are debounced like saves; without the flush a reset followed
-    // by a quick quit would leave the state files in place.
-    await flushAll();
-  } catch {
-    // A reset that cannot reach storage has nothing to undo.
+  } catch (e) {
+    note(describeError(e, STR.errors.actions.forgetSession));
   }
 }
 
 async function restoreFactorySettings(note: DangerNote): Promise<void> {
+  const resumeWrites = await pauseConfigWrites();
   try {
     await clearKeyOverrides();
-    await configReset(CONFIG_KEYS.theme);
-    for (const scope of await listScopes()) deleteState(scope);
-    await flushAll();
-    // Re-read the file, which is what puts the theme back on screen and
+    await factoryResetSettings();
+    // Re-read app.db, which is what puts the theme back on screen and
     // republishes the emptied overlay to every consumer of a key. The same
     // call the app makes at startup, so there is no second path that could
     // come to disagree with it.
@@ -143,5 +137,7 @@ async function restoreFactorySettings(note: DangerNote): Promise<void> {
     note(STR.settings.danger.factoryDone);
   } catch (e) {
     note(describeError(e, STR.errors.actions.restoreDefaults));
+  } finally {
+    resumeWrites();
   }
 }

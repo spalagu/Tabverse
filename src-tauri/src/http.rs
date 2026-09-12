@@ -91,13 +91,7 @@ impl DnsPolicy {
     }
 }
 
-/// The policy in force, composed from the configuration file on first ask.
-///
-/// Cached rather than read per client, because two of the four call sites
-/// build their client once for the process's life and the other two build one
-/// per request — a file read per request is not a thing to do. [`forget`] is
-/// what a write to `[network]` calls, so the next client built picks the new
-/// policy up.
+/// The policy installed from app.db by application setup and settings writes.
 fn live() -> &'static Mutex<Option<DnsPolicy>> {
     static LIVE: OnceLock<Mutex<Option<DnsPolicy>>> = OnceLock::new();
     LIVE.get_or_init(|| Mutex::new(None))
@@ -109,34 +103,18 @@ pub fn policy() -> DnsPolicy {
     if let Some(p) = slot.as_ref() {
         return p.clone();
     }
-    let composed = match crate::config::load() {
-        Ok(loaded) => DnsPolicy::from_settings(
-            loaded.config.network.dns_mode,
-            &loaded.config.network.dns_custom_url,
-        ),
-        Err(e) => {
-            eprintln!(
-                "[dns] the configuration file did not load, resolving through the system: {e}"
-            );
-            DnsPolicy::System
-        }
-    };
+    let composed = DnsPolicy::System;
     *slot = Some(composed.clone());
     composed
 }
 
-/// Drop the cached policy, so the next client built reads the file again.
-///
-/// Called after a write to a `[network]` key. Clients already built keep the
-/// resolver they were built with — the two singletons therefore keep theirs
-/// until the next launch, which the settings page states rather than hides.
+/// Clear the policy between tests. Product code always installs one from app.db.
+#[cfg(test)]
 pub fn forget() {
     *live().lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-/// Put a policy in force directly, without a file. Tests only: everything the
-/// product does goes through [`policy`], which reads the registry.
-#[cfg(test)]
+/// Put the database-derived policy in force for future clients.
 pub(crate) fn set_policy(p: DnsPolicy) {
     *live().lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
 }
@@ -695,24 +673,21 @@ mod tests {
         let stub = doh_stub();
         let page = page_server("through the stub", Duration::ZERO);
 
-        // Through the file, not through a constructor: the TOML is parsed by
-        // the loader, validated by the registry's own rules, and composed
-        // into a policy by the same function the running program uses.
+        // Through app.db, not through a constructor: the values are validated
+        // by the registry and composed by the same function the app uses.
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            format!(
-                "[network]\ndns_mode = \"custom\"\ndns_custom_url = \"{}\"\n",
-                stub.url
-            ),
+        let store = tabverse_state::AppStateStore::open(dir.path()).unwrap();
+        crate::config::set_with_store(&store, "network.dns_mode", &serde_json::json!("custom"))
+            .unwrap();
+        crate::config::set_with_store(
+            &store,
+            "network.dns_custom_url",
+            &serde_json::json!(stub.url),
         )
-        .expect("write the configuration");
-        let loaded = crate::config::load_from_paths(&[path]).expect("the file loads");
-        let policy = DnsPolicy::from_settings(
-            loaded.config.network.dns_mode,
-            &loaded.config.network.dns_custom_url,
-        );
+        .unwrap();
+        let loaded = crate::config::registered_config(&store).unwrap();
+        let policy =
+            DnsPolicy::from_settings(loaded.network.dns_mode, &loaded.network.dns_custom_url);
         assert_eq!(policy, DnsPolicy::Doh(stub.url.clone()));
 
         let client = build_with(Spec::default(), policy).expect("a client");
@@ -776,7 +751,7 @@ mod tests {
         set_policy(DnsPolicy::Doh(stub.url.clone()));
         let client = build(Spec::default()).expect("a client");
         let outcome = fetch(&client, format!("http://{PROBE_HOST}:{page}/"));
-        // Put back, so a later test in this process composes from the file.
+        // Clear the test policy so the next test starts from System.
         forget();
 
         assert_eq!(

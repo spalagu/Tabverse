@@ -496,7 +496,7 @@ mod tests {
         let path = write(
             dir.path(),
             "config.toml",
-            "[appearance]\ntheme = \"dark\"\n",
+            "[files]\nrespect_gitignore = true\n",
         );
         let loaded = config::load_from_paths(&[path]).expect("loads");
         assert!(loaded.config.terminal.profiles.is_empty());

@@ -1,24 +1,24 @@
-# ADR-0010：Runtime 身份与进程身份分离
+# ADR-0010: Separate Runtime Identity from Process Identity
 
-## 状态
-已接受。
+## Status
+Accepted.
 
-## 需求与上下文
-PID 会复用，GUI 会重连，旧客户端不能在新 Host 上继续写入。
+## Context and requirements
+PIDs are reused, the GUI reconnects, and stale clients must not continue writing to a new Host.
 
-## 决策
-`runtime.db` 保存稳定 runtime id、Host instance、generation、lease 和状态。变更请求必须匹配当前 generation；stale Host 记录为 interrupted，不伪造恢复。
+## Decision
+Store the stable runtime ID, Host instance, generation, lease, and state in `runtime.db`. Mutation requests must match the current generation. Record a stale Host as interrupted instead of fabricating recovery.
 
-## 备选与拒绝原因
-- PID 作为身份：重启和 PID 复用会误关联。
-- 无 generation 的重连：旧客户端可覆盖新会话。
-- 自动 replay：可能重复有副作用的操作。
+## Alternatives rejected
+- PID as identity: restarts and PID reuse create false associations.
+- Reconnection without a generation: stale clients can overwrite new sessions.
+- Automatic replay: may repeat operations with side effects.
 
-## 跨平台影响
-身份和 lease 规则完全共享；进程探测是平台 adapter。
+## Cross-platform impact
+Identity and lease rules are fully shared; process detection is a platform adapter.
 
-## Remote 带宽影响
-只传必要 session 事件，不传 runtime 数据库。
+## Remote bandwidth impact
+Transmit only required session events, never the runtime database.
 
-## 迁移影响与可逆性
-旧 Resident identity 不复用。interrupted 记录可清理，但不能改写为 recovered。
+## Migration impact and reversibility
+Do not reuse legacy Resident identities. Interrupted records can be cleared but cannot be rewritten as recovered.

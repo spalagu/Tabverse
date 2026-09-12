@@ -1,4 +1,4 @@
-import { deleteState, loadState, saveState } from "../../persist";
+import { deleteState, loadState, markStateInvalid, saveState } from "../../persist";
 import { isFreshRun } from "../../state/store";
 
 
@@ -25,11 +25,15 @@ export function mergeRecentPath(
 }
 
 /** Whatever survived a round trip through storage, shaped and believable. */
-function sanitize(stored: StoredRecentPaths | null): string[] {
-  if (!stored || !Array.isArray(stored.paths)) return [];
-  return stored.paths
-    .filter((p): p is string => typeof p === "string" && p.trim() !== "")
-    .slice(0, RECENT_PATHS_MAX);
+function sanitize(stored: StoredRecentPaths | null): string[] | null {
+  if (stored === null) return [];
+  if (
+    stored.version !== 1 ||
+    !Array.isArray(stored.paths) ||
+    stored.paths.length > RECENT_PATHS_MAX ||
+    stored.paths.some((path) => typeof path !== "string" || path.trim() === "")
+  ) return null;
+  return stored.paths;
 }
 
 let cache: string[] | null = null;
@@ -44,7 +48,12 @@ export async function recentPaths(): Promise<string[]> {
   const mine = gen;
   const loaded = await loadState<StoredRecentPaths>(RECENT_PATHS_SCOPE);
   if (gen !== mine) return cache ?? [];
-  cache ??= sanitize(loaded);
+  const decoded = sanitize(loaded);
+  if (decoded === null) {
+    markStateInvalid(RECENT_PATHS_SCOPE, "invalid current recent-paths record");
+    throw new Error("invalid current recent-paths record");
+  }
+  cache ??= decoded;
   return cache.slice();
 }
 

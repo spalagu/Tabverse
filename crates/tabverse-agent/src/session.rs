@@ -138,10 +138,24 @@ impl<'a> Session<'a> {
         log: &mut crate::log::SessionLog,
         from: usize,
     ) -> Result<usize> {
-        for message in self.messages.iter().skip(from) {
+        let mut cursor = from;
+        self.append_new_messages_tracked(log, &mut cursor)?;
+        Ok(cursor)
+    }
+
+    /// Append while advancing the caller's cursor after every committed
+    /// record, so retrying after a partial I/O failure cannot duplicate the
+    /// prefix that already reached disk.
+    pub fn append_new_messages_tracked(
+        &self,
+        log: &mut crate::log::SessionLog,
+        cursor: &mut usize,
+    ) -> Result<()> {
+        while let Some(message) = self.messages.get(*cursor) {
             log.append_message(message)?;
+            *cursor += 1;
         }
-        Ok(self.messages.len())
+        Ok(())
     }
 
     fn tool_specs(&self) -> Vec<ToolSpec> {
@@ -981,7 +995,6 @@ mod tests {
 
         // The app restarts: nothing survives but the file.
         let replay = SessionLog::replay(&log_path).unwrap();
-        assert_eq!(replay.skipped, 0);
         assert!(
             replay.events.iter().any(
                 |e| matches!(e, SessionEvent::UserPrompt { text } if text.contains("hello.txt"))
@@ -1590,7 +1603,8 @@ mod tests {
         use crate::memory::MemoryStore;
 
         let (dir, env) = workspace();
-        let store = std::sync::Arc::new(MemoryStore::open(dir.path().join("memory.jsonl")));
+        let store =
+            std::sync::Arc::new(MemoryStore::open(dir.path().join("memory.jsonl")).unwrap());
         const FACT: &str = "this project builds with `cargo xtask dist`";
 
         // Session one: the model decides to remember something.
@@ -1613,7 +1627,8 @@ mod tests {
         assert_eq!(store.entries().len(), 1, "the tool must have written it");
 
         // A new store over the same file, as a fresh process would open it.
-        let reopened = std::sync::Arc::new(MemoryStore::open(dir.path().join("memory.jsonl")));
+        let reopened =
+            std::sync::Arc::new(MemoryStore::open(dir.path().join("memory.jsonl")).unwrap());
         let reader = AnswersFromMemory {
             looks_for: FACT.to_string(),
         };
@@ -1650,7 +1665,7 @@ mod tests {
         use crate::memory::MemoryStore;
 
         let (dir, env) = workspace();
-        let store = std::sync::Arc::new(MemoryStore::open(dir.path().join("empty.jsonl")));
+        let store = std::sync::Arc::new(MemoryStore::open(dir.path().join("empty.jsonl")).unwrap());
         let reader = AnswersFromMemory {
             looks_for: "this project builds with `cargo xtask dist`".to_string(),
         };
@@ -1684,7 +1699,7 @@ mod tests {
         use crate::memory::MemoryStore;
 
         let (dir, env) = workspace();
-        let store = MemoryStore::open(dir.path().join("memory.jsonl"));
+        let store = MemoryStore::open(dir.path().join("memory.jsonl")).unwrap();
         store.add("remember this").unwrap();
 
         let provider = ScriptedProvider::new(vec![turn_saying("ok")]);

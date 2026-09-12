@@ -328,12 +328,14 @@ pub fn answer(
                 }
                 Pending::Media { handler, origin } => {
                     if remember_choice {
-                        crate::page_prompts::remember(
+                        if let Err(error) = crate::page_prompts::remember(
                             &app,
                             &origin,
                             kind.as_deref().unwrap_or("camera"),
                             ok,
-                        );
+                        ) {
+                            eprintln!("[prompts] {error}");
+                        }
                     }
                     handler.call((if ok { DECISION_GRANT } else { DECISION_DENY },));
                 }

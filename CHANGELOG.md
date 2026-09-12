@@ -1,4 +1,4 @@
-# Tabverse 变更记录
+# Tabverse Changelog
 
 ## 0.1.1
 
@@ -10,17 +10,17 @@
 
 ## 0.1.0 — V3
 
-### 工作区与持久化
+### Workspace and persistence
 
-- 以 Workspace 和 Tab 为统一工作上下文。
-- 使用 `app.db` 持久化 Workspace、Tab、设置和内容偏好，并对历史状态执行事务性、可重试迁移。
-- 长任务由按需 Runtime Supervisor 管理；Terminal 和 Agent 任务可跨 GUI 重启继续运行。
+- Use workspaces and tabs as the unified work context.
+- Persist workspaces, tabs, settings, and content preferences in `app.db`, with transactional and retryable migrations for historical state.
+- Manage long-running work with the on-demand Runtime Supervisor so Terminal and Agent tasks can continue across GUI restarts.
 
-### One-App 内容能力
+### One-App content capabilities
 
-- 内置 Terminal、Agent、Files、Browser 和 Settings Feature Modules，不引入 Plugin Kernel。
-- 统一 OpenIntent、ContentRegistry 和文件关联目录。
-- 常见技术文件可在 Tabverse 内预览；自然适合编辑的文本内容支持编辑与保存。
+- Provide built-in Terminal, Agent, Files, Browser, and Settings feature modules without a Plugin Kernel.
+- Unify OpenIntent, ContentRegistry, and the file association catalog.
+- Preview common technical files in Tabverse and edit and save text content suited to direct editing.
 
 ### Remote
 
@@ -29,15 +29,15 @@
 - File streams require an authenticated connection and a current App-share viewer.
 - Browser is local-only. Join displays Browser rows as unavailable and carries no Browser pixels, state, or network traffic.
 
-### 架构清理
+### Architecture cleanup
 
-- 不包含 CEF、自定义 Tauri fork、Resident Runtime、Plugin Kernel 或旧 ProxyReq/ProxyRes。
+- Do not include CEF, a custom Tauri fork, a Resident Runtime, a Plugin Kernel, or legacy ProxyReq/ProxyRes.
 - Remote Browser document rewriting, HostNetworkGateway, and HTTP data streams are removed.
-- macOS、Windows 和 Linux 产品语义保持一致，平台机制留在窄 adapter。
+- Keep product semantics consistent across macOS, Windows, and Linux while containing platform mechanisms in narrow adapters.
 
-### 分发
+### Distribution
 
-- 版本升级到 `0.1.0`。
-- Release Candidate 可以手动构建，不创建 tag 或 GitHub Release。
-- macOS 提供 Apple Silicon 和 Intel DMG，使用 ad-hoc 签名，不使用 Apple Developer ID，也不提交 notarization。
-- 所有平台均不依赖付费代码签名服务；发布产物提供 SHA-256 和构建来源信息。
+- Bump the version to `0.1.0`.
+- Allow manual release-candidate builds without creating a tag or GitHub Release.
+- Provide Apple Silicon and Intel macOS DMGs with ad-hoc signatures, without an Apple Developer ID or notarization.
+- Avoid paid code-signing services on every platform and include SHA-256 checksums and build provenance with release artifacts.

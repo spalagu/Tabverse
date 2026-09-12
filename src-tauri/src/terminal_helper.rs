@@ -30,8 +30,7 @@ struct EndpointRecord {
     version: u8,
     pid: u32,
     name: String,
-    #[serde(default)]
-    agent_name: Option<String>,
+    agent_name: String,
 }
 
 pub struct TerminalHelper {
@@ -61,10 +60,12 @@ impl TerminalHelper {
                 return Ok(Arc::clone(client));
             }
         }
-        let state = crate::state_dir(app)?;
+        let runtime_store = crate::state_commands::runtime_store_dir(app)?;
+        let endpoint = crate::state_commands::runtime_endpoint_dir(app)?;
+        let content = crate::state_commands::content_dir(app)?;
         let token_bytes = Zeroizing::new(crate::credentials::helper_token()?);
         let token = AuthToken::new(*token_bytes);
-        if let Ok(client) = connect_record(&state, token, Arc::clone(&on_event)) {
+        if let Ok(client) = connect_record(&endpoint, token, Arc::clone(&on_event)) {
             let client = Arc::new(client);
             *self.client.lock().unwrap() = Some(Arc::clone(&client));
             return Ok(client);
@@ -73,7 +74,9 @@ impl TerminalHelper {
         let executable = std::env::current_exe().map_err(|e| format!("helper executable: {e}"))?;
         let mut child = Command::new(executable)
             .arg("--helper")
-            .arg(&state)
+            .arg(&runtime_store)
+            .arg(&endpoint)
+            .arg(&content)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -98,7 +101,7 @@ impl TerminalHelper {
         let deadline = Instant::now() + CONNECT_DEADLINE;
         let mut last_error = "helper endpoint did not appear".to_string();
         while Instant::now() < deadline {
-            match connect_record(&state, token, Arc::clone(&on_event)) {
+            match connect_record(&endpoint, token, Arc::clone(&on_event)) {
                 Ok(client) => {
                     let client = Arc::new(client);
                     *self.client.lock().unwrap() = Some(Arc::clone(&client));
@@ -124,15 +127,13 @@ impl TerminalHelper {
 
     /// Agent endpoint published by the same windowless Supervisor process.
     pub fn agent_endpoint(&self, app: &AppHandle) -> Result<String, String> {
-        let state = crate::state_dir(app)?;
+        let state = crate::state_commands::runtime_endpoint_dir(app)?;
         let record: EndpointRecord = serde_json::from_slice(
             &fs::read(state.join(ENDPOINT_FILE))
                 .map_err(|e| format!("read runtime endpoint: {e}"))?,
         )
         .map_err(|e| format!("parse runtime endpoint: {e}"))?;
-        record
-            .agent_name
-            .ok_or_else(|| "runtime endpoint predates Agent IPC; restart Tabverse".to_string())
+        Ok(record.agent_name)
     }
 }
 
@@ -170,41 +171,64 @@ fn read_helper_token(mut input: impl Read) -> io::Result<[u8; 32]> {
     Ok(token)
 }
 
-/// Answer `tabverse --helper <state-dir>` before Tauri or a webview exists.
+/// Answer `tabverse --helper <runtime-store-dir> <endpoint-dir> <content-dir>` before Tauri or a webview exists.
 pub fn from_args(mut args: impl Iterator<Item = String>) -> Option<i32> {
     if args.next().as_deref() != Some("--helper") {
         return None;
     }
-    let Some(state) = args.next() else {
+    let Some(runtime_store) = args.next() else {
         return Some(2);
     };
-    let state = PathBuf::from(state);
+    let Some(endpoint) = args.next() else {
+        return Some(2);
+    };
+    let Some(content) = args.next() else {
+        return Some(2);
+    };
+    let runtime_store = PathBuf::from(runtime_store);
+    let endpoint = PathBuf::from(endpoint);
+    let content = PathBuf::from(content);
     let token_bytes = match read_helper_token(io::stdin().lock()) {
         Ok(token) => Zeroizing::new(token),
         Err(_) => return Some(3),
     };
     let token = AuthToken::new(*token_bytes);
-    crate::credentials::set_app_data_dir(state.parent().unwrap_or(&state).to_path_buf());
+    let Some(app_data_dir) = content.parent() else {
+        return Some(2);
+    };
+    crate::credentials::set_app_data_dir(app_data_dir.to_path_buf());
     crate::http::ensure_crypto_provider();
     let agent_token = tabverse_runtime::agent_ipc::AuthToken::new(*token_bytes);
-    Some(run_helper(&state, token, agent_token, DEFAULT_IDLE).unwrap_or(4))
+    Some(
+        run_helper(
+            &runtime_store,
+            &endpoint,
+            &content,
+            token,
+            agent_token,
+            DEFAULT_IDLE,
+        )
+        .unwrap_or(4),
+    )
 }
 
 fn run_helper(
-    state: &Path,
+    runtime_store_dir: &Path,
+    endpoint_dir: &Path,
+    content_dir: &Path,
     token: AuthToken,
     agent_token: tabverse_runtime::agent_ipc::AuthToken,
     idle: Duration,
 ) -> io::Result<i32> {
-    fs::create_dir_all(state)?;
+    fs::create_dir_all(endpoint_dir)?;
+    fs::create_dir_all(content_dir)?;
     let host_instance = format!("{}-{:016x}", std::process::id(), rand::random::<u64>());
-    let runtime_dir = state.parent().unwrap_or(state);
-    let store = tabverse_runtime::RuntimeStore::open(runtime_dir, &host_instance)
+    let store = tabverse_runtime::RuntimeStore::open(runtime_store_dir, &host_instance)
         .map_err(io::Error::other)?;
     let heartbeat_store = store.clone();
     let agent = crate::agent_supervisor::AgentSupervisor::start_persistent(
         agent_token,
-        Some(state.to_path_buf()),
+        Some(content_dir.to_path_buf()),
         store.clone(),
         host_instance.clone(),
     )?;
@@ -221,9 +245,9 @@ fn run_helper(
         version: tabverse_term::protocol::VERSION,
         pid: std::process::id(),
         name: server.endpoint().to_string(),
-        agent_name: Some(agent.endpoint().to_string()),
+        agent_name: agent.endpoint().to_string(),
     };
-    write_endpoint(state, &record)?;
+    write_endpoint(endpoint_dir, &record)?;
     let mut last_heartbeat = Instant::now();
     while server.is_alive() {
         thread::sleep(Duration::from_millis(25));
@@ -236,7 +260,7 @@ fn run_helper(
         }
     }
     heartbeat_store.release().map_err(io::Error::other)?;
-    remove_own_endpoint(state, record.pid);
+    remove_own_endpoint(endpoint_dir, record.pid);
     Ok(0)
 }
 
@@ -319,8 +343,17 @@ mod tests {
         let token = AuthToken::new([0x77; 32]);
         let agent_token = tabverse_runtime::agent_ipc::AuthToken::new([0x77; 32]);
         let helper_state = state.clone();
+        let runtime_store = dir.path().join("data");
+        let content = dir.path().join("content");
         let helper = thread::spawn(move || {
-            run_helper(&helper_state, token, agent_token, Duration::from_millis(80))
+            run_helper(
+                &runtime_store,
+                &helper_state,
+                &content,
+                token,
+                agent_token,
+                Duration::from_millis(80),
+            )
         });
         let endpoint = state.join(ENDPOINT_FILE);
         let deadline = Instant::now() + Duration::from_secs(2);

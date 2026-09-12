@@ -82,8 +82,7 @@ function snapshot(): ConfigSnapshot {
   return {
     values: FROM_THE_FILE,
     warnings: [],
-    // Non-empty on purpose: a file that exists is what stops the one-time
-    // migration of the old session settings from running through these tests.
+    // Non-empty because these tests model a real configuration file.
     sources: ["/home/u/.config/tabverse/config.toml"],
   };
 }

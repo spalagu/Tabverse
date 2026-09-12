@@ -265,7 +265,7 @@ fn dispatch(
             let events = event_callback(request.session_id.clone(), sender.clone());
             let handle = match state
                 .registry
-                .attach(&request.session_id, Arc::clone(&events))
+                .attach(&request.session_id, Arc::clone(&events))?
             {
                 Some(handle) => handle,
                 None => state.registry.start(

@@ -11,7 +11,6 @@ import {
   flushAll,
   listScopes,
   saveState,
-  SESSION_SCOPE,
   tabScope,
 } from "../persist";
 
@@ -316,29 +315,6 @@ describe("split orientation and ratios", () => {
     expect(st().split!.ids).toEqual([a, b, c]);
     expect(st().split!.vertical).toBe(true);
     expect(st().split!.ratios[0]).toBeCloseTo(0.5, 6);
-  });
-
- it("migrates a pre- two-pane splitPair from an old session", async () => {
-    const a = addBrowser("https://a.example/");
-    const b = addBrowser("https://b.example/");
-    st().activateTab(a);
-    const snap = sessionSnapshot(st()) as unknown as Record<string, unknown>;
-    delete snap.split;
-    snap.splitPair = { leftId: a, rightId: b, ratio: 0.3 };
-    await flushAll();
-    saveState(SESSION_SCOPE, snap);
-    await flushAll();
-    useStore.setState({
-      tabs: [],
-      groups: withPresetGroups([]),
-      activeTabId: null,
-      split: null,
-    });
-    expect(await st().restoreSession()).toBe(true);
-    expect(st().split!.ids).toEqual([a, b]);
-    expect(st().split!.vertical).toBe(false);
-    expect(st().split!.ratios[0]).toBeCloseTo(0.3, 6);
-    expect(st().split!.ratios[1]).toBeCloseTo(0.7, 6);
   });
 
   it("restore drops a split whose survivors fall below two", async () => {

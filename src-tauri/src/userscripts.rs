@@ -1,12 +1,12 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use base64::Engine as _;
 use tauri::{AppHandle, Emitter, Manager};
 
-const MAX_SCRIPT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SCRIPT_RECORD_BYTES: usize = tabverse_state::MAX_STATE_BYTES;
+const MAX_SCRIPT_TRANSFER_BYTES: usize = tabverse_state::MAX_STATE_BYTES;
 /// GM_xmlhttpRequest response cap. Binary is unsupported anyway (declared);
 /// text answers a translation script needs fit far under this.
 const MAX_XHR_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
@@ -14,7 +14,7 @@ const MAX_XHR_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 const XHR_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const XHR_MAX_TIMEOUT_MS: u64 = 120_000;
 
-const INDEX_SCOPE: &str = "userscripts";
+const SCRIPT_SCOPE_PREFIX: &str = "userscript:";
 const GRANTS_SCOPE: &str = "userscript-grants";
 
 // ---------------------------------------------------------------------------
@@ -333,7 +333,7 @@ pub fn values_scope(script_id: &str) -> String {
 // Registry: the installed scripts, in memory + persisted
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Script {
     id: String,
     enabled: bool,
@@ -342,97 +342,69 @@ struct Script {
     install_url: Option<String>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct StoredIndexEntry {
-    id: String,
-    enabled: bool,
-    #[serde(default)]
-    install_url: Option<String>,
-    #[serde(flatten)]
-    meta: ScriptMeta,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct StoredIndex {
-    version: u32,
-    scripts: Vec<StoredIndexEntry>,
-}
-
 fn registry() -> &'static Mutex<Option<Vec<Script>>> {
     static REG: OnceLock<Mutex<Option<Vec<Script>>>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(None))
 }
 
-fn bodies_dir(app: &AppHandle) -> Option<PathBuf> {
-    crate::state_dir(app).ok().map(|d| d.join("userscripts"))
+fn script_scope(id: &str) -> String {
+    format!("{SCRIPT_SCOPE_PREFIX}{id}")
 }
 
 /// Load-once, then serve from memory.
-fn ensure_loaded(app: &AppHandle) {
+fn ensure_loaded(app: &AppHandle) -> Result<(), String> {
     let mut reg = registry().lock().unwrap();
     if reg.is_some() {
-        return;
+        return Ok(());
     }
     let mut scripts = Vec::new();
-    let index = crate::app_state_store(app)
-        .ok()
-        .and_then(|store| store.load_scope(INDEX_SCOPE).ok().flatten())
-        .and_then(|json| serde_json::from_str::<StoredIndex>(&json).ok());
-    if let (Some(index), Some(dir)) = (index, bodies_dir(app)) {
-        for entry in index.scripts {
-            let path = dir.join(format!("{}.js", entry.id));
-            match std::fs::read_to_string(&path) {
-                Ok(body) => scripts.push(Script {
-                    id: entry.id,
-                    enabled: entry.enabled,
-                    meta: entry.meta,
-                    body,
-                    install_url: entry.install_url,
-                }),
-                Err(_) => {
-                    // An indexed script whose body is gone cannot run;
-                    // dropping the entry is honest, keeping it would show a
-                    // toggle that toggles nothing.
-                    eprintln!("[userscripts] body file missing for {}, dropped", entry.id);
-                }
-            }
+    let store = crate::app_state_store(app)?;
+    for scope in store
+        .list_scopes()
+        .map_err(|e| format!("list userscripts in app.db: {e:#}"))?
+        .into_iter()
+        .filter(|scope| scope.starts_with(SCRIPT_SCOPE_PREFIX))
+    {
+        let json = store
+            .load_scope(&scope)
+            .map_err(|e| format!("read {scope} from app.db: {e:#}"))?
+            .ok_or_else(|| format!("{scope} disappeared from app.db while loading"))?;
+        let script = serde_json::from_str::<Script>(&json)
+            .map_err(|e| format!("{scope} in app.db is invalid: {e}"))?;
+        if script_scope(&script.id) != scope {
+            return Err(format!("{scope} contains userscript id {}", script.id));
         }
+        scripts.push(script);
     }
+    scripts.sort_by(|a, b| (&a.meta.name, &a.id).cmp(&(&b.meta.name, &b.id)));
     *reg = Some(scripts);
+    Ok(())
 }
 
-fn persist_registry(app: &AppHandle) {
-    let entries: Vec<StoredIndexEntry> = registry()
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|v| {
-            v.iter()
-                .map(|s| StoredIndexEntry {
-                    id: s.id.clone(),
-                    enabled: s.enabled,
-                    install_url: s.install_url.clone(),
-                    meta: s.meta.clone(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let Ok(json) = serde_json::to_string(&StoredIndex {
-        version: 1,
-        scripts: entries,
-    }) else {
-        return;
-    };
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Ok(store) = crate::app_state_store(&app) {
-            let _ = store.save_scope(INDEX_SCOPE, &json);
-        }
-    });
+fn serialize_script(script: &Script) -> Result<String, String> {
+    let json = serde_json::to_string(script).map_err(|e| format!("serialize userscript: {e}"))?;
+    if json.len() > MAX_SCRIPT_RECORD_BYTES {
+        return Err(format!(
+            "userscript record is {:.1} MB, above the {} MB limit",
+            json.len() as f64 / (1024.0 * 1024.0),
+            MAX_SCRIPT_RECORD_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(json)
+}
+
+fn persist_script(app: &AppHandle, script: &Script) -> Result<(), String> {
+    let json = serialize_script(script)?;
+    crate::app_state_store(app)?
+        .save_scope(&script_scope(&script.id), &json)
+        .map_err(|e| format!("save userscript to app.db: {e:#}"))
 }
 
 pub fn any_enabled(app: &AppHandle) -> bool {
-    ensure_loaded(app);
+    if let Err(error) = ensure_loaded(app) {
+        eprintln!("[userscripts] {error}");
+        return false;
+    }
     registry()
         .lock()
         .unwrap()
@@ -450,36 +422,29 @@ fn values_cache() -> &'static Mutex<HashMap<String, serde_json::Map<String, serd
     VALUES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn values_of(app: &AppHandle, script_id: &str) -> serde_json::Map<String, serde_json::Value> {
+fn values_of(
+    app: &AppHandle,
+    script_id: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     if let Some(hit) = values_cache().lock().unwrap().get(script_id) {
-        return hit.clone();
+        return Ok(hit.clone());
     }
-    let loaded: serde_json::Map<String, serde_json::Value> = crate::app_state_store(app)
-        .ok()
-        .and_then(|store| store.load_scope(&values_scope(script_id)).ok().flatten())
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_default();
+    let store = crate::app_state_store(app)?;
+    let scope = values_scope(script_id);
+    let loaded = match store
+        .load_scope(&scope)
+        .map_err(|e| format!("read {scope} from app.db: {e:#}"))?
+    {
+        Some(json) => {
+            serde_json::from_str(&json).map_err(|e| format!("{scope} in app.db is invalid: {e}"))?
+        }
+        None => serde_json::Map::new(),
+    };
     values_cache()
         .lock()
         .unwrap()
         .insert(script_id.to_string(), loaded.clone());
-    loaded
-}
-
-fn persist_values(app: &AppHandle, script_id: &str) {
-    let Some(map) = values_cache().lock().unwrap().get(script_id).cloned() else {
-        return;
-    };
-    let Ok(json) = serde_json::to_string(&map) else {
-        return;
-    };
-    let scope = values_scope(script_id);
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Ok(store) = crate::app_state_store(&app) {
-            let _ = store.save_scope(&scope, &json);
-        }
-    });
+    Ok(loaded)
 }
 
 // ---------------------------------------------------------------------------
@@ -493,36 +458,37 @@ fn grants() -> &'static Mutex<GrantTable> {
     GRANTS.get_or_init(|| Mutex::new(None))
 }
 
-fn ensure_grants_loaded(app: &AppHandle) {
+fn ensure_grants_loaded(app: &AppHandle) -> Result<(), String> {
     let mut g = grants().lock().unwrap();
     if g.is_some() {
-        return;
+        return Ok(());
     }
-    let loaded = crate::app_state_store(app)
-        .ok()
-        .and_then(|store| store.load_scope(GRANTS_SCOPE).ok().flatten())
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_default();
+    let store = crate::app_state_store(app)?;
+    let loaded = match store
+        .load_scope(GRANTS_SCOPE)
+        .map_err(|e| format!("read userscript grants from app.db: {e:#}"))?
+    {
+        Some(json) => serde_json::from_str(&json)
+            .map_err(|e| format!("userscript grants in app.db are invalid: {e}"))?,
+        None => HashMap::new(),
+    };
     *g = Some(loaded);
+    Ok(())
 }
 
-fn persist_grants(app: &AppHandle) {
-    let Some(map) = grants().lock().unwrap().clone() else {
-        return;
-    };
-    let Ok(json) = serde_json::to_string(&map) else {
-        return;
-    };
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Ok(store) = crate::app_state_store(&app) {
-            let _ = store.save_scope(GRANTS_SCOPE, &json);
-        }
-    });
+fn persist_grants(app: &AppHandle, map: &HashMap<String, Vec<String>>) -> Result<(), String> {
+    let json =
+        serde_json::to_string(map).map_err(|e| format!("serialize userscript grants: {e}"))?;
+    crate::app_state_store(app)?
+        .save_scope(GRANTS_SCOPE, &json)
+        .map_err(|e| format!("save userscript grants to app.db: {e:#}"))
 }
 
 fn host_granted(app: &AppHandle, script_id: &str, host: &str) -> bool {
-    ensure_grants_loaded(app);
+    if let Err(error) = ensure_grants_loaded(app) {
+        eprintln!("[userscripts] {error}");
+        return false;
+    }
     grants()
         .lock()
         .unwrap()
@@ -530,17 +496,17 @@ fn host_granted(app: &AppHandle, script_id: &str, host: &str) -> bool {
         .is_some_and(|t| grant_decision(t, script_id, host))
 }
 
-fn record_grant(app: &AppHandle, script_id: &str, host: &str) {
-    ensure_grants_loaded(app);
-    {
-        let mut g = grants().lock().unwrap();
-        let table = g.get_or_insert_with(HashMap::new);
-        let hosts = table.entry(script_id.to_string()).or_default();
-        if !hosts.iter().any(|h| h == host) {
-            hosts.push(host.to_string());
-        }
+fn record_grant(app: &AppHandle, script_id: &str, host: &str) -> Result<(), String> {
+    ensure_grants_loaded(app)?;
+    let mut next = grants().lock().unwrap().clone().unwrap_or_default();
+    let hosts = next.entry(script_id.to_string()).or_default();
+    if hosts.iter().any(|value| value == host) {
+        return Ok(());
     }
-    persist_grants(app);
+    hosts.push(host.to_string());
+    persist_grants(app, &next)?;
+    *grants().lock().unwrap() = Some(next);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -630,7 +596,10 @@ pub fn handle_query(app: &AppHandle, tab_id: &str, url: &str) {
         "userscript-menu-reset",
         serde_json::json!({ "tabId": tab_id }),
     );
-    ensure_loaded(app);
+    if let Err(error) = ensure_loaded(app) {
+        eprintln!("[userscripts] {error}");
+        return;
+    }
     let matched: Vec<Script> = registry()
         .lock()
         .unwrap()
@@ -659,7 +628,13 @@ pub fn handle_query(app: &AppHandle, tab_id: &str, url: &str) {
             .lock()
             .unwrap()
             .insert((tab_id.to_string(), s.id.clone()), nonce.clone());
-        let values = values_of(app, &s.id);
+        let values = match values_of(app, &s.id) {
+            Ok(values) => values,
+            Err(error) => {
+                eprintln!("[userscripts] {error}");
+                continue;
+            }
+        };
         let wrapper = build_wrapper(s, &values, &nonce, url);
         let _ = wv.eval(&wrapper);
     }
@@ -861,7 +836,10 @@ pub fn handle_report(app: &AppHandle, tab_id: &str, cmd: &str, data_b64: &str) {
     }
     // The report must come from a script that exists and is enabled — a
     // forged id gets nothing, not even storage.
-    ensure_loaded(app);
+    if let Err(error) = ensure_loaded(app) {
+        eprintln!("[userscripts] {error}");
+        return;
+    }
     let known = registry()
         .lock()
         .unwrap()
@@ -898,26 +876,42 @@ fn handle_value_op(app: &AppHandle, script_id: &str, v: &serde_json::Value) {
     let Some(key) = v.get("key").and_then(|k| k.as_str()) else {
         return;
     };
-    {
-        // Make sure the map is loaded before mutating, or the first write
-        // of a run would shadow everything stored before it.
-        values_of(app, script_id);
-        let mut cache = values_cache().lock().unwrap();
-        let map = cache.entry(script_id.to_string()).or_default();
-        match op {
-            "set" => {
-                map.insert(
-                    key.to_string(),
-                    v.get("value").cloned().unwrap_or(serde_json::Value::Null),
-                );
-            }
-            "del" => {
-                map.remove(key);
-            }
-            _ => return,
+    let mut next = match values_of(app, script_id) {
+        Ok(values) => values,
+        Err(error) => {
+            eprintln!("[userscripts] {error}");
+            return;
         }
+    };
+    match op {
+        "set" => {
+            next.insert(
+                key.to_string(),
+                v.get("value").cloned().unwrap_or(serde_json::Value::Null),
+            );
+        }
+        "del" => {
+            next.remove(key);
+        }
+        _ => return,
     }
-    persist_values(app, script_id);
+    let scope = values_scope(script_id);
+    let result = serde_json::to_string(&next)
+        .map_err(|e| format!("serialize {scope}: {e}"))
+        .and_then(|json| {
+            crate::app_state_store(app)?
+                .save_scope(&scope, &json)
+                .map_err(|e| format!("write {scope} to app.db: {e:#}"))
+        });
+    match result {
+        Ok(()) => {
+            values_cache()
+                .lock()
+                .unwrap()
+                .insert(script_id.to_string(), next);
+        }
+        Err(error) => eprintln!("[userscripts] {error}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1099,7 +1093,7 @@ pub fn userscript_xhr_answer(app: AppHandle, ask_id: u64, decision: String) -> R
     };
     match decision.as_str() {
         "always" => {
-            record_grant(&app, &ask.script_id, &ask.host);
+            record_grant(&app, &ask.script_id, &ask.host)?;
             execute_xhr(&app, &ask.tab_id, &ask.script_id, ask.req, ask.host);
         }
         "once" => {
@@ -1358,15 +1352,15 @@ pub struct ScriptInfo {
     install_url: Option<String>,
 }
 
-fn info_of(app: &AppHandle, s: &Script) -> ScriptInfo {
-    ensure_grants_loaded(app);
+fn info_of(app: &AppHandle, s: &Script) -> Result<ScriptInfo, String> {
+    ensure_grants_loaded(app)?;
     let granted_hosts = grants()
         .lock()
         .unwrap()
         .as_ref()
         .and_then(|t| t.get(&s.id).cloned())
         .unwrap_or_default();
-    ScriptInfo {
+    Ok(ScriptInfo {
         id: s.id.clone(),
         name: s.meta.name.clone(),
         version: s.meta.version.clone(),
@@ -1378,26 +1372,18 @@ fn info_of(app: &AppHandle, s: &Script) -> ScriptInfo {
         grants: s.meta.grants.clone(),
         granted_hosts,
         install_url: s.install_url.clone(),
-    }
+    })
 }
 
 #[tauri::command]
 pub fn userscripts_list(app: AppHandle) -> Result<Vec<ScriptInfo>, String> {
-    ensure_loaded(&app);
-    Ok(registry()
+    ensure_loaded(&app)?;
+    registry()
         .lock()
         .unwrap()
         .as_ref()
         .map(|v| v.iter().map(|s| info_of(&app, s)).collect())
-        .unwrap_or_default())
-}
-
-fn write_body(app: &AppHandle, id: &str, body: &str) {
-    let Some(dir) = bodies_dir(app) else { return };
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let _ = std::fs::write(dir.join(format!("{id}.js")), body);
+        .unwrap_or_else(|| Ok(Vec::new()))
 }
 
 pub fn install_source(
@@ -1405,19 +1391,16 @@ pub fn install_source(
     source: &str,
     origin: Option<&str>,
 ) -> Result<ScriptInfo, String> {
-    if source.len() > MAX_SCRIPT_BYTES {
-        return Err(format!(
-            "script is {:.1} MB, larger than the {} MB an install may carry",
-            source.len() as f64 / (1024.0 * 1024.0),
-            MAX_SCRIPT_BYTES / (1024 * 1024)
-        ));
-    }
     let meta = parse_metadata(source)?;
-    ensure_loaded(app);
+    ensure_loaded(app)?;
     let install_url = origin.map(str::to_string);
+    let mut next = registry()
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("registry loaded above");
     let script = {
-        let mut reg = registry().lock().unwrap();
-        let scripts = reg.as_mut().expect("registry loaded above");
+        let scripts = &mut next;
         if let Some(existing) = scripts.iter_mut().find(|s| s.meta.name == meta.name) {
             existing.meta = meta;
             existing.body = source.to_string();
@@ -1435,10 +1418,10 @@ pub fn install_source(
             s
         }
     };
-    write_body(app, &script.id, &script.body);
-    persist_registry(app);
+    persist_script(app, &script)?;
+    *registry().lock().unwrap() = Some(next);
     eprintln!("[userscripts] installed script={}", script.id);
-    Ok(info_of(app, &script))
+    info_of(app, &script)
 }
 
 async fn fetch_script_source(url: &str) -> Result<String, String> {
@@ -1462,10 +1445,10 @@ async fn fetch_script_source(url: &str) -> Result<String, String> {
         match resp.chunk().await {
             Ok(Some(chunk)) => {
                 buf.extend_from_slice(&chunk);
-                if buf.len() > MAX_SCRIPT_BYTES {
+                if buf.len() > MAX_SCRIPT_TRANSFER_BYTES {
                     return Err(format!(
                         "script is over {} MB, more than an install may carry",
-                        MAX_SCRIPT_BYTES / (1024 * 1024)
+                        MAX_SCRIPT_TRANSFER_BYTES / (1024 * 1024)
                     ));
                 }
             }
@@ -1489,11 +1472,11 @@ pub async fn userscript_install_url(app: AppHandle, url: String) -> Result<Scrip
 pub async fn userscript_install_file(app: AppHandle, path: String) -> Result<ScriptInfo, String> {
     let source = tauri::async_runtime::spawn_blocking(move || {
         let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read the file: {e}"))?;
-        if meta.len() as usize > MAX_SCRIPT_BYTES {
+        if meta.len() as usize > MAX_SCRIPT_TRANSFER_BYTES {
             return Err(format!(
                 "script is {:.1} MB, larger than the {} MB an install may carry",
                 meta.len() as f64 / (1024.0 * 1024.0),
-                MAX_SCRIPT_BYTES / (1024 * 1024)
+                MAX_SCRIPT_TRANSFER_BYTES / (1024 * 1024)
             ));
         }
         std::fs::read_to_string(&path).map_err(|e| format!("cannot read the file: {e}"))
@@ -1537,7 +1520,7 @@ pub async fn userscript_check_update(
     app: AppHandle,
     script_id: String,
 ) -> Result<UpdateCheckResult, String> {
-    ensure_loaded(&app);
+    ensure_loaded(&app)?;
     let script = {
         let reg = registry().lock().unwrap();
         reg.as_ref()
@@ -1584,13 +1567,6 @@ fn apply_update_core(
     script_id: &str,
     source: &str,
 ) -> Result<(), String> {
-    if source.len() > MAX_SCRIPT_BYTES {
-        return Err(format!(
-            "script is {:.1} MB, larger than the {} MB an update may carry",
-            source.len() as f64 / (1024.0 * 1024.0),
-            MAX_SCRIPT_BYTES / (1024 * 1024)
-        ));
-    }
     let meta = parse_metadata(source)?;
     let script = scripts
         .iter_mut()
@@ -1619,26 +1595,37 @@ pub fn userscript_apply_update(
     script_id: String,
     source: String,
 ) -> Result<ScriptInfo, String> {
-    ensure_loaded(&app);
-    ensure_grants_loaded(&app);
-    {
-        let mut reg = registry().lock().unwrap();
-        let scripts = reg.as_mut().ok_or("registry unavailable")?;
-        let mut g = grants().lock().unwrap();
-        let table = g.get_or_insert_with(HashMap::new);
-        apply_update_core(scripts, table, &script_id, &source)?;
-    }
-    let script = {
-        let reg = registry().lock().unwrap();
-        reg.as_ref()
-            .and_then(|v| v.iter().find(|s| s.id == script_id).cloned())
-            .ok_or("no such script")?
-    };
-    write_body(&app, &script.id, &script.body);
-    persist_registry(&app);
-    persist_grants(&app);
+    ensure_loaded(&app)?;
+    ensure_grants_loaded(&app)?;
+    let mut next_scripts = registry()
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("registry unavailable")?;
+    let mut next_grants = grants().lock().unwrap().clone().unwrap_or_default();
+    apply_update_core(&mut next_scripts, &mut next_grants, &script_id, &source)?;
+    let script = next_scripts
+        .iter()
+        .find(|script| script.id == script_id)
+        .cloned()
+        .ok_or("no such script")?;
+    let script_json = serialize_script(&script)?;
+    let grants_json = serde_json::to_string(&next_grants)
+        .map_err(|e| format!("serialize userscript grants: {e}"))?;
+    let scope = script_scope(&script.id);
+    crate::app_state_store(&app)?
+        .change_scopes(
+            &[
+                (scope.as_str(), script_json.as_str()),
+                (GRANTS_SCOPE, grants_json.as_str()),
+            ],
+            &[],
+        )
+        .map_err(|e| format!("update userscript in app.db: {e:#}"))?;
+    *registry().lock().unwrap() = Some(next_scripts);
+    *grants().lock().unwrap() = Some(next_grants);
     eprintln!("[userscripts] updated script={script_id}");
-    Ok(info_of(&app, &script))
+    info_of(&app, &script)
 }
 
 #[tauri::command]
@@ -1647,52 +1634,57 @@ pub fn userscript_set_enabled(
     script_id: String,
     enabled: bool,
 ) -> Result<(), String> {
-    ensure_loaded(&app);
-    {
-        let mut reg = registry().lock().unwrap();
-        let scripts = reg.as_mut().ok_or("registry unavailable")?;
+    ensure_loaded(&app)?;
+    let mut next = registry()
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("registry unavailable")?;
+    let script = {
+        let scripts = &mut next;
         let s = scripts
             .iter_mut()
             .find(|s| s.id == script_id)
             .ok_or("no such script")?;
         s.enabled = enabled;
-    }
-    persist_registry(&app);
+        s.clone()
+    };
+    persist_script(&app, &script)?;
+    *registry().lock().unwrap() = Some(next);
     Ok(())
 }
 
 /// Remove a script and everything that was its: body, stored values, grants.
 #[tauri::command]
 pub fn userscript_remove(app: AppHandle, script_id: String) -> Result<(), String> {
-    ensure_loaded(&app);
-    {
-        let mut reg = registry().lock().unwrap();
-        let scripts = reg.as_mut().ok_or("registry unavailable")?;
-        let before = scripts.len();
-        scripts.retain(|s| s.id != script_id);
-        if scripts.len() == before {
-            return Err("no such script".into());
-        }
+    ensure_loaded(&app)?;
+    ensure_grants_loaded(&app)?;
+    let mut next_scripts = registry()
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("registry unavailable")?;
+    let before = next_scripts.len();
+    next_scripts.retain(|s| s.id != script_id);
+    if next_scripts.len() == before {
+        return Err("no such script".into());
     }
-    persist_registry(&app);
+    let mut next_grants = grants().lock().unwrap().clone().unwrap_or_default();
+    next_grants.remove(&script_id);
+    let grants_json = serde_json::to_string(&next_grants)
+        .map_err(|e| format!("serialize userscript grants: {e}"))?;
+    let store = crate::app_state_store(&app)?;
+    let script_scope = script_scope(&script_id);
+    let values_scope = values_scope(&script_id);
+    store
+        .change_scopes(
+            &[(GRANTS_SCOPE, grants_json.as_str())],
+            &[script_scope.as_str(), values_scope.as_str()],
+        )
+        .map_err(|e| format!("delete userscript from app.db: {e:#}"))?;
+    *registry().lock().unwrap() = Some(next_scripts);
+    *grants().lock().unwrap() = Some(next_grants);
     values_cache().lock().unwrap().remove(&script_id);
-    {
-        ensure_grants_loaded(&app);
-        if let Some(t) = grants().lock().unwrap().as_mut() {
-            t.remove(&script_id);
-        }
-    }
-    persist_grants(&app);
-    if let Some(dir) = bodies_dir(&app) {
-        let _ = std::fs::remove_file(dir.join(format!("{script_id}.js")));
-    }
-    let state_app = app.clone();
-    let scope = values_scope(&script_id);
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Ok(store) = crate::app_state_store(&state_app) {
-            let _ = store.delete_scope(&scope);
-        }
-    });
     eprintln!("[userscripts] removed script={script_id}");
     Ok(())
 }
@@ -1703,19 +1695,16 @@ pub fn userscript_revoke_grant(
     script_id: String,
     host: String,
 ) -> Result<(), String> {
-    ensure_grants_loaded(&app);
-    {
-        let mut g = grants().lock().unwrap();
-        if let Some(t) = g.as_mut() {
-            if let Some(hosts) = t.get_mut(&script_id) {
-                hosts.retain(|h| h != &host);
-                if hosts.is_empty() {
-                    t.remove(&script_id);
-                }
-            }
+    ensure_grants_loaded(&app)?;
+    let mut next = grants().lock().unwrap().clone().unwrap_or_default();
+    if let Some(hosts) = next.get_mut(&script_id) {
+        hosts.retain(|value| value != &host);
+        if hosts.is_empty() {
+            next.remove(&script_id);
         }
     }
-    persist_grants(&app);
+    persist_grants(&app, &next)?;
+    *grants().lock().unwrap() = Some(next);
     Ok(())
 }
 
@@ -1946,6 +1935,14 @@ console.log('hi');";
             body: src_v1(),
             install_url: Some("https://first.example.org/t.user.js".into()),
         }
+    }
+
+    #[test]
+    fn the_size_limit_applies_to_the_complete_userscript_record() {
+        let mut script = update_script();
+        script.body = "x".repeat(MAX_SCRIPT_RECORD_BYTES);
+        let error = serialize_script(&script).unwrap_err();
+        assert!(error.contains("userscript record"), "{error}");
     }
 
     #[test]

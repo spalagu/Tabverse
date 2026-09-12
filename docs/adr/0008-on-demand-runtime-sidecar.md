@@ -1,24 +1,24 @@
-# ADR-0008：Runtime 使用按需 sidecar
+# ADR-0008: Runtime Uses an On-Demand Sidecar
 
-## 状态
-已接受。
+## Status
+Accepted.
 
-## 需求与上下文
-Terminal 和 Agent LiveProcess 应能在 GUI 重启期间继续存在，但不能恢复并不存在的进程。
+## Context and requirements
+Terminal and Agent live processes should survive GUI restarts, but nonexistent processes must not be reported as recovered.
 
-## 决策
-同一个签名后的 Tabverse 可执行文件以 windowless helper 模式按需启动 Runtime Supervisor；没有 LiveProcess 且超过 idle window 后退出。
+## Decision
+Start the Runtime Supervisor on demand by running the same signed Tabverse executable in windowless helper mode. Exit after the idle window when no live process remains.
 
-## 备选与拒绝原因
-- 常驻 Resident Service：增加安装、升级和权限生命周期。
-- GUI 持有进程：GUI 退出会杀死工作。
-- 每个功能一个通用 Worker：重复生命周期和数据库所有权。
+## Alternatives rejected
+- Resident service: adds installation, upgrade, and permission lifecycles.
+- GUI-owned processes: exiting the GUI terminates work.
+- A generic worker per feature: duplicates lifecycle and database ownership.
 
-## 跨平台影响
-Supervisor 语义统一，启动和本地 transport 由平台 adapter 实现。
+## Cross-platform impact
+Supervisor semantics are shared; platform adapters implement startup and local transport.
 
-## Remote 带宽影响
-无额外周期 Remote 流量；只传现有功能的语义数据。
+## Remote bandwidth impact
+No additional periodic Remote traffic; only existing feature semantics are transmitted.
 
-## 迁移影响与可逆性
-旧 Resident 服务不迁入。sidecar 可随应用关闭并由下一次需要重新启动。
+## Migration impact and reversibility
+The legacy Resident service is not imported. The sidecar can stop with the application and start again on demand.

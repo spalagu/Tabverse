@@ -90,39 +90,7 @@ function readTab(raw: unknown): RemoteMirrorTab | null {
   };
 }
 
-const LEGACY_GROUP_PALETTE = groupColors("dark");
-
-function legacyColorIndex(color: string): number {
-  const channels = (value: string): [number, number, number] | null => {
-    const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(
-      value.trim(),
-    );
-    return match
-      ? [
-          Number.parseInt(match[1], 16),
-          Number.parseInt(match[2], 16),
-          Number.parseInt(match[3], 16),
-        ]
-      : null;
-  };
-  const target = channels(color);
-  if (target === null) return 0;
-  let best = 0;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  LEGACY_GROUP_PALETTE.forEach((candidate, index) => {
-    const value = channels(candidate);
-    if (value === null) return;
-    const distance =
-      (value[0] - target[0]) ** 2 +
-      (value[1] - target[1]) ** 2 +
-      (value[2] - target[2]) ** 2;
-    if (distance < bestDistance) {
-      best = index;
-      bestDistance = distance;
-    }
-  });
-  return best;
-}
+const GROUP_PALETTE_SIZE = groupColors("dark").length;
 
 function readGroup(raw: unknown): RemoteMirrorGroup | null {
   if (typeof raw !== "object" || raw === null) return null;
@@ -131,7 +99,10 @@ function readGroup(raw: unknown): RemoteMirrorGroup | null {
     typeof group.id !== "string" ||
     group.id.length === 0 ||
     typeof group.name !== "string" ||
-    typeof group.collapsed !== "boolean"
+    typeof group.collapsed !== "boolean" ||
+    !Number.isInteger(group.colorIndex) ||
+    (group.colorIndex as number) < 0 ||
+    (group.colorIndex as number) >= GROUP_PALETTE_SIZE
   ) {
     return null;
   }
@@ -139,12 +110,7 @@ function readGroup(raw: unknown): RemoteMirrorGroup | null {
     id: group.id,
     name: group.name,
     collapsed: group.collapsed,
-    colorIndex:
-      typeof group.colorIndex === "number"
-        ? group.colorIndex
-        : typeof group.color === "string"
-          ? legacyColorIndex(group.color)
-          : 0,
+    colorIndex: group.colorIndex as number,
     parentId: typeof group.parentId === "string" ? group.parentId : undefined,
     preset: isTabType(group.preset) ? group.preset : undefined,
     keepWhenEmpty: group.keepWhenEmpty === true ? true : undefined,
@@ -182,7 +148,7 @@ function withPresetGroups(groups: RemoteMirrorGroup[]): RemoteMirrorGroup[] {
       ...(existing ?? {
         id,
         name,
-        colorIndex: colorIndex % LEGACY_GROUP_PALETTE.length,
+        colorIndex: colorIndex % GROUP_PALETTE_SIZE,
         collapsed: false,
       }),
       preset: type,

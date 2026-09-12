@@ -329,9 +329,9 @@ describe("the column view", () => {
 
     await settle(350);
     const last = saved[saved.length - 1];
-    expect(JSON.parse(last).expanded).toEqual([]);
+    expect(JSON.parse(last).panes[0].expanded).toEqual([]);
     // The per-root view choice, on the other hand, IS remembered.
-    expect(JSON.parse(last).treeModes).toEqual({ "/w1": "miller" });
+    expect(JSON.parse(last).panes[0].treeModes).toEqual({ "/w1": "miller" });
 
     // A file clicked in a column previews through the pane's own dispatch.
     const fileRow = Array.from(host.querySelectorAll<HTMLElement>(".miller-row")).find(
@@ -763,21 +763,29 @@ describe("dual panes", () => {
     expect(paneColumns(host)[0].querySelector(".editor-tab-dot")).not.toBeNull();
   });
 
-  it("a session saved before dual panes existed restores as one pane, field for field", async () => {
-    const legacy = {
+  it("a current one-pane session restores field for field", async () => {
+    const saved = {
       v: 1,
-      root: "/work",
-      expanded: [],
-      open: ["/work/restored.txt"],
-      active: "/work/restored.txt",
-      viewModes: {},
       showDiff: true,
-      drafts: {},
       term: { open: false, height: 220, cwd: "/work" },
+      panes: [
+        {
+          root: "/work",
+          expanded: [],
+          open: ["/work/restored.txt"],
+          active: "/work/restored.txt",
+          viewModes: {},
+          drafts: {},
+          treeModes: {},
+        },
+      ],
+      layout: "row",
+      activePane: 0,
+      panelMode: "tree",
     };
     const { FilesView } = await fresh();
     const disk = new Map<string, string>([
-      ["state:files:22222222-2222-4222-8222-222222222222", JSON.stringify(legacy)],
+      ["state:files:22222222-2222-4222-8222-222222222222", JSON.stringify(saved)],
     ]);
     mocks.invoke.mockImplementation(async (cmd, args) => {
       const a = args ?? {};
@@ -843,9 +851,7 @@ describe("dual panes", () => {
     );
     await settle(60);
 
-    // One pane — the legacy shape is a single window, not a pair.
     expect(paneColumns(host)).toHaveLength(1);
-    // Root, open file, active file: each restored where the old code put it.
     expect(stripNames(paneColumns(host)[0])).toEqual(["restored.txt"]);
     expect(treeRow(host, "restored.txt")).not.toBeNull();
   });
@@ -853,13 +859,7 @@ describe("dual panes", () => {
   it("a stored pair comes back as two windows with the remembered roots", async () => {
     const dual = {
       v: 1,
-      root: "/work",
-      expanded: [],
-      open: [],
-      active: null,
-      viewModes: {},
       showDiff: true,
-      drafts: {},
       term: { open: false, height: 220, cwd: "/work" },
       panes: [
         {
@@ -883,6 +883,7 @@ describe("dual panes", () => {
       ],
       layout: "column",
       activePane: 1,
+      panelMode: "tree",
     };
     const { FilesView } = await fresh();
     const disk = new Map<string, string>([
