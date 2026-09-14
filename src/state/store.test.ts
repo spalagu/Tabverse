@@ -32,6 +32,9 @@ import {
 const CARRIER_KEY = "tabverse.state.session";
 
 const reset = async () => {
+  while (useStore.getState().reopenClosedTab() !== null) {
+    // Isolate the bounded in-memory reopen queue between tests.
+  }
   await flushAll(); // drain buffered writes so they cannot leak forward
   await deleteStateNow(SESSION_SCOPE);
   await deleteStateNow(ARCHIVE_SCOPE);
@@ -569,7 +572,7 @@ describe("nested groups", () => {
     );
   });
 
- it("dissolving a top-level folder demotes its tabs to today, anchors cleared", () => {
+  it("design A06: dissolving a top-level folder preserves pins in their type preset", () => {
     const st = useStore.getState();
     const page = st.addTab({ type: "browser", url: "https://home.test/" });
     const folder = useStore.getState().createGroup("Mine", page);
@@ -583,9 +586,9 @@ describe("nested groups", () => {
     useStore.getState().dissolveGroup(folder);
     const s = useStore.getState();
     expect(s.groups.some((g) => g.id === folder)).toBe(false);
-    // "Up" from the top level leaves the pinned zone: today, anchor gone.
-    expect(s.tabs.find((t) => t.id === page)?.groupId).toBeNull();
-    expect(s.tabs.find((t) => t.id === page)?.pinnedUrl).toBeUndefined();
+    // Removing organization is not an implicit unpin.
+    expect(s.tabs.find((t) => t.id === page)?.groupId).toBe("preset-browser");
+    expect(s.tabs.find((t) => t.id === page)?.pinnedUrl).toBe("https://home.test/");
     expect(s.groups.find((g) => g.id === sub)?.parentId).toBeUndefined();
     expect(s.tabs.find((t) => t.id === subTab)?.groupId).toBe(sub);
   });
@@ -1064,8 +1067,13 @@ describe("pinned items: dormancy and wake", () => {
     expect(useStore.getState().archive).toHaveLength(0);
     await flushAll();
     expect(await listScopes()).toContain(`terminal:${id}`);
-    // Closing again is a no-op, not a demotion or a deletion.
-    useStore.getState().closeTab(id);
+    // A repeated delivery of the original live-close intent cannot remove it.
+    useStore.getState().closeTab(id, false);
+    expect(tabOf(id)?.dormant).toBe(true);
+    // A new, explicit remove-saved intent does remove and can be reopened.
+    useStore.getState().closeTab(id, true);
+    expect(tabOf(id)).toBeUndefined();
+    expect(useStore.getState().reopenClosedTab()).toBe(id);
     expect(tabOf(id)?.dormant).toBe(true);
   });
 
@@ -1108,19 +1116,18 @@ describe("pinned items: dormancy and wake", () => {
     expect(useStore.getState().activeTabId).toBe(today);
   });
 
-  it("unpinning a dormant item wakes it into the today zone, anchor gone", () => {
+  it("design A02: unpinning changes retention without waking a dormant item", () => {
     const st = useStore.getState();
     const id = st.addTab({ type: "browser", url: "https://home.test/" });
     const preset = useStore.getState().groups.find((g) => g.preset === "browser")!;
     useStore.getState().assignToGroup(id, preset.id);
     useStore.getState().closeTab(id);
     expect(tabOf(id)?.dormant).toBe(true);
-    // The today zone has no dormant state, so leaving the pinned zone IS
-    // materializing — by menu Unpin and by drag alike (both demote).
+    // Filing is not permission to start a page or terminal.
     useStore.getState().assignToGroup(id, null);
     const t = tabOf(id)!;
     expect(t.groupId).toBeNull();
-    expect(t.dormant).toBeUndefined();
+    expect(t.dormant).toBe(true);
     expect(t.pinnedUrl).toBeUndefined();
   });
 

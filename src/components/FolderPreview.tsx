@@ -29,7 +29,7 @@ export function cancelPreviewClose(): void {
   }
 }
 
-export function schedulePreviewClose(delayMs = 300): void {
+export function schedulePreviewClose(delayMs = 360): void {
   cancelPreviewClose();
   closeTimer = window.setTimeout(() => {
     closeTimer = null;
@@ -38,7 +38,7 @@ export function schedulePreviewClose(delayMs = 300): void {
     if (gid === null) return;
     const head = document.querySelector(`.group-head[data-group-id="${gid}"]`);
     const panel = document.querySelector(".folder-preview");
-    if (head?.matches(":hover") || panel?.matches(":hover")) return;
+    if (head?.matches(":hover") || panel?.matches(":hover") || panel?.contains(document.activeElement)) return;
     st.setFolderPreview(null);
   }, delayMs);
 }
@@ -105,7 +105,7 @@ export async function freezeActivePage(
     });
     timeout.catch(() => {});
     const src = await Promise.race([call, timeout]);
-    if (!wants()) return; // the snapshot is simply dropped
+    if (!wants() || useStore.getState().activeTabId !== tabId) return; // stale snapshot
     // A freeze may have landed from the other reason meanwhile (peek and
     // panel share one); do not clobber a live image with a second shot.
     if (useStore.getState().pageFreeze !== null) return;
@@ -234,13 +234,9 @@ export function FolderPreview() {
     setTop(Math.round(Math.max(8, Math.min(wanted, most))));
   }, [groupId, shown.length]);
 
-  // Focus once placed, not via autoFocus: the panel mounts invisible (see
-  // above), and a hidden element refuses focus — an autoFocus that fired
-  // there would leave the search box dead to the keyboard.
+  // Hover previews never take focus from a terminal, editor, or web page.
+  // The search field receives focus only when the user clicks it.
   const placed = top !== null;
-  useEffect(() => {
-    if (placed) inputRef.current?.focus();
-  }, [groupId, placed]);
 
   // Esc closes, wherever the keyboard focus sits. Capture phase for the
   // same reason every sidebar surface uses it: the window-drag script

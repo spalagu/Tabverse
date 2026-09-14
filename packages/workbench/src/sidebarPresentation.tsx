@@ -71,6 +71,7 @@ export function TabRowPresentation({
   Icon,
   favicon,
   titleSlot,
+  iconSlot,
   subtitleSlot,
   deviationHint,
   attentionHint,
@@ -83,6 +84,7 @@ export function TabRowPresentation({
   Icon: TabIcon;
   favicon: string | null;
   titleSlot?: ReactNode;
+  iconSlot?: ReactNode;
   subtitleSlot?: ReactNode;
   deviationHint: string;
   attentionHint: string;
@@ -105,7 +107,7 @@ export function TabRowPresentation({
 
   return (
     <>
-      {favicon !== null ? (
+      {iconSlot !== undefined ? iconSlot : favicon !== null ? (
         <img className="tab-icon tab-favicon" src={favicon} alt="" />
       ) : (
         <Icon className="tab-icon" />

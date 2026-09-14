@@ -1,7 +1,9 @@
+import { useSidebarMenu } from "./useSidebarMenu";
 import { useEffect, useRef } from "react";
 import { useStore } from "../state/store";
 import { confirmChoose } from "./Confirm";
 import { STR } from "../strings";
+import { deleteGroupAsking } from "../appCommands";
 
 export function GroupMenu() {
   const menu = useStore((s) => s.groupMenu);
@@ -10,9 +12,9 @@ export function GroupMenu() {
   );
   const close = useStore((s) => s.closeGroupMenu);
   const createEmptyGroup = useStore((s) => s.createEmptyGroup);
-  const deleteGroup = useStore((s) => s.deleteGroup);
   const dissolveGroup = useStore((s) => s.dissolveGroup);
   const ref = useRef<HTMLDivElement>(null);
+  useSidebarMenu(ref, menu, close);
 
   useEffect(() => {
     if (!menu) return;
@@ -32,7 +34,7 @@ export function GroupMenu() {
 
   if (!menu || !group) return null;
   return (
-    <div className="ctx-menu" style={{ left: menu.x, top: menu.y }} ref={ref}>
+    <div className="ctx-menu sidebar-context-menu" style={{ left: menu.x, top: menu.y }} ref={ref}>
       <div className="ctx-title">{group.name}</div>
       <button
         className="ctx-item"
@@ -42,6 +44,9 @@ export function GroupMenu() {
         }}
       >
         {STR.common.sidebarMenu.newNestedFolder}
+      </button>
+      <button className="ctx-item" onClick={() => { useStore.getState().setNamingGroup(group.id); close(); }}>
+        {STR.common.tabMenu.rename}
       </button>
       {group.preset === undefined && (
         <>
@@ -59,7 +64,7 @@ export function GroupMenu() {
                   danger: true,
                 },
               ]).then((choice) => {
-                if (choice === "close") deleteGroup(id);
+                if (choice === "close") void deleteGroupAsking(id);
                 else if (choice === "lift") dissolveGroup(id);
               });
             }}

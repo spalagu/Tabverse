@@ -234,7 +234,7 @@ const REMOTE_ACTIONS: Record<AppMirrorActionName, (args: unknown) => void> = {
     useRemoteMirrorStore.setState((state) => {
       const closing = state.tabs.find((tab) => tab.id === args);
       if (closing === undefined) return state;
-      if (closing.groupId !== null) {
+      if (closing.groupId !== null && closing.dormant !== true) {
         const tabs = state.tabs.map((tab) =>
           tab.id === args ? { ...tab, dormant: true as const } : tab,
         );

@@ -1,7 +1,10 @@
+import { useSidebarMenu } from "./useSidebarMenu";
+import { closeTabAsking, closeTabsAsking } from "../appCommands";
 import { useEffect, useRef } from "react";
 import {
   archivableByState,
   splittable,
+  SPLIT_MAX_PANES,
   useStore,
   visibleOrdered,
   type Group,
@@ -10,7 +13,6 @@ import {
 } from "../state/store";
 import { toggleMute } from "../mediaControl";
 import { STR } from "../strings";
-import { confirmAsk } from "./Confirm";
 
 /** A stable empty array, so the scriptCommands selector below never returns
  *  a fresh reference on a tab with no commands (which loops useSyncExternalStore). */
@@ -25,7 +27,7 @@ export function canSplitWithActive(
   if (tab.id === activeTab.id) return false;
   const sharing =
     split !== null && split.ids.includes(tab.id) && split.ids.includes(activeTab.id);
-  return !sharing;
+  return !sharing && !(split?.ids.includes(activeTab.id) && split.ids.length >= SPLIT_MAX_PANES);
 }
 
 export function batchActionTabs(
@@ -47,7 +49,6 @@ export function TabMenu() {
   const tab = useStore((s) => s.tabs.find((t) => t.id === s.menu?.tabId));
   const closeMenu = useStore((s) => s.closeMenu);
   const assignToGroup = useStore((s) => s.assignToGroup);
-  const closeTab = useStore((s) => s.closeTab);
   const duplicateTab = useStore((s) => s.duplicateTab);
   const pinTab = useStore((s) => s.pinTab);
   const setRenamingTab = useStore((s) => s.setRenamingTab);
@@ -59,6 +60,7 @@ export function TabMenu() {
     s.tabs.find((t) => t.id === s.activeTabId)
   );
   const ref = useRef<HTMLDivElement>(null);
+  useSidebarMenu(ref, menu, closeMenu);
   const presetGroup = useStore((s) =>
     s.groups.find((g) => g.preset === tab?.type)
   );
@@ -71,7 +73,6 @@ export function TabMenu() {
   const splitState = useStore((s) => s.split);
   const selectedTabIds = useStore((s) => s.selectedTabIds);
   const mutedTabs = useStore((s) => s.mutedTabs);
-  const closeTabs = useStore((s) => s.closeTabs);
   const archiveTabs = useStore((s) => s.archiveTabs);
 
   useEffect(() => {
@@ -121,7 +122,7 @@ export function TabMenu() {
     const by = Math.min(menu.y, window.innerHeight - height - 8);
 
     return (
-      <div className="ctx-menu" style={{ left: bx, top: by }} ref={ref}>
+      <div className="ctx-menu sidebar-context-menu" style={{ left: bx, top: by }} ref={ref}>
         <div className="ctx-title">
           {STR.common.tabMenu.pickedTabs({ n })}
         </div>
@@ -129,15 +130,7 @@ export function TabMenu() {
           className="ctx-item danger"
           onClick={() => {
             closeMenu();
-            // Every row through closeTab's own branches; the destructive
-            // kinds (settings, remote) are asked about alone, each in its
-            // turn, through the ask-then-close shape the page's own
-            // closeTabAsking established.
-            void closeTabs(batch.map((t) => t.id), (t) =>
-              confirmAsk(STR.common.tabMenu.closeFinalAsk({ title: t.title }), {
-                confirmLabel: STR.common.close,
-              })
-            );
+            void closeTabsAsking(batch.map((t) => t.id));
           }}
         >
           {STR.common.tabMenu.closeBatch({ n })}
@@ -196,18 +189,19 @@ export function TabMenu() {
   const y = Math.min(menu.y, window.innerHeight - height - 8);
 
   return (
-    <div className="ctx-menu" style={{ left: x, top: y }} ref={ref}>
+    <div className="ctx-menu sidebar-context-menu" style={{ left: x, top: y }} ref={ref}>
       <div className="ctx-title">{tab.title}</div>
       {canSplit && (
         <button className="ctx-item" onClick={() => splitWith(tab.id)}>
           {STR.common.tabMenu.splitWithActive}
         </button>
       )}
-      {inSplit && (
-        <button className="ctx-item" onClick={() => unsplit()}>
-          {STR.common.tabMenu.unsplit}
+      {inSplit && <>
+        <button className="ctx-item" onClick={() => { useStore.getState().separateFromSplit(tab.id); closeMenu(); }}>
+          {STR.common.tabMenu.separateMember}
         </button>
-      )}
+        <button className="ctx-item" onClick={() => unsplit()}>{STR.common.tabMenu.unsplit}</button>
+      </>}
       {tab.groupId === null && presetGroup && (
         <button
           className="ctx-item"
@@ -300,14 +294,10 @@ export function TabMenu() {
           {STR.common.tabMenu.saveLayout}
         </button>
       )}
-      {tab.dormant !== true && (
-        <>
-          <div className="ctx-sep" />
-          <button className="ctx-item danger" onClick={() => closeTab(tab.id)}>
-            {STR.common.close}
-          </button>
-        </>
-      )}
+      <div className="ctx-sep" />
+      <button className="ctx-item danger" onClick={() => { closeMenu(); void closeTabAsking(tab.id, tab.dormant === true); }}>
+        {tab.dormant && tab.groupId !== null ? STR.common.sidebar.removeSaved : tab.groupId !== null ? STR.common.sidebar.closeRunning : STR.common.close}
+      </button>
     </div>
   );
 }

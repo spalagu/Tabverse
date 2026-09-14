@@ -1,3 +1,4 @@
+import { sidebarHover } from "./sidebarHover";
 import { useEffect, useRef } from "react";
 import { WorkbenchRuntimeProvider } from "@tabverse/workbench/runtime";
 import { desktopRuntime } from "@tabverse/runtime-desktop";
@@ -37,7 +38,7 @@ import { ArchivePanel } from "./components/ArchivePanel";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { DownloadsPanel } from "./components/DownloadsPanel";
 import { useGlobalKeys } from "./keys";
-import { detachTerminalTab, listenToMenuCommands } from "./appCommands";
+import { closeTabAsking, detachTerminalTab, listenToMenuCommands } from "./appCommands";
 import { initDownloads } from "./downloads";
 import { loadZoomMemory } from "./zoomMemory";
 import { coreLog } from "./errlog";
@@ -156,10 +157,12 @@ function DesktopApp() {
       // place. The sidebar's own mouseleave still ends the hover when the
       // pointer really leaves.
       if (pointerPastSidebar(e.clientX, st.sidebarWidth))
-        st.setSidebarPeeking(false);
+        sidebarHover.leave();
     };
     document.addEventListener("mousemove", onMove);
-    return () => document.removeEventListener("mousemove", onMove);
+    const blur = () => sidebarHover.blur();
+    window.addEventListener("blur", blur);
+    return () => { document.removeEventListener("mousemove", onMove); window.removeEventListener("blur", blur); sidebarHover.reset(); };
   }, []);
 
   // What only the page can see: a press inside it (which must dismiss our
@@ -207,8 +210,9 @@ function DesktopApp() {
             st.setPaneHover(who);
           }
         } else if (e.payload.kind === "page-left-edge" && !st.sidebarPinned) {
-          st.setSidebarPeeking(true);
+          sidebarHover.edgeEnter();
         } else if (e.payload.kind === "page-left-edge-exit") {
+          sidebarHover.edgeExit(pointerPastSidebar(e.payload.x, st.sidebarWidth));
           // The same settle, for the one surface our own mousemove never
           // reaches. "Left the 10px strip" is NOT "left the sidebar": the
           // strip is only where the sidebar is summoned from, and hiding on
@@ -227,7 +231,7 @@ function DesktopApp() {
             !st.groupMenu &&
             !st.folderPreviewGroupId
           ) {
-            st.setSidebarPeeking(false);
+            sidebarHover.leave();
           }
         }
       }).then((fn) => {
@@ -304,6 +308,12 @@ function DesktopApp() {
     let cancelled = false;
     void import("@tauri-apps/api/event").then(({ listen }) =>
       listen<{ name: string; args: unknown }>("app-share-action", (e) => {
+        // A viewer requests a host action; it must not bypass the host's
+        // runtime/unsaved-work protection. ActionApplied replay stays pure.
+        if (e.payload.name === "closeTab" && typeof e.payload.args === "string") {
+          void closeTabAsking(e.payload.args);
+          return;
+        }
         const applied = applyMirrorAction(e.payload.name, e.payload.args);
         if (!applied) {
           coreLog(
@@ -743,7 +753,7 @@ function DesktopApp() {
                   );
                   const allDetached = detached.every(Boolean);
                   if (allDetached) {
-                    for (const tab of tabs) useStore.getState().closeTab(tab.id);
+                    for (const tab of tabs) { if (!tab.dormant) useStore.getState().closeTab(tab.id, false); }
                   }
                   return allDetached;
                 },
@@ -887,7 +897,12 @@ function DesktopApp() {
       {!sidebarPinned && (
         <div
           className="sidebar-peek-zone"
-          onMouseEnter={() => useStore.getState().setSidebarPeeking(true)}
+          onMouseEnter={() => sidebarHover.edgeEnter()}
+          onMouseLeave={(event) =>
+            sidebarHover.edgeExit(
+              pointerPastSidebar(event.clientX, useStore.getState().sidebarWidth)
+            )
+          }
         />
       )}
       <Sidebar />

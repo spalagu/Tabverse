@@ -1,8 +1,13 @@
+import { SidebarTabRow, ProfileBadges } from "./SidebarTabRow";
+import { SidebarRenameInput } from "./SidebarRenameInput";
+import { draggedIds, GROUP_MIME } from "./sidebarInteraction";
+import { useSidebarNavigation } from "./useSidebarNavigation";
+import { sidebarHover, SIDEBAR_MOTION } from "../sidebarHover";
+import "./sidebar-experience.css";
+export { armsSplitDrag, splittableDrag } from "./SidebarTabRow";
 import {
-  createContext,
-  Fragment,
-  useContext,
   useEffect,
+  useCallback,
   useMemo,
   useRef,
   useState,
@@ -10,12 +15,8 @@ import {
   type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { closeTabAsking, runAppCommand } from "../appCommands";
-import { shareBlockedReason, shareBlockedText } from "../share/framework/terminalBlocking";
-import { shareCapability } from "../share/framework/capability";
-import { useFavicon } from "../favicons";
-import { tabSubtitle } from "../tabMeta";
-import { GroupHeadContent, TabRowContent } from "./sidebarContent";
+import { closeTabsAsking, runAppCommand } from "../appCommands";
+import { GroupHeadContent } from "./sidebarContent";
 import { SidebarTreePresentation } from "@tabverse/workbench/sidebar";
 import { STR } from "../strings";
 import { formatKeys } from "../strings/formatKeys";
@@ -30,12 +31,9 @@ import {
   groupSubtreeIds,
   rootGroups,
   sidebarShowing,
-  splitPartners,
-  splittable,
   subtreeTabs,
   useStore,
   type Group,
-  type SplitGroup,
   type Tab,
 } from "../state/store";
 import {
@@ -45,45 +43,16 @@ import {
   SearchIcon,
   ShareIcon,
   SidebarIcon,
-  SpeakerIcon,
-  SpeakerMutedIcon,
-  TAB_ICONS,
   GearIcon,
   MoreIcon,
 } from "./icons";
-import { toggleMute } from "../mediaControl";
 import { LoadingState } from "./state/LoadingState";
 import { useProfiles } from "./useProfiles";
-import { profileBadgeVar } from "../theme/tokens";
 import { footerMenuPosition } from "./sidebarLayout";
-
-/**
- * Which tabs a drag is carrying. One kind of drop handler, whether the drag
- * started as one row or several — a second code path for the plural case is
- * how the two get to disagree about what a drop means.
- */
-function draggedIds(dt: DataTransfer | null): string[] {
-  // Programmatic drops may carry no payload, so treat a missing transfer as
-  // an empty selection.
-  if (!dt) return [];
-  const many = dt.getData("text/tabverse-tabs");
-  if (many) {
-    try {
-      const list = JSON.parse(many);
-      if (Array.isArray(list) && list.every((x) => typeof x === "string")) return list;
-    } catch {
-      // Fall through to the single id: a malformed list is not a reason to
-      // drop the drag on the floor.
-    }
-  }
-  const one = dt.getData("text/tabverse-tab");
-  return one ? [one] : [];
-}
-
-const GROUP_MIME = "text/tabverse-group";
+import { useSidebarMenu } from "./useSidebarMenu";
 
 const depthVar = (level: number): CSSProperties =>
-  ({ "--depth": level }) as CSSProperties;
+  ({ "--depth": Math.min(level, 5) }) as CSSProperties;
 
 function useDropFlag(): [boolean, (on: boolean) => void] {
   const [on, setOn] = useState(false);
@@ -109,431 +78,8 @@ function useDropFlag(): [boolean, (on: boolean) => void] {
   return [on, setOn];
 }
 
-const subtitleFor = tabSubtitle;
-
-const ProfileBadges = createContext<Record<string, string>>({});
-
-function TabRow({
-  tab,
-  active,
-  indent,
-  depth = 0,
-  peek,
-}: {
-  tab: Tab;
-  active: boolean;
-  indent?: boolean;
-  /** Nesting level of the group this row sits in; 0 for a top-level group. */
-  depth?: number;
-  peek?: boolean;
-}) {
-  const activateTab = useStore((s) => s.activateTab);
-  const moveTab = useStore((s) => s.moveTab);
-  const moveTabs = useStore((s) => s.moveTabs);
-  const selected = useStore((s) => s.selectedTabIds.includes(tab.id));
-  const coActive = useStore((s) => splitPartners(s).includes(tab.id));
-  const openMenu = useStore((s) => s.openMenu);
-  const setShareDialogTab = useStore((s) => s.setShareDialogTab);
-  const renameTab = useStore((s) => s.renameTab);
-  const audible = useStore((s) => !!s.audibleTabs[tab.id]);
-  const muted = useStore((s) => !!s.mutedTabs[tab.id]);
-  const profileBadges = useContext(ProfileBadges);
-  const profileBadge =
-    tab.type === "terminal" &&
-    typeof tab.profile === "string" &&
-    tab.profile !== ""
-      ? profileBadges[tab.profile]
-      : undefined;
-  const [ownEditing, setOwnEditing] = useState(false);
-  const askedToRename = useStore((s) => s.renamingTabId === tab.id);
-  const editing = ownEditing || askedToRename;
-  const setEditing = (on: boolean) => {
-    setOwnEditing(on);
-    if (!on && askedToRename) useStore.getState().setRenamingTab(null);
-  };
-  // Which half of this row a dropped tab would take, or null when the drop
-  // means "reorder" instead (2026-08-12 feedback 3).
-  const [splitSide, setSplitSide] = useState<"left" | "right" | null>(null);
-  const [dropBefore, setDropBefore] = useDropFlag();
-  const inputRef = useRef<HTMLInputElement>(null);
-  // Whether the press that is finishing turned into a drag.
-  const draggingRef = useRef(false);
-
-  useEffect(() => {
-    if (editing) inputRef.current?.select();
-  }, [editing]);
-
-  const shareCap = shareCapability(tab.type);
-  const shared = !!tab.share;
-  const shareBlocked = shareBlockedReason(tab) !== null;
-
-  const pressedRef = useRef(false);
-
-  const clickRow = () => {
-    const st = useStore.getState();
-    if (
-      st.activeTabId === tab.id &&
-      tab.pinnedUrl !== undefined &&
-      tab.url !== tab.pinnedUrl
-    ) {
-      runAppCommand("go-pinned");
-    }
-    activateTab(tab.id);
-  };
-
-  return (
-    <div
-      className={[
-        "tab-row",
-        active ? "active" : "",
-        coActive ? "co-active" : "",
-        selected ? "selected" : "",
-        tab.exited ? "exited" : "",
-        indent ? "indent" : "",
-        tab.attention ? "attention" : "",
-        dropBefore ? "drop-before" : "",
-        splitSide === "left" ? "split-drop-left" : "",
-        splitSide === "right" ? "split-drop-right" : "",
-        tab.dormant ? "dormant" : "",
-        peek ? "peek" : "",
-      ]
-        .filter(Boolean)
-        .join(" ")}
-      // Stable identity for drag targets and automation.
-      data-tab-id={tab.id}
-      style={indent || peek ? depthVar(depth + 1) : undefined}
-      draggable={!editing}
-      onDragStart={(e) => {
-        draggingRef.current = true;
-        const st = useStore.getState();
-        // Dragging a row that is part of the picked-out set moves the whole
-        // set; dragging any other row is an ordinary single drag and drops
-        // the set, because otherwise a stale selection silently comes along
-        // for a ride the user did not ask for.
-        const ids = st.selectedTabIds.includes(tab.id)
-          ? st.tabs.filter((t) => st.selectedTabIds.includes(t.id)).map((t) => t.id)
-          : [tab.id];
-        if (ids.length === 1) st.clearSelection();
-        e.dataTransfer.setData("text/tabverse-tab", tab.id);
-        e.dataTransfer.setData("text/tabverse-tabs", JSON.stringify(ids));
-        // Said once, here, because it cannot be asked later: dragover gets a
-        // protected data store and would read an empty string.
-        st.setDraggingTabs(ids);
-        if (ids.length === 1) {
-          const active = st.tabs.find((t) => t.id === st.activeTabId);
-          if (armsSplitDrag(tab, active)) {
-            st.setContentDrag({ id: tab.id, side: null });
-          }
-        }
-        if (ids.length > 1) {
-          // Otherwise the cursor carries one row and nothing says the other
-          // two are coming.
-          const ghost = document.createElement("div");
-          ghost.className = "drag-ghost";
-          ghost.textContent = `${ids.length} tabs`;
-          document.body.appendChild(ghost);
-          e.dataTransfer.setDragImage(ghost, 12, 12);
-          window.setTimeout(() => ghost.remove(), 0);
-        }
-      }}
-      onDragOver={(e) => {
-        // Either signal is enough: the payload's type or the remembered ids.
-        const dragging = useStore.getState().draggingTabIds.length > 0;
-        if (!dragging && !e.dataTransfer?.types.includes("text/tabverse-tab")) {
-          return;
-        }
-        e.preventDefault();
-        // Where in the row decides WHAT the drop means, which is how Arc
-        // tells its two tab drags apart: across the middle of another tab is
-        // "put these side by side", along its edges is "put it here in the
-        // list". Only two splittable tabs can pair up, so anywhere else the
-        // middle band simply reads as a reorder.
-        const r = e.currentTarget.getBoundingClientRect();
-        const t = (e.clientY - r.top) / Math.max(1, r.height);
-        const middle = t > 0.28 && t < 0.72;
-        const canSplit = middle && splittable(tab) && splittableDrag(tab.id);
-        setSplitSide(
-          canSplit ? (e.clientX - r.left < r.width / 2 ? "left" : "right") : null
-        );
-        setDropBefore(!canSplit);
-      }}
-      onDragEnd={() => {
-        useStore.getState().setDraggingTabs([]);
-        // Cleared on the next turn so the release that ends the drag does
-        // not read as a plain click on this row.
-        window.setTimeout(() => {
-          draggingRef.current = false;
-        }, 0);
-      }}
-      onDragLeave={() => {
-        setDropBefore(false);
-        setSplitSide(null);
-      }}
-      onDrop={(e) => {
-        e.preventDefault();
-        // Without this the drop bubbles on to the list container, whose
-        // handler un-groups and re-appends — undoing this move instantly.
-        e.stopPropagation();
-        const side = splitSide;
-        setDropBefore(false);
-        setSplitSide(null);
-        const remembered = useStore.getState().draggingTabIds;
-        useStore.getState().setDraggingTabs([]);
-        const fromPayload = draggedIds(e.dataTransfer);
-        const ids = fromPayload.length > 0 ? fromPayload : remembered;
-        if (side !== null && ids.length === 1) {
-          useStore.getState().splitOnTab(ids[0], tab.id, side);
-          return;
-        }
-        if (ids.length > 1) moveTabs(ids, tab.id);
-        else if (ids.length === 1) moveTab(ids[0], tab.id);
-      }}
-      onMouseDown={(e) => {
-        if (e.button === 1) {
-          e.preventDefault();
-          closeTabAsking(tab.id);
-          return;
-        }
-        if (e.button !== 0 || editing) return;
-        const st = useStore.getState();
-        // The two ways every list on this platform picks out more than one
-        // row. Neither switches tabs: picking is not going.
-        if (e.metaKey || e.ctrlKey) {
-          e.preventDefault();
-          st.toggleSelected(tab.id);
-          return;
-        }
-        if (e.shiftKey) {
-          e.preventDefault();
-          st.extendSelectionTo(tab.id);
-          return;
-        }
-        // A drag begins with a plain press on a row that is already picked
-        // out — so clearing here threw the selection away a moment before
-        // the drag could read it, and every multi-row drag moved exactly
-        // one row. The decision waits for the release instead: dragged, and
-        // the picking stands; released without dragging, and it collapses
-        // to this row, which is what a plain click means.
-        if (st.selectedTabIds.includes(tab.id)) return;
-        st.clearSelection();
-        // Going there waits for the release (2026-08-12 feedback 3). A drag
-        // begins with a press, so switching here meant the dragged tab was
-        // ALWAYS the one in front by the time it was dropped — and "split
-        // this with whatever is in front" could then never mean anything.
-        // Arc has the same property: dragging a tab does not go to it.
-        pressedRef.current = true;
-      }}
-      // The release is where a press becomes a click — and only a press that
-      // never turned into a drag counts. Two cases arrive here: a row that
-      // was part of the picked-out set (the pick collapses to this row), and
-      // a plain row whose press deliberately did NOT go there yet.
-      onMouseUp={(e) => {
-        const wasPress = pressedRef.current;
-        pressedRef.current = false;
-        if (e.button !== 0 || editing) return;
-        if (draggingRef.current || e.metaKey || e.ctrlKey || e.shiftKey) return;
-        const st = useStore.getState();
-        if (st.selectedTabIds.includes(tab.id)) {
-          st.clearSelection();
-          clickRow();
-          return;
-        }
-        if (wasPress) clickRow();
-      }}
-      onDoubleClick={() => setEditing(true)}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        openMenu(tab.id, e.clientX, e.clientY);
-      }}
-      title={tab.title}
-    >
-      <TabRowContent
-        tab={tab}
-        titleSlot={
-          editing ? (
-            <input
-              ref={inputRef}
-              className="tab-rename"
-              defaultValue={tab.title}
-              onBlur={(e) => {
-                const v = e.target.value.trim();
-                if (v) renameTab(tab.id, v);
-                setEditing(false);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") e.currentTarget.blur();
-                if (e.key === "Escape") setEditing(false);
-                e.stopPropagation();
-              }}
-            />
-          ) : undefined
-        }
-        subtitleSlot={
-          subtitleFor(tab) && (
-            <span className="tab-subtitle-wrap">
-              {profileBadge !== undefined && (
-                <span
-                  className="tab-profile-dot"
-                  style={{ background: profileBadgeVar(profileBadge) }}
-                  title={STR.common.sidebar.profileBadgeHint({
-                    name: tab.profile ?? "",
-                  })}
-                />
-              )}
-              <span className="tab-subtitle">{subtitleFor(tab)}</span>
-            </span>
-          )
-        }
-      />
-      {tab.type === "browser" && (audible || muted) && (
-        <button
-          className={`tab-audio${muted ? " muted" : ""}`}
-          title={
-            muted
-              ? STR.common.sidebar.mutedHint
-              : STR.common.sidebar.audibleHint
-          }
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            toggleMute(tab.id);
-          }}
-        >
-          {muted ? <SpeakerMutedIcon /> : <SpeakerIcon />}
-        </button>
-      )}
-      {shareCap.shareable && tab.dormant !== true && (
-        <button
-          className={`tab-share${shared ? " on" : ""}`}
-          disabled={shareBlocked}
-          title={
-            shareBlocked
-              ? (shareBlockedText(shareBlockedReason(tab)) ?? undefined)
-              : shared
-                ? STR.common.sidebar.sharingHint({ viewers: tab.share!.viewers.length })
-                : STR.common.sidebar.shareHint
-          }
-          aria-label={
-            shareBlocked
-              ? (shareBlockedText(shareBlockedReason(tab)) ?? undefined)
-              : shared
-                ? STR.common.sidebar.sharingHint({ viewers: tab.share!.viewers.length })
-                : STR.common.sidebar.shareHint
-          }
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            setShareDialogTab(tab.id);
-          }}
-        >
-          <ShareIcon />
-          {shared && tab.share!.viewers.length > 0 && (
-            <span className="share-count">{tab.share!.viewers.length}</span>
-          )}
-        </button>
-      )}
-      {tab.dormant !== true && (
-        <button
-          className="tab-close"
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            closeTabAsking(tab.id);
-          }}
-          aria-label={STR.common.sidebar.closeTab}
-        >
-          <CloseIcon />
-        </button>
-      )}
-    </div>
-  );
-}
-
-function SplitHalf({ tab, active }: { tab: Tab; active: boolean }) {
-  const activateTab = useStore((s) => s.activateTab);
-  const openMenu = useStore((s) => s.openMenu);
-  const favicon = useFavicon(
-    tab.type === "browser" ? tab.url : undefined,
-    tab.id
-  );
-  const Icon = TAB_ICONS[tab.type];
-  return (
-    <div
-      className={`split-half-row${active ? " active" : ""}`}
-      // Stable identity for each half of a split row.
-      data-tab-id={tab.id}
-      onMouseDown={(e) => {
-        if (e.button !== 0) return;
-        e.preventDefault();
-        activateTab(tab.id);
-      }}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        openMenu(tab.id, e.clientX, e.clientY);
-      }}
-      title={tab.title}
-    >
-      {favicon !== null ? (
-        <img className="tab-icon tab-favicon" src={favicon} alt="" />
-      ) : (
-        <Icon className="tab-icon" />
-      )}
-      <span className="split-half-title">{tab.title}</span>
-    </div>
-  );
-}
-
-function SplitRow({
-  split,
-  depth,
-  indent,
-  peek,
-}: {
-  split: SplitGroup;
-  depth: number;
-  indent?: boolean;
-  peek?: boolean;
-}) {
-  const tabs = useStore((s) => s.tabs);
-  const activeTabId = useStore((s) => s.activeTabId);
-  const members = split.ids.map((id) => tabs.find((t) => t.id === id));
-  if (members.some((m) => m === undefined)) return null;
-  return (
-    <div
-      className={`tab-row split-row${indent || peek ? " indent" : ""}`}
-      style={indent || peek ? depthVar(depth + 1) : undefined}
-    >
-      {members.map((m, i) => (
-        <Fragment key={m!.id}>
-          {i > 0 && <span className="split-row-seam" />}
-          <SplitHalf tab={m!} active={activeTabId === m!.id} />
-        </Fragment>
-      ))}
-    </div>
-  );
-}
-
-function SidebarRow({
-  tab,
-  active,
-  indent,
-  depth = 0,
-  peek,
-}: {
-  tab: Tab;
-  active: boolean;
-  indent?: boolean;
-  depth?: number;
-  peek?: boolean;
-}) {
-  const split = useStore((s) => s.split);
-  if (split !== null && split.ids.includes(tab.id)) {
-    if (tab.id !== split.ids[0]) return null;
-    return <SplitRow split={split} depth={depth} indent={indent} peek={peek} />;
-  }
-  return (
-    <TabRow tab={tab} active={active} indent={indent} depth={depth} peek={peek} />
-  );
+function SidebarRow(props: { tab: Tab; active: boolean; indent?: boolean; depth?: number; peek?: boolean }) {
+  return <SidebarTabRow {...props} />;
 }
 
 function GroupHeader({
@@ -547,10 +93,7 @@ function GroupHeader({
 }) {
   const toggle = useStore((s) => s.toggleGroupCollapsed);
   const renameGroup = useStore((s) => s.renameGroup);
-  const closeGroup = useStore((s) => s.closeGroup);
   const deleteGroup = useStore((s) => s.deleteGroup);
-  const moveTab = useStore((s) => s.moveTab);
-  const assignToGroup = useStore((s) => s.assignToGroup);
   const setGroupParent = useStore((s) => s.setGroupParent);
   const moveGroupBefore = useStore((s) => s.moveGroupBefore);
   const openGroupMenu = useStore((s) => s.openGroupMenu);
@@ -560,6 +103,8 @@ function GroupHeader({
     (s) => s.folderPreviewPendingGroupId === group.id
   );
   const [editing, setEditing] = useState(false);
+  const headRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => { sidebarHover.hold(`group-edit-${group.id}`, editing); return () => sidebarHover.hold(`group-edit-${group.id}`, false); }, [editing, group.id]);
   // A group made from the sidebar's menu opens ready to be named, so the
   // row that just appeared is the row being typed into.
   const naming = namingGroupId === group.id;
@@ -611,7 +156,7 @@ function GroupHeader({
         if (useStore.getState().folderPreviewGroupId === group.id) {
           cancelPreviewClose();
         }
-        if (latchedRef.current || naming || editing || !group.collapsed) {
+        if (latchedRef.current || naming || editing || !group.collapsed || useStore.getState().draggingTabIds.length) {
           return;
         }
         cancelPreviewClose();
@@ -620,19 +165,19 @@ function GroupHeader({
           // Re-checked at fire: 250ms is plenty for the folder to expand
           // or a naming input to appear under a pointer that never moved.
           const st = useStore.getState();
-          if (st.namingGroupId === group.id) return;
+          if (st.namingGroupId === group.id || st.draggingTabIds.length) return;
           if (st.groups.find((g) => g.id === group.id)?.collapsed !== true) {
             return;
           }
           void openFolderPreview(group.id, () => {
             const s2 = useStore.getState();
             return (
-              !latchedRef.current &&
+              !latchedRef.current && !s2.draggingTabIds.length &&
               s2.namingGroupId !== group.id &&
               s2.groups.find((g) => g.id === group.id)?.collapsed === true
             );
           });
-        }, 250);
+        }, 300);
       }}
       onMouseLeave={() => {
         latchedRef.current = false;
@@ -646,16 +191,8 @@ function GroupHeader({
           schedulePreviewClose();
         }
       }}
-      onClick={() => {
-        if (editing) return;
-        latchAndClose();
-        toggle(group.id);
-      }}
-      onDoubleClick={(e) => {
-        e.stopPropagation();
-        setEditing(true);
-      }}
       onContextMenu={(e) => {
+        if (editing || naming) return;
         e.preventDefault();
         e.stopPropagation();
         latchAndClose();
@@ -663,12 +200,12 @@ function GroupHeader({
       }}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("text/tabverse-tab")) {
-          e.preventDefault();
+          e.preventDefault(); e.stopPropagation();
           setDropping(true);
           return;
         }
         if (e.dataTransfer.types.includes(GROUP_MIME)) {
-          e.preventDefault();
+          e.preventDefault(); e.stopPropagation();
           const before = inBeforeZone(e);
           setDropBefore(before);
           setDropping(!before);
@@ -691,45 +228,29 @@ function GroupHeader({
           else setGroupParent(draggedGroup, group.id);
           return;
         }
-        for (const id of draggedIds(e.dataTransfer)) {
-          assignToGroup(id, group.id);
-          moveTab(id, null);
-        }
+        useStore.getState().moveTabsTo(draggedIds(e.dataTransfer), group.id, null);
       }}
       title={group.collapsed ? "Expand group" : "Collapse group"}
     >
-      <GroupHeadContent
-        group={group}
-        count={count}
-        titleSlot={
-          editing || naming ? (
-            <input
-              className="tab-rename"
-              autoFocus
-              defaultValue={group.name}
-              onClick={(e) => e.stopPropagation()}
-              onBlur={(e) => {
-                const v = e.target.value.trim();
-                if (v) renameGroup(group.id, v);
-                stopNaming();
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") e.currentTarget.blur();
-                if (e.key === "Escape") stopNaming();
-                e.stopPropagation();
-              }}
-            />
-          ) : undefined
-        }
-        afterTitleSlot={
-          previewPending && (
-            <LoadingState
-              inline
-              label={STR.panels.folderPreview.opening}
-            />
-          )
-        }
-      />
+      {editing || naming ? <div className="group-editing">
+        <GroupHeadContent group={group} count={count} titleSlot={
+          <SidebarRenameInput value={group.name} label={STR.common.sidebar.renameGroup}
+            onSave={(name) => renameGroup(group.id, name)}
+            onDone={(restore) => { stopNaming(); if (restore) requestAnimationFrame(() => headRef.current?.focus({ preventScroll: true })); }} />
+        } />
+      </div> : <button type="button" className="group-toggle" ref={headRef} aria-label={group.name} aria-expanded={!group.collapsed}
+        onClick={(e) => { if (e.detail <= 1) { latchAndClose(); toggle(group.id); } }}
+        onKeyDown={(e) => {
+          if (e.key === "F2") { e.preventDefault(); e.stopPropagation(); setEditing(true); }
+          if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+            e.preventDefault(); e.stopPropagation();
+            if (group.collapsed !== (e.key === "ArrowLeft")) { latchAndClose(); toggle(group.id); }
+          }
+          if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+            e.preventDefault(); e.stopPropagation(); latchAndClose(); const r = e.currentTarget.getBoundingClientRect(); openGroupMenu(group.id, r.left + 12, r.bottom);
+          }
+        }}><GroupHeadContent group={group} count={count} afterTitleSlot={previewPending && <LoadingState inline label={STR.panels.folderPreview.opening} />} />
+      </button>}
       <button
         className="tab-close"
         title={
@@ -745,7 +266,11 @@ function GroupHeader({
         onClick={(e) => {
           e.stopPropagation();
           if (count === 0) deleteGroup(group.id);
-          else closeGroup(group.id);
+          else {
+            const state = useStore.getState();
+            const groupIds = groupSubtreeIds(state.groups, group.id);
+            void closeTabsAsking(state.tabs.filter((tab) => tab.groupId !== null && groupIds.includes(tab.groupId) && !tab.dormant).map((tab) => tab.id));
+          }
         }}
       >
         <CloseIcon />
@@ -755,8 +280,6 @@ function GroupHeader({
 }
 
 function GroupTailDrop({ group, depth }: { group: Group; depth: number }) {
-  const assignToGroup = useStore((s) => s.assignToGroup);
-  const moveTabs = useStore((s) => s.moveTabs);
   const [dropping, setDropping] = useDropFlag();
   return (
     <div
@@ -765,7 +288,7 @@ function GroupTailDrop({ group, depth }: { group: Group; depth: number }) {
       style={depthVar(depth + 1)}
       onDragOver={(e) => {
         if (e.dataTransfer.types.includes("text/tabverse-tab")) {
-          e.preventDefault();
+          e.preventDefault(); e.stopPropagation();
           setDropping(true);
         }
       }}
@@ -776,8 +299,7 @@ function GroupTailDrop({ group, depth }: { group: Group; depth: number }) {
         setDropping(false);
         const ids = draggedIds(e.dataTransfer);
         if (ids.length === 0) return;
-        for (const id of ids) assignToGroup(id, group.id);
-        moveTabs(ids, null);
+        useStore.getState().moveTabsTo(ids, group.id, null);
       }}
     />
   );
@@ -849,38 +371,14 @@ function ZoneDivider() {
   );
 }
 
-export function armsSplitDrag(
-  dragged: Tab | undefined,
-  active: Tab | undefined
-): boolean {
-  return (
-    splittable(dragged) && splittable(active) && dragged.id !== active.id
-  );
-}
-
-/**
- * Could the tab being dragged form a split with this row's tab?
- *
- * The dragged id travels in the drag payload, so this is answerable during
- * dragover — which is when the answer is needed, to decide whether the middle
- * of the row means "split" or just "reorder". One splittable tab, and not the
- * same one twice; the ROW's own eligibility is asked by the caller, which has
- * the row to hand.
- */
-export function splittableDrag(targetId: string): boolean {
-  const st = useStore.getState();
-  // One tab only: dragging a picked-out set is a reorder, never a split.
-  if (st.draggingTabIds.length !== 1) return false;
-  const dragged = st.draggingTabIds[0];
-  if (dragged === targetId) return false;
-  return splittable(st.tabs.find((x) => x.id === dragged));
-}
-
 export function Sidebar() {
   const [footMenu, setFootMenu] = useState<{
     left: number;
     bottom: number;
   } | null>(null);
+  const footMenuRef = useRef<HTMLDivElement>(null);
+  const closeFootMenu = useCallback(() => setFootMenu(null), []);
+  useSidebarMenu(footMenuRef, footMenu, closeFootMenu);
   const backgroundTaskCount = useStore((s) => s.backgroundTasks.length);
   const tabs = useStore((s) => s.tabs);
   const width = useStore((s) => s.sidebarWidth);
@@ -911,7 +409,10 @@ export function Sidebar() {
   // Unpinned, the sidebar waits off-screen and slides back while the
   // pointer is on it or on the strip along the window's edge.
   const peeking = useStore(sidebarShowing);
-  const setPeeking = useStore((s) => s.setSidebarPeeking);
+  const closing = useStore((s) => s.sidebarClosing);
+  const asideRef = useRef<HTMLElement>(null);
+  useEffect(() => { if (asideRef.current) asideRef.current.inert = !peeking; }, [peeking]);
+  useEffect(() => { sidebarHover.hold("footer-menu", footMenu !== null); return () => sidebarHover.hold("footer-menu", false); }, [footMenu]);
   // A drop onto a tab row stops propagating, so the list's own handler
   // never runs and its indicator would stay lit after the drag is over.
   // The end of a drag is the only event every case shares.
@@ -927,46 +428,49 @@ export function Sidebar() {
 
   // Drag the right edge. Pointer capture keeps the drag alive when the
   // cursor outruns the 4-pixel handle, which is most of the time.
+  const resizeCleanup = useRef<(() => void) | null>(null);
+  useEffect(() => () => { resizeCleanup.current?.(); sidebarHover.hold("keyboard", false); }, []);
   const startResize = (e: ReactPointerEvent) => {
-    e.preventDefault();
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    e.preventDefault(); resizeCleanup.current?.();
+    e.currentTarget.setPointerCapture(e.pointerId); sidebarHover.hold("resize", true);
     const move = (ev: PointerEvent) => setSidebarWidth(ev.clientX);
     const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", up); window.removeEventListener("blur", up);
+      sidebarHover.hold("resize", false); resizeCleanup.current = null;
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    resizeCleanup.current = up;
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", up); window.addEventListener("pointercancel", up); window.addEventListener("blur", up);
   };
 
   const groups = useStore((s) => s.groups);
   const activeTabId = useStore((s) => s.activeTabId);
   const setNewTabMenu = useStore((s) => s.setNewTabMenu);
   const addTab = useStore((s) => s.addTab);
-  const moveTab = useStore((s) => s.moveTab);
-  const assignToGroup = useStore((s) => s.assignToGroup);
   const setGroupParent = useStore((s) => s.setGroupParent);
+
+  const listRef = useRef<HTMLDivElement>(null);
+  const navigation = useSidebarNavigation(listRef, activeTabId, peeking);
 
   const today = tabs.filter((t) => !t.groupId && t.peek !== true);
 
 
   return (
     <aside
-      className={`sidebar${pinned ? "" : " floating"}${peeking ? " peeking" : ""}`}
+      className={`sidebar sidebar-experience${pinned ? "" : " floating"}${peeking && !closing ? " peeking" : ""}`}
+      ref={asideRef} aria-label={STR.common.sidebar.workspaceTabs} aria-hidden={!peeking}
+      onPointerDownCapture={() => sidebarHover.hold("keyboard", false)}
+      onKeyDownCapture={() => sidebarHover.hold("keyboard", true)}
+      onFocusCapture={(e) => sidebarHover.hold("keyboard", e.target.matches(":focus-visible") || e.target.matches("input,textarea"))}
+      onBlurCapture={(e) => { if (!(e.relatedTarget instanceof Node) || !e.currentTarget.contains(e.relatedTarget)) sidebarHover.hold("keyboard", false); }}
       // undefined, not a number, while the width has not been read: the
       // element then takes its stylesheet width rather than a guessed one.
-      style={{ width: width ?? undefined }}
-      onMouseEnter={() => setPeeking(true)}
+      style={{ width: width ?? undefined, "--sidebar-enter": `${SIDEBAR_MOTION.enter}ms`, "--sidebar-exit": `${SIDEBAR_MOTION.exit}ms` } as CSSProperties}
+      onMouseEnter={() => sidebarHover.enter()}
       // A menu opens *under the pointer* and is not a descendant of this
       // element, so the browser reports the pointer as having left — and
       // the sidebar slid away while the user was still standing on it.
       // While a menu of its own is open, the sidebar is in use.
-      onMouseLeave={() => {
-        const s2 = useStore.getState();
-        if (s2.sidebarMenu || s2.menu || s2.groupMenu || s2.folderPreviewGroupId)
-          return;
-        setPeeking(false);
-      }}
+      onMouseLeave={() => sidebarHover.leave()}
     >
       {/* "deep": everything in the head drags the window, including the
           brand and any empty gap — a bare attribute only counts direct hits
@@ -1034,11 +538,13 @@ export function Sidebar() {
       <ProfileBadges.Provider value={profileBadges}>
       <div
         className={`tab-list${listDrop ? " list-dropping" : ""}`}
+        ref={listRef} {...navigation}
         // Bare attribute means "only a direct click on this element": empty
         // list background drags the window, a click on a tab row does not
         // (the row is not itself a region, so the walk stops there).
         data-tauri-drag-region
         onDragOver={(e) => {
+          if (e.target !== e.currentTarget) { setListDrop(false); return; }
           if (
             e.dataTransfer.types.includes("text/tabverse-tab") ||
             e.dataTransfer.types.includes(GROUP_MIME)
@@ -1064,16 +570,14 @@ export function Sidebar() {
           openSidebarMenu(e.clientX, e.clientY, zone);
         }}
         onDrop={(e) => {
+          e.preventDefault();
           setListDrop(false);
           const draggedGroup = e.dataTransfer.getData(GROUP_MIME);
           if (draggedGroup) {
             setGroupParent(draggedGroup, null);
             return;
           }
-          for (const id of draggedIds(e.dataTransfer)) {
-            assignToGroup(id, null);
-            moveTab(id, null);
-          }
+          useStore.getState().moveTabsTo(draggedIds(e.dataTransfer), null, null);
         }}
       >
         {rootGroups(groups).map((g) => (
@@ -1135,6 +639,7 @@ export function Sidebar() {
             />
             <div
               className="ctx-menu foot-menu"
+              ref={footMenuRef}
               style={{ left: footMenu.left, bottom: footMenu.bottom }}
               onMouseDown={(e) => e.stopPropagation()}
             >

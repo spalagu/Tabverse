@@ -1,3 +1,4 @@
+import { closeTabAsking } from "../appCommands";
 import {
   Fragment,
   useEffect,
@@ -14,6 +15,7 @@ import {
 import {
   nextSplitCandidate,
   SPLIT_MAX_PANES,
+  splittable,
   useStore,
   type Tab,
 } from "../state/store";
@@ -361,7 +363,6 @@ function PaneActions({
   index,
   count,
   vertical,
-  focused,
   style,
 }: {
   tab: Tab;
@@ -371,7 +372,6 @@ function PaneActions({
   focused: boolean;
   style: CSSProperties;
 }) {
-  const closeTab = useStore((s) => s.closeTab);
   const moveSplitPane = useStore((s) => s.moveSplitPane);
   const separateFromSplit = useStore((s) => s.separateFromSplit);
   const addSplitPane = useStore((s) => s.addSplitPane);
@@ -400,8 +400,7 @@ function PaneActions({
   }, [menuOpen]);
 
   const closePane = () => {
-    if (focused) closeTab(tab.id);
-    else separateFromSplit(tab.id);
+    void closeTabAsking(tab.id, tab.dormant === true);
   };
 
   const back = vertical ? STR.common.splitMenu.moveUp : STR.common.splitMenu.moveLeft;
@@ -437,11 +436,7 @@ function PaneActions({
         <button
           className="pane-btn"
           title={
-            focused
-              ? STR.common.closeTabHint({
-                  keys: formatKeys(keysFor("close-tab")),
-                })
-              : STR.common.removePaneHint
+            STR.common.closeTabHint({ keys: formatKeys(keysFor("close-tab")) })
           }
           aria-label={STR.common.closePane}
           onMouseDown={(e) => e.stopPropagation()}
@@ -721,7 +716,19 @@ export function TabContent() {
 
   const placeless = live.filter((t) => t.peek !== true).length === 0;
   return (
-    <main className="content">
+    <main className="content" onDragOver={(e) => {
+      // Sorting stays a sidebar operation. Only crossing into the content
+      // plane arms split placement, so dwelling on a row cannot change the
+      // meaning of the drag and drag start does not remount the drop target.
+      const s = useStore.getState();
+      if (s.contentDrag !== null || s.draggingTabIds.length !== 1) return;
+      const id = s.draggingTabIds[0];
+      const source = s.tabs.find((tab) => tab.id === id);
+      const target = s.tabs.find((tab) => tab.id === s.activeTabId);
+      if (!source || !target || source.id === target.id || !splittable(source) || !splittable(target)) return;
+      e.preventDefault();
+      s.setContentDrag({ id, side: null });
+    }}>
       <div className="panes">
         {placeless && (
           <div className="placeholder">

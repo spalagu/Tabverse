@@ -42,7 +42,17 @@ export const STR = {
     peekSplitHint: (p: { title: string }) => `Split beside ${p.title}`,
     // Sidebar
     sidebar: {
-      deviationHint: "Away from its pinned page — click again to go back",
+      deviationHint: "Away from its pinned page — click its icon to return",
+      resetPinned: "Return to pinned page",
+      removeSaved: "Remove saved tab",
+      closeRunning: "Close running tab — keep saved entry",
+      renameTab: "Rename tab",
+      renameGroup: "Rename group",
+      workspaceTabs: "Workspace tabs",
+      sleeping: "Sleeping — click to open",
+      splitMember: (p: { index: number; total: number }) => `Split view ${p.index} of ${p.total}`,
+      closeProtected: (p: { title: string }) => `Close “${p.title}”? It has unsaved changes or running work.`,
+      closeUnverified: "The page did not confirm it is safe to close. Close it anyway?",
       attentionHint: "New output",
       mutedHint: "Muted — click to unmute",
       audibleHint: "Making sound — click to mute",
@@ -85,7 +95,8 @@ export const STR = {
     // Tab right-click menu
     tabMenu: {
       splitWithActive: "Split with active tab",
-      unsplit: "Unsplit",
+      unsplit: "Separate split into tabs",
+      separateMember: "Remove this tab from split",
       pin: "Pin",
       unpin: "Unpin",
       updatePinnedAddress: "Update pinned address",

@@ -2,7 +2,7 @@ import { confirmChoose } from "./components/Confirm";
 import { runFileCloseClaim } from "./components/files/fileCloseKey";
 import { leaves } from "./paneTree";
 import { configGet, terminalBackgroundTasksOf } from "./state/config";
-import { useStore, type Tab } from "./state/store";
+import { groupSubtreeIds, useStore, type Tab } from "./state/store";
 import { STR } from "./strings";
 import { stopAppShare } from "./share/framework/actions";
 import { coreLog } from "./errlog";
@@ -234,79 +234,154 @@ export async function detachTerminalTab(tab: Tab): Promise<boolean> {
   }
 }
 
-export function closeTabAsking(tabId: string): void {
-  const st = useStore.getState();
-  const tab = st.tabs.find((t) => t.id === tabId);
-  const isTauri =
-    typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+// One confirmation queue: concurrent close requests must not replace a
+// ConfirmHost question and leave its original promise hanging forever.
+let closeQueue = Promise.resolve();
+const closingTabs = new Map<string, Promise<void>>();
+const closeGenerations = new Map<string, number>();
+useStore.subscribe((next, previous) => {
+  for (const tab of previous.tabs) {
+    const now = next.tabs.find((t) => t.id === tab.id);
+    if (
+      !now ||
+      (now.dormant === true) !== (tab.dormant === true) ||
+      now.url !== tab.url ||
+      now.cwd !== tab.cwd ||
+      now.dirty !== tab.dirty ||
+      now.busy !== tab.busy ||
+      now.termId !== tab.termId ||
+      now.attachSessionId !== tab.attachSessionId ||
+      now.share?.shareId !== tab.share?.shareId
+    ) {
+      closeGenerations.set(tab.id, (closeGenerations.get(tab.id) ?? 0) + 1);
+    }
+  }
+});
 
-  if (isTauri && tab?.type === "terminal" && tab.busy === true) {
-    void (async () => {
-      let backgroundTasksOn = false;
-      try {
-        backgroundTasksOn =
-          terminalBackgroundTasksOf((await configGet()).values) === true;
-      } catch {
-        // A missing configuration answer means the opt-in was not proved.
-        // Preserve today's stop-on-close behavior.
-      }
-      if (!shouldAskBeforeClosingBusyTerminal(tab, backgroundTasksOn, true)) {
-        useStore.getState().closeTab(tabId);
+export function closeTabAsking(tabId: string, expectedDormant?: boolean): Promise<void> {
+  const state = useStore.getState();
+  const tab = state.tabs.find((t) => t.id === tabId);
+  if (!tab || (expectedDormant !== undefined && (tab.dormant === true) !== expectedDormant)) return Promise.resolve();
+  const pending = closingTabs.get(tabId);
+  if (pending) return pending;
+  const dormant = tab.dormant === true;
+  const generation = closeGenerations.get(tabId) ?? 0;
+  const stillCurrent = () => {
+    const now = useStore.getState().tabs.find((t) => t.id === tabId);
+    return now !== undefined && (now.dormant === true) === dormant &&
+      (closeGenerations.get(tabId) ?? 0) === generation;
+  };
+  const finish = () => { if (stillCurrent()) useStore.getState().closeTab(tabId, dormant); };
+  const native = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  const needsGuard = !dormant && (!!tab.dirty || !!tab.busy || !!tab.share ||
+    (native && tab.type === "browser" && !!tab.url));
+  // Simple closes remain synchronous, preserving rapid Cmd-W and neighbour
+  // handoff. The captured state prevents a second delivery becoming remove.
+  if (!needsGuard) { finish(); return Promise.resolve(); }
+  const task = closeQueue.then(async () => {
+    if (!stillCurrent()) return;
+    const text = STR.common.sidebar;
+    if (native && tab.type === "terminal" && tab.busy) {
+      let allowBackground = false;
+      try { allowBackground = terminalBackgroundTasksOf((await configGet()).values) === true; } catch { /* No opt-in proof. */ }
+      if (!stillCurrent()) return;
+      if (allowBackground) {
+        const choice = await confirmChoose(STR.term.backgroundCloseAsk({ title: tab.title }), [
+          { label: STR.term.backgroundKeepRunning, value: "background" },
+          { label: STR.term.backgroundStopTask, value: "stop", danger: true },
+        ]);
+        if (!stillCurrent()) return;
+        if (choice === "stop") finish();
+        else if (choice === "background") {
+          if (await detachTerminalTab(tab)) finish();
+          else await confirmChoose(STR.term.backgroundDetachFailed, [{ label: STR.common.dismiss, value: "dismiss" }]);
+        }
         return;
       }
-      const choice = await confirmChoose(
-        STR.term.backgroundCloseAsk({ title: tab.title }),
-        [
-          {
-            label: STR.term.backgroundKeepRunning,
-            value: "background",
-          },
-          {
-            label: STR.term.backgroundStopTask,
-            value: "stop",
-            danger: true,
-          },
-        ]
-      );
-      if (choice === "stop") {
-        useStore.getState().closeTab(tabId);
-      } else if (choice === "background") {
-        if (await detachTerminalTab(tab)) {
-          useStore.getState().closeTab(tabId);
-        } else {
-          await confirmChoose(STR.term.backgroundDetachFailed, [
-            { label: STR.common.dismiss, value: "dismiss" },
-          ]);
-        }
-      }
-    })();
-    return;
-  }
-  if (!isTauri || tab?.type !== "browser" || !tab.url || tab.dormant === true) {
-    st.closeTab(tabId);
-    return;
-  }
-  void (async () => {
+    }
+    if (native && tab.type === "browser" && tab.url) {
+      const safe = await browserCanClose(tabId);
+      if (!stillCurrent()) return;
+      if (safe === true && !tab.dirty) { finish(); return; }
+      const choice = await confirmChoose(safe === null ? text.closeUnverified : text.closeProtected({ title: tab.title }),
+        [{ label: STR.common.close, value: "close", danger: true }]);
+      if (choice === "close") finish();
+      return;
+    }
+    const choice = await confirmChoose(text.closeProtected({ title: tab.title }),
+      [{ label: STR.common.close, value: "close", danger: true }]);
+    if (choice === "close") finish();
+  }).catch((error) => coreLog("error", `Close kept tab ${tabId}: ${String(error)}`));
+  closingTabs.set(tabId, task);
+  closeQueue = task;
+  void task.finally(() => { if (closingTabs.get(tabId) === task) closingTabs.delete(tabId); });
+  return task;
+}
+
+/** null means no trustworthy answer, never implied permission to close. */
+async function browserCanClose(tabId: string): Promise<boolean | null> {
+  try {
+    const [{ listen }, { invoke }] = await Promise.all([
+      import("@tauri-apps/api/event"), import("@tauri-apps/api/core"),
+    ]);
+    let stop: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
-    const finish = (dirty: boolean) => {
+    let answer!: (value: boolean | null) => void;
+    const result = new Promise<boolean | null>((resolve) => { answer = resolve; });
+    const finish = (value: boolean | null) => {
       if (settled) return;
-      settled = true;
-      stop?.();
-      if (dirty) useStore.getState().setUnloadConfirm({ tabId, title: tab.title });
-      else useStore.getState().closeTab(tabId);
+      settled = true; clearTimeout(timer); stop?.(); answer(value);
     };
-    let stop: (() => void) | null = null;
-    const { listen } = await import("@tauri-apps/api/event");
-    stop = await listen<{ tabId: string; dirty: boolean }>(
-      "browser-unload-answer",
-      (e) => {
-        if (e.payload.tabId === tabId) finish(e.payload.dirty);
-      }
-    );
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("browser_ask_unload", { tabId }).catch(() => finish(false));
-    window.setTimeout(() => finish(false), 700);
-  })();
+    stop = await listen<{ tabId: string; dirty: boolean }>("browser-unload-answer", (event) => {
+      if (event.payload.tabId === tabId) finish(!event.payload.dirty);
+    });
+    if (settled) { stop(); return result; }
+    timer = setTimeout(() => finish(null), 700);
+    void invoke("browser_ask_unload", { tabId }).catch(() => finish(null));
+    return await result;
+  } catch { return null; }
+}
+
+/** Batch intent is captured once, and each runtime gets the same close guard. */
+export async function closeTabsAsking(ids: string[]): Promise<void> {
+  const targets = [...new Set(ids)].map((id) => ({ id,
+    dormant: useStore.getState().tabs.find((t) => t.id === id)?.dormant === true }));
+  for (const { id, dormant } of targets) await closeTabAsking(id, dormant);
+  useStore.getState().clearSelection();
+}
+
+/** Delete a folder only after every contained tab has passed normal close protection. */
+export async function deleteGroupAsking(groupId: string): Promise<boolean> {
+  const initial = useStore.getState();
+  const groupIds = new Set(groupSubtreeIds(initial.groups, groupId));
+  const ids = initial.tabs
+    .filter((tab) => tab.groupId !== null && groupIds.has(tab.groupId))
+    .map((tab) => tab.id);
+  for (const id of ids) {
+    const before = useStore.getState().tabs.find((tab) => tab.id === id);
+    if (!before) continue;
+    await closeTabAsking(id, before.dormant === true);
+    let current = useStore.getState().tabs.find((tab) => tab.id === id);
+    if (current && current.dormant === before.dormant) return false;
+    // A live saved tab first becomes dormant. The explicit folder deletion
+    // then removes that saved entry without waking it or bypassing its guard.
+    if (current?.dormant === true) {
+      await closeTabAsking(id, true);
+      current = useStore.getState().tabs.find((tab) => tab.id === id);
+      if (current) return false;
+    }
+  }
+  const state = useStore.getState();
+  if (
+    state.tabs.some(
+      (tab) => tab.groupId !== null && groupIds.has(tab.groupId)
+    )
+  ) {
+    return false;
+  }
+  state.deleteGroup(groupId);
+  return true;
 }
 
 /** Bridge the native routes — the menu, and a page reporting a key — in. */

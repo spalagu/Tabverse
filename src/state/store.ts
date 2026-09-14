@@ -909,7 +909,8 @@ export interface AppStore {
     reveal: { path: string; line?: number; nonce: number }
   ) => void;
   showCommand: (text: string, cwd?: string) => void;
-  closeTab: (id: string) => void;
+  /** expectedDormant captures the presented action; stale close events cannot become remove. */
+  closeTab: (id: string, expectedDormant?: boolean) => void;
   closeTabs: (
     ids: string[],
     askFinal?: (tab: Tab) => Promise<boolean>
@@ -922,6 +923,8 @@ export interface AppStore {
   activateIndex: (i: number) => void;
   cycleTab: (delta: number) => void;
   moveTab: (id: string, beforeId: string | null) => void;
+  /** One atomic placement. Only an explicit destination changes retention. */
+  moveTabsTo: (ids: string[], groupId: string | null, beforeId: string | null) => boolean;
   setTabTitle: (id: string, title: string) => void;
   renameTab: (id: string, title: string) => void;
   markTabExited: (id: string) => void;
@@ -958,6 +961,8 @@ export interface AppStore {
   sidebarPinned: boolean | null;
   /** Unpinned and currently slid back in because the pointer is on it. */
   sidebarPeeking: boolean;
+  /** Native obstruction stays held until the exit motion completes. Not persisted. */
+  sidebarClosing: boolean;
   setSidebarPeeking: (on: boolean) => void;
   setSidebarWidth: (px: number) => void;
   toggleSidebar: () => void;
@@ -1095,10 +1100,11 @@ function dropTabState(ids: string[]) {
 }
 
 const CLOSED_LIMIT = 10;
-let closedTabs: Array<{ tab: Tab; index: number; closedAt: number }> = [];
+let closedTabs: ClosedEntry[] = [];
 
 export interface ClosedEntry {
   tab: Tab;
+  groups?: Group[];
   /** Where the tab sat when it closed; reopen puts it back there. */
   index: number;
   /** When it closed (the moment rememberClosed ran): the "3m ago" the
@@ -1106,7 +1112,7 @@ export interface ClosedEntry {
   closedAt: number;
 }
 
-function rememberClosed(tab: Tab, index: number) {
+function rememberClosed(tab: Tab, index: number, groups: Group[] = []) {
   // A remote tab is someone else's session joined by ticket, and a settings
   // tab is a singleton the app reopens on demand — neither is work to
   // restore, so neither is kept.
@@ -1114,7 +1120,20 @@ function rememberClosed(tab: Tab, index: number) {
     dropTabState([tab.id]);
     return;
   }
-  closedTabs = [{ tab, index, closedAt: Date.now() }, ...closedTabs];
+  // Restoring an entry is not permission to replay one-shot execution or
+  // reuse a dead native handle. Retain the durable workspace identity.
+  const saved: Tab = { ...tab, termId: undefined, attachSessionId: undefined,
+    runOnStart: undefined, command: undefined, share: undefined,
+    ...(tab.panes ? paneFields(paneTreeSnapshot(tab.panes)) : {}) };
+  const ancestry: Group[] = [];
+  const seen = new Set<string>();
+  let group = groups.find((g) => g.id === tab.groupId);
+  while (group && !seen.has(group.id)) {
+    seen.add(group.id); ancestry.unshift({ ...group });
+    group = groups.find((g) => g.id === group!.parentId);
+  }
+  closedTabs = [{ tab: saved, index, groups: ancestry, closedAt: Date.now() },
+    ...closedTabs.filter((entry) => entry.tab.id !== tab.id)];
   const evicted = closedTabs.slice(CLOSED_LIMIT);
   closedTabs = closedTabs.slice(0, CLOSED_LIMIT);
   if (evicted.length > 0) dropTabState(evicted.map((e) => e.tab.id));
@@ -1381,7 +1400,7 @@ function demoteTab(t: Tab): Tab {
     ...t,
     groupId: null,
     pinnedUrl: undefined,
-    dormant: undefined,
+    dormant: t.dormant,
   };
 }
 
@@ -1528,6 +1547,11 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         next = { ...next, split };
         (patch as Partial<AppStore>).split = split;
       }
+      const selected = next.selectedTabIds.filter((id) => next.tabs.some((t) => t.id === id));
+      if (selected.length !== next.selectedTabIds.length) {
+        next = { ...next, selectedTabIds: selected };
+        patch.selectedTabIds = selected;
+      }
       persist(next);
       return patch;
     });
@@ -1610,6 +1634,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
     draggingTabIds: [],
     closedCount: 0,
     sidebarPeeking: false,
+    sidebarClosing: false,
 
     splitWith: (id) => {
       const s = get();
@@ -1653,6 +1678,11 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         return false;
       }
       const cur = s.split;
+      if (cur?.ids.includes(targetId) &&
+          (cur.ids.includes(draggedId) || cur.ids.length >= SPLIT_MAX_PANES)) {
+        set({ contentDrag: null });
+        return false;
+      }
       let group: SplitGroup;
       if (
         cur !== null &&
@@ -1672,27 +1702,9 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
           vertical: cur?.vertical ?? false,
         };
       }
-      const rest = s.tabs.filter((t) => t.id !== draggedId);
-      const placed =
-        target.groupId !== null
-          ? promoteTab(dragged, target.groupId)
-          : demoteTab(dragged);
-      const at = rest.findIndex((t) => t.id === targetId);
-      const order =
-        at < 0
-          ? [...rest, placed]
-          : side === "left"
-            ? [...rest.slice(0, at), placed, ...rest.slice(at)]
-            : [...rest.slice(0, at + 1), placed, ...rest.slice(at + 1)];
-      // A split only shows when one of its members is the tab in front, and
-      // the one the user just placed is the one they are looking at.
-      commit(() => ({
-        tabs: order,
-        split: group,
-        activeTabId: draggedId,
-        contentDrag: null,
-        menu: null,
-      }));
+      // Layout is not filing: keep every member's retention, folder and
+      // sidebar position unchanged, exactly like the menu entry point.
+      commit(() => ({ split: group, activeTabId: draggedId, contentDrag: null, menu: null }));
       return true;
     },
 
@@ -1707,6 +1719,11 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         return false;
       }
       const cur = s.split;
+      if (cur?.ids.includes(active.id) &&
+          (cur.ids.includes(other.id) || cur.ids.length >= SPLIT_MAX_PANES)) {
+        set({ contentDrag: null });
+        return false;
+      }
       let group: SplitGroup;
       if (
         cur !== null &&
@@ -1725,29 +1742,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
           vertical: cur?.vertical ?? false,
         };
       }
-      // Same placement rule as splitOnTab: the pair shows at the position of
-      // the tab that was already on screen, so the dragged one comes to sit
-      // beside it rather than leaving the merged row somewhere else.
-      const rest = s.tabs.filter((t) => t.id !== id);
-      const anchor = group.ids.find((x) => x !== id) ?? active.id;
-      const at = rest.findIndex((t) => t.id === anchor);
-      const before = group.ids.indexOf(id) < group.ids.indexOf(anchor);
-      const placed =
-        active.groupId !== null
-          ? promoteTab(other, active.groupId)
-          : demoteTab(other);
-      const order =
-        at < 0
-          ? [...rest, placed]
-          : before
-            ? [...rest.slice(0, at), placed, ...rest.slice(at)]
-            : [...rest.slice(0, at + 1), placed, ...rest.slice(at + 1)];
-      commit(() => ({
-        tabs: order,
-        split: group,
-        contentDrag: null,
-        menu: null,
-      }));
+      commit(() => ({ split: group, contentDrag: null, menu: null }));
       return true;
     },
 
@@ -1795,11 +1790,9 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         const g = s.split;
         if (g === null || !g.ids.includes(id)) return {};
         const ids = g.ids.filter((x) => x !== id);
-        let activeTabId = s.activeTabId;
-        if (s.activeTabId === id) {
-          const at = g.ids.indexOf(id);
-          activeTabId = g.ids[at + 1] ?? g.ids[at - 1] ?? s.activeTabId;
-        }
+        // Detaching the current member means looking at that member on
+        // its own, not jumping to a different pane.
+        const activeTabId = s.activeTabId;
         const split =
           ids.length >= 2
             ? { ids, ratios: equalRatios(ids.length), vertical: g.vertical }
@@ -2186,6 +2179,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       const id = s.peekTabId;
       if (id === null) return null;
       const sourceId = s.tabs.find((t) => t.id === id)?.peekOver ?? null;
+      if (sourceId && s.split?.ids.includes(sourceId) && s.split.ids.length >= SPLIT_MAX_PANES) return null;
       const promoted = get().promotePeek();
       if (promoted === null || sourceId === null) return promoted;
       const source = get().tabs.find((t) => t.id === sourceId);
@@ -2338,9 +2332,10 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       });
     },
 
-    closeTab: (id) => {
+    closeTab: (id, expectedDormant) => {
       const dying = get().tabs.find((t) => t.id === id);
-      if (!dying) return;
+      if (!dying || (expectedDormant !== undefined &&
+          (dying.dormant === true) !== expectedDormant)) return;
       if (dying.peek === true) {
         if (get().peekTabId === id) {
           get().discardPeek();
@@ -2350,8 +2345,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         }
         return;
       }
-      if (dying.groupId !== null) {
-        if (dying.dormant === true) return; // already asleep; nothing to do
+      if (dying.groupId !== null && dying.dormant !== true) {
         commit((s) => {
           const t = s.tabs.find((x) => x.id === id);
           if (!t || t.groupId === null || t.dormant === true) return {};
@@ -2390,7 +2384,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       // files, the draft, the directory. rememberClosed evicts the oldest
       // entry and reclaims that one, so nothing leaks — and a crash in
       // between is caught by the boot sweep.
-      rememberClosed(dying, get().tabs.findIndex((t) => t.id === id));
+      rememberClosed(dying, get().tabs.findIndex((t) => t.id === id), get().groups);
       set({ closedCount: closedTabs.length });
       commit((s) => {
         const idx = s.tabs.findIndex((t) => t.id === id);
@@ -2428,7 +2422,9 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
 
 
     closeTabs: async (ids, askFinal) => {
-      for (const id of ids) {
+      const targets = [...new Set(ids)].map((id) => ({ id,
+        dormant: get().tabs.find((t) => t.id === id)?.dormant === true }));
+      for (const { id, dormant } of targets) {
         // Re-read each turn: an answer awaited between closes may have
         // watched the list change underneath it, and an id that stopped
         // existing between click and close is simply done.
@@ -2441,7 +2437,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
           // page's own say. Without an asker, the close proceeds.
           if (askFinal && !(await askFinal(t))) continue;
         }
-        get().closeTab(id);
+        get().closeTab(id, dormant);
       }
       // The picking has done its job; a selection left standing over rows
       // that no longer exist would rope ghosts into the next drag.
@@ -2474,8 +2470,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
 
     activateIndex: (i) => {
       const { tabs, groups, split } = get();
-      // ⌘n means "the n-th row I can see", in sidebar drawing order — a
-      // split counts once, and landing on it activates its first pane.
+      // ⌘n names the n-th visible full row, including each split member.
       const visible = visibleOrdered(tabs, groups, split);
       if (i >= 0 && i < visible.length) get().activateTab(visible[i].id);
     },
@@ -2484,13 +2479,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       const { tabs, groups, activeTabId, split } = get();
       const visible = visibleOrdered(tabs, groups, split);
       if (visible.length === 0) return;
-      const fromId =
-        split !== null &&
-        activeTabId !== null &&
-        split.ids.includes(activeTabId) &&
-        activeTabId !== split.ids[0]
-          ? split.ids[0]
-          : activeTabId;
+      const fromId = activeTabId;
       const idx = Math.max(
         0,
         visible.findIndex((t) => t.id === fromId)
@@ -2641,7 +2630,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         renamed: src.renamed,
         cwd: src.cwd,
         url: src.url,
-        groupId: src.groupId,
+        groupId: null,
       });
       // Right after its source, not at the end: it is a continuation of
       // that work and belongs beside it.
@@ -2664,9 +2653,39 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       // restores the work: the same id finds the same open files, draft and
       // directory it had when it was closed.
       commit((s) => {
+        const wasPinned = entry.tab.groupId !== null;
+        const nearestExistingAncestor = [...(entry.groups ?? [])]
+          .reverse()
+          .find((group) => s.groups.some((current) => current.id === group.id));
+        const preset = s.groups.find((group) => group.preset === entry.tab.type);
+        let destination = !wasPinned
+          ? null
+          : s.groups.some((group) => group.id === entry.tab.groupId)
+            ? entry.tab.groupId
+            : nearestExistingAncestor?.id ?? preset?.id ?? null;
+        let groups = s.groups;
+        if (wasPinned && destination === null) {
+          destination = "saved-tabs";
+          if (!groups.some((group) => group.id === destination)) {
+            groups = [
+              ...groups,
+              {
+                id: destination,
+                name: "Pinned",
+                collapsed: false,
+                colorIndex: 0,
+                keepWhenEmpty: true,
+              },
+            ];
+          }
+        }
+        // Reopening content must not resurrect a folder the user explicitly
+        // deleted after the close. Use the closest surviving filing location.
+        const restored = { ...entry.tab, groupId: destination };
         const tabs = [...s.tabs];
-        tabs.splice(Math.min(entry.index, tabs.length), 0, entry.tab);
-        return { tabs, activeTabId: entry.tab.id, closedCount: closedTabs.length };
+        tabs.splice(Math.min(entry.index, tabs.length), 0, restored);
+        return { tabs, groups, activeTabId: restored.dormant === true ? s.activeTabId : restored.id,
+          closedCount: closedTabs.length };
       });
       return entry.tab.id;
     },
@@ -2693,7 +2712,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
     toggleSidebar: () => {
       const previous = get().sidebarPinned;
       const pinned = !previous;
-      set({ sidebarPinned: pinned, sidebarPeeking: false });
+      set({ sidebarPinned: pinned, sidebarPeeking: false, sidebarClosing: false });
       writeSetting(CONFIG_KEYS.sidebarPinned, pinned, previous);
       requestTrafficLightReapply();
     },
@@ -2707,6 +2726,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       const peeking = on && !get().sidebarPinned;
       set((s) => ({
         sidebarPeeking: peeking,
+        sidebarClosing: false,
         ...(!peeking && s.folderPreviewGroupId === null && s.pageFreeze !== null
           ? { pageFreeze: null }
           : {}),
@@ -2816,8 +2836,35 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
 
     clearSelection: () => set({ selectedTabIds: [], selectionAnchor: null }),
 
+    moveTabsTo: (ids, groupId, beforeId) => {
+      const state = get();
+      const picked = new Set(ids);
+      if (groupId !== null && !state.groups.some((g) => g.id === groupId)) return false;
+      if (beforeId !== null && (picked.has(beforeId) ||
+          !state.tabs.some((t) => t.id === beforeId && t.groupId === groupId))) return false;
+      const ordered = visibleOrdered(state.tabs, state.groups);
+      const shown = new Set(ordered.map((t) => t.id));
+      const moving = [...ordered, ...state.tabs.filter((t) => !shown.has(t.id))]
+        .filter((t) => picked.has(t.id));
+      if (!moving.length) return false;
+      commit((s) => {
+        const rest = s.tabs.filter((t) => !picked.has(t.id));
+        let at = beforeId === null ? -1 : rest.findIndex((t) => t.id === beforeId);
+        if (at < 0) {
+          // Append to this folder, not the next raw-array folder.
+          const last = rest.reduce((found, t, index) => t.groupId === groupId ? index : found, -1);
+          at = last < 0 ? rest.length : last + 1;
+        }
+        const placed = moving.map((t) => t.groupId === groupId ? t :
+          groupId === null ? demoteTab(t) : promoteTab(t, groupId));
+        return { tabs: [...rest.slice(0, at), ...placed, ...rest.slice(at)] };
+      });
+      return true;
+    },
+
     moveTabs: (ids, beforeId) =>
       commit((s) => {
+        if (beforeId !== null && (ids.includes(beforeId) || !s.tabs.some((t) => t.id === beforeId))) return {};
         // The order among the moved tabs is the order they already had:
         // dragging three rows must not shuffle them on arrival.
         const moving = s.tabs.filter((t) => ids.includes(t.id));
@@ -2931,18 +2978,24 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         const parentId = g.parentId;
         const parentAlive =
           parentId !== undefined && s.groups.some((x) => x.id === parentId);
+        const fallbackId = "saved-tabs";
+        const needsFallback = !parentAlive && s.tabs.some((t) => t.groupId === groupId &&
+          !s.groups.some((candidate) => candidate.preset === t.type));
+        const keptGroups = needsFallback && !s.groups.some((item) => item.id === fallbackId)
+          ? [...s.groups, { id: fallbackId, name: "Pinned", collapsed: false, colorIndex: 0, keepWhenEmpty: true as const }]
+          : s.groups;
         return {
           tabs: s.tabs.map((t) =>
             t.groupId === groupId
               ? parentAlive
                 ? promoteTab(t, parentId)
-                : demoteTab(t)
+                : promoteTab(t, s.groups.find((candidate) => candidate.preset === t.type)?.id ?? fallbackId)
               : t
           ),
           // Subfolders adopt the deleted folder's parent (or become
           // roots), keeping their own subtrees intact. Ones that end up
           // empty and were not made-as-a-place are swept by commit.
-          groups: s.groups
+          groups: keptGroups
             .filter((x) => x.id !== groupId)
             .map((x) =>
               x.parentId === groupId ? { ...x, parentId } : x
@@ -3616,7 +3669,7 @@ function subtreeEarnsItsKeep(
 export function visibleOrdered(
   tabs: Tab[],
   groups: Group[],
-  split?: SplitGroup | null
+  _split?: SplitGroup | null
 ): Tab[] {
   const out: Tab[] = [];
   const visited = new Set<string>();
@@ -3643,10 +3696,7 @@ export function visibleOrdered(
   );
   const today = tabs.filter((t) => !t.groupId && t.peek !== true);
   const all = [...out, ...stranded, ...today];
-  const valid = validSplit(split, tabs);
-  if (valid === null) return all;
-  const merged = new Set(valid.ids.slice(1));
-  return all.filter((t) => !merged.has(t.id));
+  return all; // Each split member remains an independently addressable sidebar row.
 }
 
 /**

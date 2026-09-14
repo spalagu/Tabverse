@@ -1,0 +1,54 @@
+/* Design §8. Scoped to the desktop adapter; shared surfaces keep their themes. */
+.sidebar-experience { --indent: 12px; transition: none; }
+.sidebar-experience .tab-list { padding: 8px; scrollbar-gutter: stable; overscroll-behavior: contain; }
+.sidebar-experience .tab-row { height: 34px; gap: 6px; margin-block: 2px; border-radius: 8px; padding-block: 0; }
+.sidebar-experience .tab-row.has-subtitle { height: 44px; }
+.sidebar-experience .tab-row.active { background: color-mix(in srgb, var(--accent) 14%, var(--bg-side)); box-shadow: none; color: var(--fg); }
+.sidebar-experience .tab-row.co-active:not(.active) { background: var(--bg-hover); box-shadow: none; }
+.sidebar-experience .tab-row.selected { outline: 1.5px solid var(--accent); outline-offset: -1.5px; box-shadow: none; }
+.sidebar-experience .tab-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.sidebar-experience .tab-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.sidebar-experience .tab-row.dormant { opacity: 1; }
+.sidebar-experience .tab-row.dormant .tab-icon-face { opacity: .6; }
+.sidebar-experience .tab-row.exited .tab-title { text-decoration: none; opacity: 1; }
+.sidebar-experience .tab-main, .sidebar-experience .group-toggle, .sidebar-experience .group-editing {
+  display: flex; align-items: center; flex: 1; min-width: 0; align-self: stretch;
+  padding: 0; border: 0; border-radius: 5px; background: transparent; color: inherit; font: inherit; text-align: left;
+}
+.sidebar-experience .tab-main, .sidebar-experience .group-toggle { cursor: default; }
+.sidebar-experience .tab-lines { line-height: 16px; }
+.sidebar-experience .tab-title { font-size: 13px; }
+.sidebar-experience .tab-subtitle-wrap { min-width: 0; height: 14px; line-height: 14px; }
+.sidebar-experience .tab-subtitle { font-size: 11px; opacity: 1; color: var(--muted); direction: ltr; }
+.sidebar-experience .tab-icon-action {
+  flex: none; display: inline-grid; place-items: center; position: relative; width: 24px; height: 26px;
+  border: 0; border-radius: 5px; padding: 0; background: transparent; color: inherit;
+}
+.sidebar-experience .tab-icon-face, .sidebar-experience .tab-icon-share { display: inline-flex; align-items: center; justify-content: center; }
+.sidebar-experience .tab-icon-face .tab-icon { width: 16px; height: 16px; }
+.sidebar-experience .tab-icon-share { position: absolute; inset: 0; opacity: 0; color: var(--accent); }
+.sidebar-experience .tab-icon-action.can-share:is(:hover,:focus-visible) .tab-icon-face { opacity: 0; }
+.sidebar-experience .tab-icon-action.can-share:is(:hover,:focus-visible) .tab-icon-share { opacity: 1; }
+.sidebar-experience .tab-icon-action.sharing::after { content: ""; position: absolute; right: 0; bottom: 3px; width: 5px; height: 5px; background: var(--ok); border-radius: 50%; }
+.sidebar-experience .tab-close { flex: none; width: 24px; height: 24px; opacity: 0; pointer-events: none; }
+.sidebar-experience .tab-row:is(:hover,:focus-within,.active) .tab-close,
+.sidebar-experience .group-head:is(:hover,:focus-within) .tab-close { opacity: 1; pointer-events: auto; }
+.sidebar-experience .tab-split-mark { flex: none; color: var(--muted); font-size: 13px; line-height: 1; }
+.sidebar-experience .tab-row.active .tab-split-mark { color: var(--accent); }
+.sidebar-experience :is(.tab-main,.group-toggle,.tab-icon-action,.tab-close,.tab-audio):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; box-shadow: none; }
+.sidebar-experience .tab-rename { min-width: 0; flex: 1; width: 0; font: inherit; }
+.sidebar-experience .group-head { height: 30px; border-left: 0; border-radius: 7px; margin-block: 3px; }
+.sidebar-experience .group-toggle, .sidebar-experience .group-editing { gap: 7px; }
+.sidebar-experience .group-name { font-size: 12px; font-weight: 600; letter-spacing: 0; }
+.sidebar-experience .group-count { font-variant-numeric: tabular-nums; opacity: .8; }
+.sidebar-experience .zone-divider { margin-block: 10px 6px; }
+.sidebar-experience .group-tail-drop { min-height: 8px; }
+.sidebar-experience.floating { border-right: 1px solid var(--line); border-radius: 0 10px 10px 0; transform: translateX(calc(-100% - 8px)); transition: transform var(--sidebar-exit,200ms) cubic-bezier(.4,0,.2,1); }
+.sidebar-experience.floating.peeking { transform: translateX(0); transition-duration: var(--sidebar-enter,180ms); transition-timing-function: cubic-bezier(.16,1,.3,1); }
+.sidebar-context-menu { max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto; animation: menu-in 120ms ease-out; }
+@media (hover:none), (pointer:coarse) {
+  .sidebar-experience .tab-row { min-height: 44px; }
+  .sidebar-experience .tab-close { opacity: 1; pointer-events: auto; width: 40px; height: 40px; }
+  .sidebar-experience .tab-icon-action { width: 40px; height: 40px; }
+}
+@media (prefers-reduced-motion:reduce) { .sidebar-experience.floating { transition-duration: .01ms !important; } }
