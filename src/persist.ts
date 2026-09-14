@@ -9,8 +9,6 @@ const DEBOUNCE_MS = 300;
 /** The whole tab/group session lives under this scope. */
 export const SESSION_SCOPE = "session";
 
-export const THEME_SCOPE = "theme";
-
 export const tabScope = (module: string, tabId: string) =>
   `${module}:${tabId}`;
 
@@ -104,24 +102,34 @@ const ops: StateOps = isTauri ? tauriOps : localOps;
 /** Serialized, not-yet-written payloads, one slot per scope (last one wins). */
 const pending = new Map<string, string>();
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Scopes whose current durable value could not be read safely. */
+const writeBlocked = new Set<string>();
 
 /**
  * Per-scope operation chain. A save that is already in flight when a delete
  * for the same scope arrives must land before it, or the delete would be
  * undone and the file resurrected as an orphan. Chaining every backend call
- * on its scope keeps them in call order; ops never reject (they log), so a
- * failed link never stalls the chain.
+ * on its scope keeps them in call order. The caller receives the operation's
+ * failure, while the stored tail consumes it so a later explicit recovery
+ * operation is not permanently stalled by an earlier failure.
  */
 const chains = new Map<string, Promise<void>>();
 
 function enqueue(scope: string, op: () => Promise<void>): Promise<void> {
   const next = (chains.get(scope) ?? Promise.resolve()).then(op);
-  chains.set(scope, next);
+  chains.set(scope, next.catch(() => undefined));
   return next;
 }
 
 function logFailure(what: string, scope: string, err: unknown) {
   coreLog("error", `state ${what} failed for scope "${scope}": ${String(err)}`);
+}
+
+/** Refuse future writes after a current-format domain decoder rejects data. */
+export function markStateInvalid(scope: string, reason: string): void {
+  if (!validScope(scope)) return;
+  writeBlocked.add(scope);
+  logFailure("decode", scope, reason);
 }
 
 /** Write a scope's buffered payload now instead of waiting for the timer. */
@@ -134,9 +142,12 @@ function flushScope(scope: string): Promise<void> {
   const json = pending.get(scope);
   if (json === undefined) return Promise.resolve();
   pending.delete(scope);
-  return enqueue(scope, () =>
-    ops.save(scope, json).catch((e) => logFailure("save", scope, e))
-  );
+  return enqueue(scope, () => ops.save(scope, json)).catch((error) => {
+    // Keep the newest payload retryable. If another save arrived while this
+    // one was in flight, that newer buffered value already wins.
+    if (!pending.has(scope)) pending.set(scope, json);
+    throw error;
+  });
 }
 
 /**
@@ -145,6 +156,10 @@ function flushScope(scope: string): Promise<void> {
  */
 export function saveState(scope: string, data: unknown): void {
   if (!validScope(scope)) return;
+  if (writeBlocked.has(scope)) {
+    logFailure("save", scope, "current state is unreadable; reset it explicitly first");
+    return;
+  }
   let json: string;
   try {
     json = JSON.stringify(data);
@@ -158,7 +173,10 @@ export function saveState(scope: string, data: unknown): void {
   if (timer !== undefined) clearTimeout(timer);
   timers.set(
     scope,
-    setTimeout(() => void flushScope(scope), DEBOUNCE_MS)
+    setTimeout(
+      () => void flushScope(scope).catch((e) => logFailure("save", scope, e)),
+      DEBOUNCE_MS
+    )
   );
 }
 
@@ -182,13 +200,21 @@ export async function loadStateResult<T>(scope: string): Promise<StateLoadResult
       raw = await ops.load(scope);
     } catch (e) {
       logFailure("load", scope, e);
+      writeBlocked.add(scope);
       return { kind: "read-failed" };
     }
   }
-  if (raw === null) return { kind: "missing" };
+  if (raw === null) {
+    writeBlocked.delete(scope);
+    return { kind: "missing" };
+  }
   try {
-    return { kind: "value", value: JSON.parse(raw) as T };
+    const value = JSON.parse(raw) as T;
+    writeBlocked.delete(scope);
+    return { kind: "value", value };
   } catch {
+    logFailure("parse", scope, "stored value is not valid JSON");
+    writeBlocked.add(scope);
     return { kind: "invalid-json" };
   }
 }
@@ -229,16 +255,29 @@ export function deleteState(scope: string): void {
     timers.delete(scope);
   }
   pending.delete(scope);
-  void enqueue(scope, () =>
-    ops.remove(scope).catch((e) => logFailure("delete", scope, e))
-  );
+  void enqueue(scope, async () => {
+    await ops.remove(scope);
+    writeBlocked.delete(scope);
+  }).catch((e) => logFailure("delete", scope, e));
+}
+
+/** Delete for user-facing/reset flows that must know whether it succeeded. */
+export async function deleteStateNow(scope: string): Promise<void> {
+  if (!validScope(scope)) throw new Error(`invalid state scope: ${scope}`);
+  const timer = timers.get(scope);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    timers.delete(scope);
+  }
+  pending.delete(scope);
+  await enqueue(scope, async () => {
+    await ops.remove(scope);
+    writeBlocked.delete(scope);
+  });
 }
 
 export async function listScopes(): Promise<string[]> {
-  const stored = await ops.list().catch((e) => {
-    logFailure("list", "*", e);
-    return [] as string[];
-  });
+  const stored = await ops.list();
   // A buffered save is already real to callers (loadState serves it), so its
   // scope is listed too — cleanup must see a save that has not landed yet.
   return [...new Set([...stored, ...pending.keys()])];

@@ -17,10 +17,12 @@ import { FolderIcon, TAB_ICONS } from "./icons";
 export function TabRowContent({
   tab,
   titleSlot,
+  iconSlot,
   subtitleSlot,
 }: {
   tab: Tab;
   titleSlot?: ReactNode;
+  iconSlot?: ReactNode;
   subtitleSlot?: ReactNode;
 }) {
   const Icon = TAB_ICONS[tab.type];
@@ -48,6 +50,7 @@ export function TabRowContent({
       Icon={Icon}
       favicon={favicon}
       titleSlot={titleSlot}
+      iconSlot={iconSlot}
       subtitleSlot={subtitleSlot}
       deviationHint={STR.common.sidebar.deviationHint}
       attentionHint={STR.common.sidebar.attentionHint}

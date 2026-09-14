@@ -76,7 +76,7 @@ jobs:
           mkdir -p "$output_dir"
           asset="Tabverse_${version}_${short_commit}_macos-${{ matrix.artifact_arch }}.dmg"
           cp "$source" "$output_dir/$asset"
-          cp docs/acceptance/macos-v3.md "$output_dir/验收说明.md"
+          cp docs/acceptance/macos-v3.md "$output_dir/acceptance-instructions.md"
           (cd "$output_dir" && shasum -a 256 "$asset" > SHA256SUMS)
           (cd "$output_dir" && shasum -a 256 -c SHA256SUMS)
 

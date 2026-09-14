@@ -16,11 +16,9 @@
 //! stores those, and writing them back would risk clobbering a fresher
 //! value with a stale one.
 //!
-//! The snapshot is login secrets in plain text — like WebKit's own cookie
-//! store next door, but tighter: 0600 and session cookies only. Cookie
-//! *values* never go to the log, only counts and names' domains.
+//! The snapshot is encrypted and stored in app.db's credential vault.
+//! Cookie values never go to the log, only counts and domains.
 
-use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
@@ -29,10 +27,7 @@ use std::time::Duration;
 use tauri::webview::cookie::{Cookie, Expiration, SameSite};
 use tauri::{AppHandle, Manager};
 
-// A new namespace is intentional: the key bundle is not derived from or
-// compatible with the three legacy Keychain items, so old ciphertext must
-// never be opened as though it used the new cookie key.
-const FILE_NAME: &str = "browser-session-cookies.v2.sealed";
+const VAULT_ID: &str = "browser-session-cookies-v2";
 
 const SEALED_MAGIC: &[u8] = b"TABVERSECOOKIES2";
 
@@ -66,7 +61,7 @@ fn unseal(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// How long the snapshot worker waits before acting on a request, so a
-/// burst of page loads (a redirect chain) becomes one disk write.
+/// burst of page loads (a redirect chain) becomes one database write.
 const DEBOUNCE: Duration = Duration::from_millis(200);
 
 /// Fallback snapshot cadence for logins that never navigate (pure-XHR SPA
@@ -113,20 +108,12 @@ pub fn request_snapshot() {
 /// executed is proof the main thread is past all that: commands arrive over
 /// IPC, and IPC is only pumped by the ordinary event loop.
 pub fn ensure_restored(app: &AppHandle) {
-    RESTORE_ONCE.call_once(|| {
-        restore(app);
-        RESTORED.store(true, Ordering::Release);
-    });
-}
-
-fn file_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    match crate::state_dir(app) {
-        Ok(dir) => Some(dir.join(FILE_NAME)),
-        Err(e) => {
-            eprintln!("[cookies] no state dir, session cookies not kept: {e}");
-            None
+    RESTORE_ONCE.call_once(|| match restore(app) {
+        Ok(()) => RESTORED.store(true, Ordering::Release),
+        Err(error) => {
+            eprintln!("[cookies] restore failed; snapshot writes remain blocked: {error}")
         }
-    }
+    });
 }
 
 /// Start the snapshot worker. Deliberately does NOT restore — see
@@ -142,46 +129,30 @@ pub fn init(app: &AppHandle) {
     eprintln!("[cookies] snapshot worker running");
 }
 
-fn restore(app: &AppHandle) {
-    let Some(path) = file_path(app) else { return };
-    let data = match std::fs::read(&path) {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-        Err(e) => {
-            eprintln!("[cookies] cannot read snapshot: {e}");
-            return;
-        }
+fn restore(app: &AppHandle) -> Result<(), String> {
+    let store = crate::app_state_store(app)?;
+    let data = match store.load_credential_vault(VAULT_ID) {
+        Ok(Some(data)) => data,
+        Ok(None) => return Ok(()),
+        Err(e) => return Err(format!("cannot read snapshot from app.db: {e:#}")),
     };
     if !data.starts_with(SEALED_MAGIC) {
-        // Not this app's format. There is no second format to fall back to
-        // and no reader for anything older, so it is left alone and
-        // overwritten by the next snapshot.
-        eprintln!("[cookies] snapshot is not in this app's format, ignoring it");
-        return;
+        return Err("snapshot is not in the current format".into());
     }
-    let key = match crate::credentials::cookie_key() {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("[cookies] no snapshot key, cookies not restored: {e}");
-            return;
-        }
-    };
-    let data = match unseal(&key, &data) {
-        Ok(p) => p,
-        Err(e) => {
-            // A copied-over file or a lost key: treat as no snapshot rather
-            // than failing startup over it.
-            eprintln!("[cookies] {e}; ignoring snapshot");
-            return;
-        }
-    };
-    let saved: Vec<SavedCookie> = match serde_json::from_slice(&data) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[cookies] snapshot unreadable, ignoring it: {e}");
-            return;
-        }
-    };
+    let key = crate::credentials::cookie_key()
+        .map_err(|e| format!("cannot read the snapshot key: {e}"))?;
+    let data = unseal(&key, &data)?;
+    let saved: Vec<SavedCookie> = serde_json::from_slice(&data)
+        .map_err(|e| format!("snapshot is not valid current cookie data: {e}"))?;
+    if saved.iter().any(|cookie| {
+        cookie.name.is_empty()
+            || !matches!(
+                cookie.same_site.as_deref(),
+                None | Some("lax") | Some("strict")
+            )
+    }) {
+        return Err("snapshot contains an invalid current cookie record".into());
+    }
     // Any webview reaches the store — it is one per app, not per webview —
     // and the main UI webview is the only one guaranteed to exist this
     // early. Fetched as window + webview, NOT via get_webview_window: that
@@ -189,7 +160,7 @@ fn restore(app: &AppHandle) {
     // which is exactly what this window becomes once a browser tab exists.
     let Some(ww) = app.get_window("main").and_then(|w| w.get_webview("main")) else {
         eprintln!("[cookies] main webview missing, cookies not restored");
-        return;
+        return Err("main webview is unavailable".into());
     };
     let total = saved.len();
     let mut ok = 0;
@@ -238,14 +209,19 @@ fn restore(app: &AppHandle) {
         let domain = cookie.domain().unwrap_or("").to_string();
         match ww.set_cookie(cookie) {
             Ok(()) => ok += 1,
-            Err(e) => eprintln!("[cookies] restore failed for {domain}: {e}"),
+            Err(e) => return Err(format!("restore failed for {domain}: {e}")),
         }
     }
     // Writes are fire-and-forget posts to the event loop; this read queues
     // behind them and blocks until answered, so once it returns every write
     // above has actually reached the store. Only then may RESTORED flip.
-    let _ = ww.cookies();
+    ww.cookies()
+        .map_err(|e| format!("cannot verify restored cookies: {e}"))?;
+    if ok != total {
+        return Err(format!("restored only {ok}/{total} session cookies"));
+    }
     eprintln!("[cookies] restored {ok}/{total} session cookies");
+    Ok(())
 }
 
 fn worker(app: AppHandle, rx: mpsc::Receiver<()>) {
@@ -270,7 +246,6 @@ fn snapshot(app: &AppHandle, last_written: &Mutex<Option<String>>) {
     if !RESTORED.load(Ordering::Acquire) {
         return;
     }
-    let Some(path) = file_path(app) else { return };
     // Same window-plus-webview fetch as restore(), and for the same reason.
     // A miss here is normal exactly once — during shutdown, after the main
     // window died — so it logs rather than erroring, but it must log:
@@ -312,14 +287,12 @@ fn snapshot(app: &AppHandle, last_written: &Mutex<Option<String>>) {
             return;
         }
     };
-    {
-        // Deduplicate on the plaintext: every sealing uses a fresh nonce,
-        // so comparing ciphertext would defeat the idle-tick suppression.
-        let mut last = last_written.lock().unwrap();
-        if last.as_deref() == Some(json.as_str()) {
-            return;
-        }
-        last.replace(json.clone());
+    // Deduplicate on the plaintext: every sealing uses a fresh nonce, so
+    // comparing ciphertext would defeat the idle-tick suppression. Do not
+    // advance this marker until app.db accepts the write; a transient key or
+    // database failure must be retried by the next idle tick.
+    if last_written.lock().unwrap().as_deref() == Some(json.as_str()) {
+        return;
     }
     // No key means no snapshot — never fall back to writing plaintext.
     let key = match crate::credentials::cookie_key() {
@@ -336,36 +309,19 @@ fn snapshot(app: &AppHandle, last_written: &Mutex<Option<String>>) {
             return;
         }
     };
-    if let Err(e) = write_atomically(&path, &sealed) {
-        eprintln!("[cookies] cannot write snapshot: {e}");
+    let store = match crate::app_state_store(app) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("[cookies] cannot open app.db: {e}");
+            return;
+        }
+    };
+    if let Err(e) = store.save_credential_vault(VAULT_ID, &sealed) {
+        eprintln!("[cookies] cannot write snapshot to app.db: {e:#}");
         return;
     }
+    last_written.lock().unwrap().replace(json);
     eprintln!("[cookies] snapshot: {} session cookies", saved.len());
-}
-
-/// Temp-file-and-rename, 0600 before any byte lands: the file holds live
-/// logins, and a crash mid-write must never leave a truncated store.
-fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    let dir = path.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
-    })?;
-    std::fs::create_dir_all(dir)?;
-    let tmp = path.with_extension("json.tmp");
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
@@ -374,7 +330,7 @@ mod namespace_tests {
 
     #[test]
     fn cookie_runtime_uses_only_the_key_bundle_namespace() {
-        assert_eq!(FILE_NAME, "browser-session-cookies.v2.sealed");
+        assert_eq!(VAULT_ID, "browser-session-cookies-v2");
         assert_eq!(SEALED_MAGIC, b"TABVERSECOOKIES2");
     }
 }

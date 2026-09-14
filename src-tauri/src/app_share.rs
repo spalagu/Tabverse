@@ -595,7 +595,6 @@ mod tests {
     fn source(
         actions: Arc<Mutex<Vec<String>>>,
         clips: Arc<Mutex<Vec<String>>>,
-        _legacy_proxy: Arc<Mutex<Vec<String>>>,
     ) -> Arc<AppShareSource> {
         let a = actions.clone();
         let c = clips.clone();
@@ -609,7 +608,6 @@ mod tests {
     #[test]
     fn an_rpc_reaches_its_handler_and_missing_commands_answer_with_an_error() {
         let src = source(
-            Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
         );
@@ -663,7 +661,6 @@ mod tests {
     #[test]
     fn a_read_rpc_runs_at_view_level_and_a_steer_rpc_refuses_out_loud() {
         let src = source(
-            Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
         );
@@ -736,7 +733,6 @@ mod tests {
     #[test]
     fn agent_verbs_route_by_active_tab_and_binding_follows_the_front() {
         let src = source(
-            Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
         );
@@ -818,8 +814,7 @@ mod tests {
     fn actions_dispatch_and_clips_write() {
         let actions = Arc::new(Mutex::new(Vec::new()));
         let clips = Arc::new(Mutex::new(Vec::new()));
-        let proxied = Arc::new(Mutex::new(Vec::new()));
-        let src = source(actions.clone(), clips.clone(), proxied.clone());
+        let src = source(actions.clone(), clips.clone());
 
         src.inject_input(
             1,
@@ -866,7 +861,6 @@ mod tests {
         let src = source(
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
-            Arc::new(Mutex::new(Vec::new())),
         );
         // Before the handover the construction no-op stands: the action
         // runs (Applied) but nothing reaches the webview.
@@ -903,7 +897,6 @@ mod tests {
     #[test]
     fn agent_frames_are_refused_out_loud() {
         let src = source(
-            Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
         );
@@ -945,7 +938,6 @@ mod tests {
         let src = source(
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
-            Arc::new(Mutex::new(Vec::new())),
         );
         // Before the handover the construction-time stance is
         // Applied-and-dropped: no share exists, nothing reaches the webview.
@@ -967,7 +959,6 @@ mod tests {
         let src = source(
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
-            Arc::new(Mutex::new(Vec::new())),
         );
         assert_eq!(src.kind(), SharedTabType::App);
         assert!(src.grid().is_none());
@@ -976,7 +967,6 @@ mod tests {
     #[test]
     fn the_clipboard_watch_lives_and_dies_with_the_binding() {
         let src = source(
-            Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(Vec::new())),
         );

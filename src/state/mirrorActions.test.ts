@@ -381,3 +381,19 @@ describe("the whitelist's full key set (the fold-loss regression)", () => {
     ]);
   });
 });
+
+
+describe("sidebar close replay intent", () => {
+  it("does not broadcast a rejected old live-close as removal of a sleeping pin", () => {
+    const { host, join, sent, replay, restore } = makePair();
+    const id = host.getState().addTab({ type: "browser", url: "https://saved.test", groupId: "preset-browser" });
+    replay(); host.getState().closeTab(id, false); replay();
+    const count = sent.length; host.getState().closeTab(id, false);
+    expect(sent.length).toBe(count); replay();
+    expect(host.getState().tabs.find((t) => t.id === id)?.dormant).toBe(true);
+    expect(join.getState().tabs.find((t) => t.id === id)?.dormant).toBe(true);
+    host.getState().closeTab(id, true); replay();
+    expect(join.getState().tabs.find((t) => t.id === id)).toBeUndefined();
+    restore();
+  });
+});

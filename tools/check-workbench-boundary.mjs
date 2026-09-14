@@ -55,6 +55,14 @@ function sourceFiles(dir) {
   });
 }
 
+function childSourceRoots(parent) {
+  if (!existsSync(parent)) return [];
+  return readdirSync(parent, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(parent, entry.name, "src"))
+    .filter(existsSync);
+}
+
 function checkImports(dir, rules, description, violations) {
   if (!existsSync(dir)) return;
   for (const path of sourceFiles(dir)) {
@@ -196,14 +204,43 @@ if (/\b(?:async\s+)?fn\s+remote_(?:join|input|agent_[a-z0-9_]+|viewport|ping|lea
 if (/\b(?:async\s+)?fn\s+agent_(?:start|prompt|cancel|answer|close|detach|login_[a-z0-9_]+|logout)\s*\(/.test(tauriComposition)) {
   violations.push("src-tauri/src/lib.rs defines an Agent command; move it to agent_commands.rs");
 }
-if (/\b(?:async\s+)?fn\s+(?:pw_|migrate_)(?:authorize_[a-z0-9_]+|reveal|forget_all|export|import|import_check|import_apply)\s*\(/.test(tauriComposition)) {
-  violations.push("src-tauri/src/lib.rs defines a credential or migration command; move it to credential_commands.rs");
+if (/\b(?:async\s+)?fn\s+pw_(?:authorize_[a-z0-9_]+|reveal|forget_all|export|import)\s*\(/.test(tauriComposition)) {
+  violations.push("src-tauri/src/lib.rs defines a credential command; move it to credential_commands.rs");
 }
 if (/\b(?:async\s+)?fn\s+(?:traffic_light_reapply|toggle_simple_fullscreen|set_theme|theme_pref_(?:save|load)|js_log)\s*\(/.test(tauriComposition)) {
   violations.push("src-tauri/src/lib.rs defines an appearance command; move it to appearance_commands.rs");
 }
 if (/\b(?:async\s+)?fn\s+(?:browser_[a-z0-9_]+|window_buttons|ui_plane_set|ui_focus)\s*\(/.test(tauriComposition)) {
   violations.push("src-tauri/src/lib.rs defines a Browser command; move it to browser_commands.rs");
+}
+
+// One local-data model: removed carriers and importer entry points must not
+// return in production code. Rust unit-test bodies are excluded so the state
+// crate can prove that planted old files are ignored.
+const removedLocalData = /(?:session\.json|settings\.json|theme\.json|browser-(?:history|visits|archive|downloads)\.json|default-apps-backup\.json|media-permissions\.json|trusted-certificate-hosts\.json|logins(?:\.v2)?\.vault|browser-session-cookies(?:\.v2\.sealed|\.json)|state\/userscripts|migrateSettingsIntoConfig|explicit_legacy_settings|replace_scopes_from_legacy|splitPair|legacyColorIndex)/;
+function rustProductionSource(raw) {
+  // Only discard a terminal unit-test module. Individual cfg(test) helpers can
+  // occur between production items; splitting at the first attribute would
+  // leave the rest of the shipped source outside this architecture gate.
+  const terminalTests = raw.search(
+    /\n#\[cfg\(test\)\]\s*\nmod\s+[A-Za-z0-9_]*tests\s*\{/,
+  );
+  return terminalTests < 0 ? raw : raw.slice(0, terminalTests);
+}
+for (const dir of [
+  join(ROOT, "src"),
+  join(ROOT, "src-tauri", "src"),
+  ...childSourceRoots(join(ROOT, "crates")),
+  ...childSourceRoots(join(ROOT, "packages")),
+  ...childSourceRoots(join(ROOT, "apps")),
+]) {
+  for (const path of sourceFiles(dir)) {
+    const raw = readFileSync(path, "utf8");
+    const production = path.endsWith(".rs") ? rustProductionSource(raw) : raw;
+    if (removedLocalData.test(production)) {
+      violations.push(`${relative(ROOT, path)} reintroduces a removed local-data format`);
+    }
+  }
 }
 
 if (violations.length > 0) {

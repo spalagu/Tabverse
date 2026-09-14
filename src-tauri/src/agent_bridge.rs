@@ -28,7 +28,7 @@ const CODEX_MODEL: &str = "gpt-5.5";
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tabverse_agent::session::Session;
 use tabverse_agent_tools::{builtin_tools, env::LocalEnv, CancelToken};
@@ -73,6 +73,7 @@ type ShareSlot = Arc<Mutex<Option<Arc<dyn AgentBroadcast>>>>;
 struct TeeSink {
     forward: Box<dyn FnMut(SessionEvent) + Send>,
     log: Option<SessionLog>,
+    failed: Option<String>,
     /// Set while this session is being shared. Held behind a lock the sharing
     /// command also holds, so a share that starts mid-run is picked up on the
     /// very next event rather than at the next turn.
@@ -80,12 +81,27 @@ struct TeeSink {
     share: ShareSlot,
 }
 
+impl TeeSink {
+    fn fail(&mut self, error: impl std::fmt::Display) {
+        if self.failed.is_some() {
+            return;
+        }
+        let message = format!("Agent transcript stopped: {error}");
+        self.failed = Some(message.clone());
+        (self.forward)(SessionEvent::TurnEnded {
+            turn: 0,
+            reason: tabverse_agent::event::StopReason::Error(message),
+        });
+    }
+}
+
 impl EventSink for TeeSink {
     fn emit(&mut self, event: SessionEvent) {
         if let Some(log) = self.log.as_mut() {
-            // A log that cannot be written must not take the session down with
-            // it — the user would rather keep working than lose the turn.
-            let _ = log.append_event(&event);
+            if let Err(error) = log.append_event(&event) {
+                self.fail(error);
+                return;
+            }
         }
         // Three destinations, one call site. An event that reached the screen
         // but not the disk would come back missing after a restart; one that
@@ -128,8 +144,14 @@ fn pump_prompts(
     while let Ok(text) = prompts.recv() {
         cancel.reset();
         let _ = session.prompt(&text, sink);
+        if sink.failed.is_some() {
+            break;
+        }
         if let Some(log) = sink.log.as_mut() {
-            written = session.append_new_messages(log, written).unwrap_or(written);
+            if let Err(error) = session.append_new_messages_tracked(log, &mut written) {
+                sink.fail(error);
+                break;
+            }
         }
     }
 }
@@ -281,6 +303,7 @@ struct SessionHandle {
 #[derive(Default)]
 pub struct AgentRegistry {
     sessions: Mutex<HashMap<String, SessionHandle>>,
+    memories: Mutex<HashMap<std::path::PathBuf, Weak<MemoryStore>>>,
     counter: Mutex<u64>,
 }
 
@@ -293,6 +316,16 @@ impl AgentRegistry {
         let mut counter = self.counter.lock().unwrap();
         *counter += 1;
         format!("agent-{counter}")
+    }
+
+    fn memory_store(&self, path: std::path::PathBuf) -> Result<Arc<MemoryStore>> {
+        let mut stores = self.memories.lock().unwrap();
+        if let Some(store) = stores.get(&path).and_then(Weak::upgrade) {
+            return Ok(store);
+        }
+        let store = Arc::new(MemoryStore::open(&path)?);
+        stores.insert(path, Arc::downgrade(&store));
+        Ok(store)
     }
 
     /// Start a session for a tab and return its handle id.
@@ -310,19 +343,34 @@ impl AgentRegistry {
     ) -> Result<String> {
         let id = self.next_id();
         let log_path = log_dir.as_ref().map(|dir| log_path_for(dir, &session_id));
+        let log = log_path.as_ref().map(SessionLog::open).transpose()?;
         let memory_path = log_dir.as_ref().map(|dir| memory_path_for(dir, &cwd));
+        let memory = memory_path
+            .map(|path| self.memory_store(path))
+            .transpose()?;
 
         let mut history = Vec::new();
         if let Some(path) = log_path.as_ref() {
-            if let Ok(replay) = SessionLog::replay(path) {
-                // Replay to the screen first: the tab should look the way it did
-                // before it was closed, not empty until the next turn.
-                for event in &replay.events {
-                    events(event.clone());
-                }
-                history = replay.messages;
+            let replay = SessionLog::replay(path)?;
+            // Replay to the screen first: the tab should look the way it did
+            // before it was closed, not empty until the next turn.
+            for event in &replay.events {
+                events(event.clone());
             }
+            history = replay.messages;
         }
+        #[cfg(not(test))]
+        let tokens = crate::agent_http::token_source()?;
+        #[cfg(test)]
+        let tokens: Option<crate::agent_http::StoredToken> = None;
+        #[cfg(not(test))]
+        let transport = if tokens.is_some() {
+            Some(crate::agent_http::ReqwestTransport::new()?)
+        } else {
+            None
+        };
+        #[cfg(test)]
+        let transport: Option<crate::agent_http::ReqwestTransport> = None;
         let (prompt_tx, prompt_rx): (Sender<String>, Receiver<String>) = channel();
         let gate = Arc::new(UiGate::new());
         let cancel = CancelToken::new();
@@ -335,7 +383,6 @@ impl AgentRegistry {
         #[cfg(test)]
         let thread_share = Arc::clone(&share_slot);
         let thread_cancel = cancel.clone();
-        let thread_log = log_path.clone();
         let thread_target = Arc::clone(&event_target);
         std::thread::Builder::new()
             .name(format!("tabverse-{id}"))
@@ -343,7 +390,6 @@ impl AgentRegistry {
                 let env = LocalEnv::new(cwd);
                 // A folder with no state directory still runs; it simply
                 // remembers nothing, which beats refusing to start.
-                let memory = memory_path.map(|p| std::sync::Arc::new(MemoryStore::open(p)));
                 let mut tools = builtin_tools();
                 if let Some(store) = &memory {
                     tools.push(Box::new(MemoryTool::new(std::sync::Arc::clone(store))));
@@ -362,10 +408,6 @@ impl AgentRegistry {
                 // built when there is one. Building it unconditionally would
                 // mean a tab with no subscription still has to have a working
                 // TLS stack to open — which is exactly what it does not need.
-                let tokens = crate::agent_http::token_source().ok();
-                let transport = tokens
-                    .as_ref()
-                    .and_then(|_| crate::agent_http::ReqwestTransport::new().ok());
                 let demo = DemoProvider::new();
                 let sockets = crate::agent_http::TokioWsTransport;
                 let codex;
@@ -402,7 +444,8 @@ impl AgentRegistry {
                         let target = thread_target.lock().unwrap().clone();
                         target(event);
                     }),
-                    log: thread_log.and_then(|p| SessionLog::open(p).ok()),
+                    log,
+                    failed: None,
                     #[cfg(test)]
                     share: thread_share,
                 };
@@ -428,24 +471,25 @@ impl AgentRegistry {
 
     /// Attach a new event consumer to an existing LiveProcess and replay its
     /// durable history. The session thread and provider are not recreated.
-    pub fn attach(&self, session_id: &str, events: AgentEventCallback) -> Option<String> {
+    pub fn attach(&self, session_id: &str, events: AgentEventCallback) -> Result<Option<String>> {
         let sessions = self.sessions.lock().unwrap();
-        let (id, handle) = sessions
+        let Some((id, handle)) = sessions
             .iter()
-            .find(|(_, handle)| handle.session_id == session_id)?;
+            .find(|(_, handle)| handle.session_id == session_id)
+        else {
+            return Ok(None);
+        };
         *handle.event_target.lock().unwrap() = Arc::clone(&events);
-        let replay = handle
-            .log_path
-            .as_ref()
-            .and_then(|path| SessionLog::replay(path).ok())
-            .map(|replay| replay.events)
-            .unwrap_or_default();
+        let replay = match handle.log_path.as_ref() {
+            Some(path) => SessionLog::replay(path)?.events,
+            None => Vec::new(),
+        };
         let id = id.clone();
         drop(sessions);
         for event in replay {
             events(event);
         }
-        Some(id)
+        Ok(Some(id))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -538,8 +582,18 @@ impl AgentRegistry {
                 let Some(path) = log_path.as_ref() else {
                     return Vec::new();
                 };
-                let Ok(replay) = SessionLog::replay(path) else {
-                    return Vec::new();
+                let replay = match SessionLog::replay(path) {
+                    Ok(replay) => replay,
+                    Err(error) => {
+                        eprintln!("[agent] cannot replay transcript for sharing: {error:#}");
+                        return vec![serde_json::to_value(SessionEvent::TurnEnded {
+                            turn: 0,
+                            reason: tabverse_agent::event::StopReason::Error(format!(
+                                "Cannot read the current transcript: {error:#}"
+                            )),
+                        })
+                        .expect("the fixed transcript error event serializes")];
+                    }
                 };
                 replay
                     .events
@@ -624,6 +678,7 @@ mod tests {
         let mut sink = TeeSink {
             forward: Box::new(move |event| recorder.lock().unwrap().push(event)),
             log: None,
+            failed: None,
             share: Arc::new(Mutex::new(None)),
         };
         let mut session = Session::new(
@@ -947,7 +1002,10 @@ mod tests {
         });
 
         let (second, callback) = Recorder::new();
-        assert_eq!(registry.attach("tab-live", callback), Some(id.clone()));
+        assert_eq!(
+            registry.attach("tab-live", callback).unwrap(),
+            Some(id.clone())
+        );
         second.wait_for("the replay on the replacement callback", |events| {
             events
                 .iter()
@@ -1243,7 +1301,7 @@ mod tests {
         let vault = tempfile::tempdir().unwrap();
         let _vault = crate::credentials::test_vault_guard(vault.path().to_path_buf());
         assert!(
-            crate::agent_http::stored_token().is_none(),
+            crate::agent_http::stored_token().unwrap().is_none(),
             "this test is about there being no sign-in"
         );
 

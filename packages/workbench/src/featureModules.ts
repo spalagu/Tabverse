@@ -11,7 +11,7 @@ export type FeatureCloseBehavior = "close" | "stop-runtime" | "detach-runtime" |
 export type FeatureStateDecodeResult<State> =
   | { readonly kind: "ready"; readonly version: number; readonly state: State }
   | {
-      readonly kind: "unsupported-newer";
+      readonly kind: "unsupported-version";
       readonly version: number;
       readonly original: unknown;
     }
@@ -22,14 +22,9 @@ export interface FeatureStateCodec<State> {
   decode(version: number, original: unknown): FeatureStateDecodeResult<State>;
 }
 
-type StateMigration = (state: Record<string, unknown>) => Record<string, unknown>;
-
-/** Versioned object state shared by today's built-ins. Missing migrations
- * fail without rewriting the payload; future versions remain byte-for-byte
- * available to the unsupported-state UI. */
+/** Strict decoder for the one current built-in state representation. */
 export function objectStateCodec(
   currentVersion: number,
-  migrations: Readonly<Record<number, StateMigration>> = {},
 ): FeatureStateCodec<Record<string, unknown>> {
   if (!Number.isSafeInteger(currentVersion) || currentVersion < 1) {
     throw new Error("Feature state version must be a positive integer");
@@ -40,21 +35,17 @@ export function objectStateCodec(
       if (!Number.isSafeInteger(version) || version < 1) {
         return { kind: "invalid", reason: "invalid-version", original };
       }
-      if (version > currentVersion) {
-        return { kind: "unsupported-newer", version, original };
+      if (version !== currentVersion) {
+        return { kind: "unsupported-version", version, original };
       }
       if (typeof original !== "object" || original === null || Array.isArray(original)) {
         return { kind: "invalid", reason: "invalid-shape", original };
       }
-      let state = original as Record<string, unknown>;
-      for (let from = version; from < currentVersion; from += 1) {
-        const migrate = migrations[from];
-        if (migrate === undefined) {
-          return { kind: "invalid", reason: `missing-migration-${from}`, original };
-        }
-        state = migrate(state);
-      }
-      return { kind: "ready", version: currentVersion, state };
+      return {
+        kind: "ready",
+        version: currentVersion,
+        state: original as Record<string, unknown>,
+      };
     },
   };
 }

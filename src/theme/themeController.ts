@@ -1,6 +1,5 @@
 import { isFreshRun, useStore } from "../state/store";
 import { coreLog } from "../errlog";
-import { THEME_SCOPE, loadState, loadStateSync } from "../persist";
 import { asThemePreference, resolve } from "./resolve";
 import { applyThemeVars, isThemeName, type ThemeName } from "./tokens";
 
@@ -58,12 +57,9 @@ export function bootstrapTheme(): void {
     import.meta.env.DEV &&
     !isTauri() &&
     new URLSearchParams(window.location.search).has("fresh");
-  const pref =
-    isTauri() || fresh
-      ? "system"
-      : asThemePreference(
-          loadStateSync<{ preference?: unknown }>(THEME_SCOPE)?.preference
-        );
+  const pref = fresh
+    ? "system"
+    : asThemePreference(useStore.getState().themePreference);
   const systemDark =
     typeof window.matchMedia === "function"
       ? window.matchMedia("(prefers-color-scheme: dark)").matches
@@ -87,22 +83,12 @@ let initialized = false;
 export async function initTheme(): Promise<void> {
   if (initialized) return;
   initialized = true;
-  // Null here is the configuration file not having been read yet — which is
-  // exactly what this cold-start path exists to cover, and asThemePreference
-  // is the one place that already decides what an absent preference means.
-  let pref = asThemePreference(useStore.getState().themePreference);
+  const pref = isFreshRun()
+    ? "system"
+    : asThemePreference(useStore.getState().themePreference);
   if (isTauri()) {
     const { invoke } = await import("@tauri-apps/api/core");
     invokeFn = invoke;
-    try {
-      pref = asThemePreference(await invoke("theme_pref_load"));
-    } catch (e) {
-      coreLog("error", `theme_pref_load failed: ${String(e)}`);
-    }
-  } else if (!isFreshRun()) {
-    pref = asThemePreference(
-      (await loadState<{ preference?: unknown }>(THEME_SCOPE))?.preference
-    );
   }
   const store = useStore.getState();
   useStore.setState({

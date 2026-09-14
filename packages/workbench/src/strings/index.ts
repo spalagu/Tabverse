@@ -42,7 +42,17 @@ export const STR = {
     peekSplitHint: (p: { title: string }) => `Split beside ${p.title}`,
     // Sidebar
     sidebar: {
-      deviationHint: "Away from its pinned page — click again to go back",
+      deviationHint: "Away from its pinned page — click its icon to return",
+      resetPinned: "Return to pinned page",
+      removeSaved: "Remove saved tab",
+      closeRunning: "Close running tab — keep saved entry",
+      renameTab: "Rename tab",
+      renameGroup: "Rename group",
+      workspaceTabs: "Workspace tabs",
+      sleeping: "Sleeping — click to open",
+      splitMember: (p: { index: number; total: number }) => `Split view ${p.index} of ${p.total}`,
+      closeProtected: (p: { title: string }) => `Close “${p.title}”? It has unsaved changes or running work.`,
+      closeUnverified: "The page did not confirm it is safe to close. Close it anyway?",
       attentionHint: "New output",
       mutedHint: "Muted — click to unmute",
       audibleHint: "Making sound — click to mute",
@@ -85,7 +95,8 @@ export const STR = {
     // Tab right-click menu
     tabMenu: {
       splitWithActive: "Split with active tab",
-      unsplit: "Unsplit",
+      unsplit: "Separate split into tabs",
+      separateMember: "Remove this tab from split",
       pin: "Pin",
       unpin: "Unpin",
       updatePinnedAddress: "Update pinned address",
@@ -284,13 +295,12 @@ export const STR = {
       exportPasswords: "export the passwords",
       importPasswords: "import the passwords",
       showPasswords: "open the password list",
+      manageSiteMemory: "change the saved site permissions",
       forgetLogins: "forget the saved logins",
       forgetSession: "forget the saved session",
       clearHistory: "clear the browsing history",
       restoreDefaults: "restore the factory settings",
       changeKey: "save that key",
-      exportBackup: "export the backup",
-      importBackup: "import the backup",
       installScript: "install the script",
       updateScript: "update the script",
       checkScriptUpdate: "check the script for updates",
@@ -1009,12 +1019,11 @@ export const STR = {
     defaultApps: {
       heading: "Default apps",
       blurb:
-        "Each switch hands a set of things the system opens over to " +
-        "Tabverse, and hands them back when you turn it off. Turning one " +
-        "on is the only thing that takes a file type away from another " +
-        "app — though a type nothing opened before may start opening here " +
-        "just because Tabverse is installed. Whoever held each one first " +
-        "is remembered, so it can be given back.",
+        "Each action hands a set of things the system opens over to " +
+        "Tabverse. This is the only thing that takes a file type away from " +
+        "another app — though a type nothing opened before may start opening " +
+        "here just because Tabverse is installed. Change the default in the " +
+        "operating system when you want another app to take it.",
       reading: "Reading what this Mac currently opens…",
       browserTitle: "Default browser",
       browserBlurb:
@@ -1038,7 +1047,7 @@ export const STR = {
       nothing: "nothing",
       stillElsewhere: (p: { apps: string }) => `Still elsewhere: ${p.apps}`,
       working: "Working…",
-      turnOff: "Turn off",
+      isDefault: "Default",
       makeDefault: "Make default",
       registerAndOpen: "Register and open Settings…",
     },
@@ -1285,45 +1294,6 @@ export const STR = {
       importedFailed: (p: { count: number; error: string }) =>
         ` ${p.count} refused by the keychain: ${p.error}`,
     },
-    migrate: {
-      heading: "Backup & migrate",
-      blurb:
-        "Export your whole workspace — tabs and groups, history, " +
-        "downloads, settings, certificate exceptions, site permissions, " +
-        "userscripts and saved passwords — into one file to move to " +
-        "another computer. The file is encrypted with a passphrase you " +
-        "set; without it the file cannot be opened. Import replaces " +
-        "everything on this computer, after copying the current state to " +
-        "a timestamped backup folder first. Website login state does not " +
-        "travel — you log back in on the other machine, and your saved " +
-        "passwords fill them.",
-      exportBtn: "Export…",
-      importBtn: "Import…",
-      filterName: "Tabverse migration",
-      exportPassTitle: "Set a passphrase for this export",
-      exportPassNote:
-        "It encrypts the whole file — every saved password and your " +
-        "browsing history are inside. There is no way to open the file " +
-        "without it, and no recovery if it is lost.",
-      exportedResult: (p: { scopes: number; passwords: number }) =>
-        `Exported ${plural(p.scopes, "scope")} and ${plural(p.passwords, "password")}. Keep the file and its passphrase apart and safe — together they are your whole workspace.`,
-      importPassTitle: "Enter the passphrase",
-      importPassNote: "The passphrase this file was exported with.",
-      openLabel: "Open",
-      replaceQuestion: (p: {
-        scopes: number;
-        passwords: number;
-        backupPath: string;
-      }) =>
-        `This replaces everything on this computer with the archive's ${plural(p.scopes, "scope")} and ${plural(p.passwords, "password")}. It is a whole replace, not a merge. Your current state is copied first to ${p.backupPath} so nothing is lost.`,
-      replaceLabel: "Replace everything",
-      importedResult: (p: {
-        scopes: number;
-        passwords: number;
-        backupPath: string;
-      }) =>
-        `Imported ${plural(p.scopes, "scope")} and ${plural(p.passwords, "password")}. Your previous state is at ${p.backupPath}. Quit and reopen Tabverse for the import to take effect — and log back in to your sites, since login state does not travel.`,
-    },
     danger: {
       heading: "Danger zone",
       blurb:
@@ -1337,9 +1307,7 @@ export const STR = {
        * than as four separately-worded warnings.
        */
       question: (p: { erases: string }) =>
-        `${p.erases}. This cannot be undone. ` +
-        `Want a copy first? Close this and export one from Backup & migrate. ` +
-        `Continue?`,
+        `${p.erases}. This cannot be undone. Continue?`,
       /** What each action erases, filling the slot above. */
       sessionErases:
         "Every saved tab and group goes, along with the work each tab was " +
@@ -1349,8 +1317,8 @@ export const STR = {
         "suggestions new browser tabs make from your visits",
       passwordsErases: "Every login saved in this Mac's keychain goes",
       factoryErases:
-        "Every saved tab and group goes, with your browsing history and " +
-        "downloads, the keys you have changed and the theme you chose",
+        "Registered settings, content-handler choices and changed keys return " +
+        "to their defaults",
       /** The button on the page, and the one in the confirmation. */
       session: "Forget saved session",
       sessionConfirm: "Forget the session",
@@ -1366,9 +1334,9 @@ export const STR = {
        * and the rest of the configuration file is the user's own writing.
        */
       factoryKeeps:
-        "Your saved passwords and the rest of your configuration file are " +
-        "not touched — forget passwords with the button above, and edit the " +
-        "file for the rest.",
+        "Your tabs, browsing and download records, site decisions, user scripts, " +
+        "saved passwords, website sessions and the rest of your configuration " +
+        "file are not touched.",
       factoryDone:
         "Restored. Quit and reopen Tabverse for every part of it to take " +
         "effect.",
@@ -1771,15 +1739,6 @@ export const STR = {
       password: "Password",
       rememberInKeychain: "Remember in Keychain",
       signIn: "Sign in",
-    },
-    // Migration-archive passphrase
-    passphrase: {
-      placeholder: "Passphrase",
-      repeatPlaceholder: "Repeat the passphrase",
-      mismatch: "The two entries do not match.",
-      shortWarning:
-        "That is short. A longer passphrase protects the file better — " +
-        "but it is your call.",
     },
     // Page-owned dialogs (alert / confirm / prompt / permissions / unload)
     page: {

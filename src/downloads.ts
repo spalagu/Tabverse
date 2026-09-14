@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { requestPathOpen } from "./openIntent";
-import { deleteState, loadState, saveState } from "./persist";
+import { deleteState, loadState, markStateInvalid, saveState } from "./persist";
 import { isFreshRun } from "./state/store";
 
 /** The scope the ledger occupies in the state store. */
@@ -84,23 +84,31 @@ function basename(path: string): string {
 }
 
 /** Whatever survived a round trip through storage, shaped and believable. */
-function sanitize(stored: StoredDownloads | null): DownloadEntry[] {
-  if (!stored || !Array.isArray(stored.entries)) return [];
-  const out: DownloadEntry[] = [];
-  for (const raw of stored.entries) {
-    if (!raw || typeof raw.path !== "string" || !raw.path) continue;
-    out.push({
-      path: raw.path,
-      name:
-        typeof raw.name === "string" && raw.name ? raw.name : basename(raw.path),
-      at: Number.isFinite(raw.at) ? raw.at : 0,
-      // A row saved mid-download is a download this run never saw finish:
-      // the app that was writing it is gone, so "still downloading" would
-      // be a lie that never resolves.
-      state: raw.state === "done" ? "done" : "failed",
-    });
-  }
-  return out.slice(0, DOWNLOADS_MAX);
+function sanitize(stored: StoredDownloads | null): DownloadEntry[] | null {
+  if (stored === null) return [];
+  if (
+    Object.keys(stored).sort().join("\0") !== "entries\0version" ||
+    stored.version !== 1 ||
+    !Array.isArray(stored.entries) ||
+    stored.entries.length > DOWNLOADS_MAX ||
+    stored.entries.some(
+      (raw) =>
+        !raw ||
+        Object.keys(raw).sort().join("\0") !== "at\0name\0path\0state" ||
+        typeof raw.path !== "string" ||
+        !raw.path ||
+        typeof raw.name !== "string" ||
+        !raw.name ||
+        !Number.isFinite(raw.at) ||
+        !(["downloading", "done", "failed"] as unknown[]).includes(raw.state)
+    )
+  ) return null;
+  return stored.entries.map((raw) => ({
+    ...raw,
+    // A row saved mid-download belongs to the previous process and cannot
+    // still be transferring after restart.
+    state: raw.state === "downloading" ? "failed" : raw.state,
+  }));
 }
 
 /**
@@ -145,28 +153,37 @@ export function useDownloads(): DownloadEntry[] {
 export function initDownloads(): void {
   if (loadedOnce) return;
   loadedOnce = true;
-  if (!isFreshRun()) {
-    void loadState<StoredDownloads>(DOWNLOADS_SCOPE).then((stored) => {
+  const ready = !isFreshRun()
+    ? loadState<StoredDownloads>(DOWNLOADS_SCOPE).then((stored) => {
       // Events that arrived while the disk was answering are newer.
       const seen = new Set(ledger.map((e) => e.path));
-      const restored = sanitize(stored).filter((e) => !seen.has(e.path));
+      const decoded = sanitize(stored);
+      if (decoded === null) {
+        markStateInvalid(DOWNLOADS_SCOPE, "invalid current downloads record");
+        return;
+      }
+      const restored = decoded.filter((e) => !seen.has(e.path));
       ledger = [...ledger, ...restored].slice(0, DOWNLOADS_MAX);
       listeners.forEach((fn) => fn());
-    });
-  }
+    })
+    : Promise.resolve();
   const isTauri =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   if (!isTauri) return;
   void import("@tauri-apps/api/event").then(({ listen }) => {
     void listen<{ path: string; name: string }>("download-started", (e) => {
-      commit(
-        mergeDownloadStart(ledger, e.payload.path, e.payload.name, Date.now())
-      );
+      void ready.then(() => {
+        commit(
+          mergeDownloadStart(ledger, e.payload.path, e.payload.name, Date.now())
+        );
+      });
     });
     void listen<{ path: string; success: boolean }>("download-finished", (e) => {
-      commit(
-        mergeDownloadFinish(ledger, e.payload.path, e.payload.success, Date.now())
-      );
+      void ready.then(() => {
+        commit(
+          mergeDownloadFinish(ledger, e.payload.path, e.payload.success, Date.now())
+        );
+      });
     });
   });
 }

@@ -42,7 +42,7 @@ The preface is routing metadata, not an authorization token. Host network capabi
 ## Browser state
 `context_id` identifies Remote Browser context state. It deliberately does not identify or synchronize a local Wry BrowserSession.
 
-当前实现由 HostNetworkGateway 按 Remote 连接隔离 cookie 和 HTTP 缓存，并在连接内继续按 `context_id` 隔离。缓存键包含目标 URL 和 `Vary` 指定的请求头；实现支持 `Cache-Control`、`Expires`、`ETag`、`Last-Modified` 和条件重验证。正文仍先流向 Remote，同时在有界内存中旁路收集可缓存响应；单项上限 16 MiB、连接总上限 64 MiB。缓存命中仍要求建立新的已认证数据流，因此每次请求都会先经过当前 App share 和 Steer 权限检查。`context_id` 仍然只是状态路由键，不是授权凭据。
+HostNetworkGateway isolates cookies and HTTP caches by Remote connection and then by `context_id` within each connection. Cache keys include the target URL and request headers selected by `Vary`; the implementation supports `Cache-Control`, `Expires`, `ETag`, `Last-Modified`, and conditional revalidation. Bodies still stream to Remote first while cacheable responses are collected through a bounded side path: 16 MiB per item and 64 MiB per connection. A cache hit still requires a new authenticated data stream, so every request first passes the current App share and Steer permission checks. `context_id` remains only a state-routing key, never an authorization credential.
 
 ## Dependency boundary
 `tabverse-network` owns the streaming protocol and HTTP exchange mechanics, not operating-environment policy. It must remain usable without Tauri and must not create HTTP clients on its own.

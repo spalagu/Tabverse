@@ -114,10 +114,8 @@ beforeEach(async () => {
   w()[BOOT_CONFIG_KEY] = payload.values;
   w()[DEMO_SCHEMA_KEY] = payload.schema;
   setWriteFails(false);
-  // An edit store that already exists, so `sources` is non-empty and the
-  // one-time migration of the old session-held settings does not run through
-  // these tests — it would issue writes of its own and there would be no
-  // telling its failures from the one each test makes on purpose.
+  // Start from an existing, empty edit store so each test observes only the
+  // write it performs on purpose.
   localStorage.setItem(DEMO_EDITS_KEY, "{}");
   useStore.setState({
     ...CONFIG_NOT_READ,

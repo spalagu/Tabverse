@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useSidebarMenu } from "./useSidebarMenu";
 import { useStore } from "../state/store";
 import { STR } from "../strings";
 import { formatKeys } from "../strings/formatKeys";
@@ -11,6 +12,7 @@ export function SidebarMenu() {
   const createEmptyGroup = useStore((s) => s.createEmptyGroup);
   const closedCount = useStore((s) => s.closedCount);
   const ref = useRef<HTMLDivElement>(null);
+  useSidebarMenu(ref, menu, close);
 
   useEffect(() => {
     if (!menu) return;
@@ -36,7 +38,7 @@ export function SidebarMenu() {
 
   if (!menu) return null;
   return (
-    <div className="ctx-menu" style={{ left: menu.x, top: menu.y }} ref={ref}>
+    <div className="ctx-menu sidebar-context-menu" style={{ left: menu.x, top: menu.y }} ref={ref}>
       {menu.zone === "pinned" && (
         <button
           className="ctx-item"

@@ -186,7 +186,11 @@ export function installMirrorBroadcast(
     if (typeof orig !== "function") continue;
     originals[name] = orig;
     patch[name] = (...callArgs: unknown[]) => {
-      const ret = orig.apply(api.getState(), callArgs);
+      const before = api.getState();
+      const ret = orig.apply(before, callArgs);
+      // A rejected stale close must not turn into a second close on the
+      // mirror, where a dormant pin now means removal (design I8).
+      if (name === "closeTab" && before.tabs === api.getState().tabs) return ret;
       const wire = wireArgsFor(name, {
         args: callArgs,
         gen,

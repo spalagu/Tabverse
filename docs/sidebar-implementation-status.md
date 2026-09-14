@@ -1,63 +1,163 @@
-# 侧边栏设计实施状态
+# Sidebar Experience Implementation Status
 
-日期：2026-09-11。主设计：`sidebar-experience-design.md`，设计提交 `9aaad901f3889bf1fd99edfa7882e83fcc6e9076`，代码基线 main `e44bd884e48d460e47e95db05eafeb6bdd7b49d4`。
+Updated 2026-09-14. Design:
+`docs/sidebar-experience-design.md`. Integration target: `main` at
+`c2c5352618fb31a454edf70a6658a7230b29f454`.
 
-## 交付位置与事实边界
+## Delivery state
 
-**当前 PR #36 分支树保存的是主设计文档和本文，不是下面的完整候选实现。** 旧 prototype 已通过正常的后续提交撤回到 main 代码，历史未重写。
+PR #36 now contains the implementation adapted to the current SQLite
+local-data model. The historical 30-file patch based on `e44bd884` was used
+only as input: it was not applied over current `main`, and it did not restore
+the removed JSON session or migration paths.
 
-已在本次工作环境完成 30 个代码/测试文件的候选修改，并形成完整补丁 `tabverse-sidebar-implementation.patch`。补丁 SHA-256：`3722669372676b8cdfb30678696cf78512e064fd2df894845f823bb5cc074660`。
+The implementation adds no runtime dependency and no product feature. It
+retains the existing Tabverse capabilities and changes sidebar behavior,
+presentation, and safety.
 
-补丁已在干净的 main 基线副本中执行 `git apply --check` 和实际应用，30 个结果文件逐字节比对一致。没有新增运行时依赖或会话格式。
+## A — identity, lifecycle, and split
 
-GitHub connector 对核心状态文件写入返回拦截，候选实现未完成写回。没有把缺少核心改动、无法完整编译的中间树发布到分支，也没有向 main 合并。本次交付附带完整补丁、文件哈希、测试日志和接续说明。仓库权限并非整体不可用：文档提交与分支读取均成功。
-
-## 设计覆盖与本地实施
-
-下表“本地实现”不代表已完成浏览器、CI 或 macOS 实机验收。
-
-| 设计编号 | 本地候选实现 | 当前证据及未完成点 |
+| IDs | Implemented behavior | Evidence |
 | --- | --- | --- |
-| A01 | 冻结 pin 直接移除、最近关闭恢复身份/祖先组、恢复后仍休眠；捕获关闭意图避免升级 | 状态和组件回归通过；连续鼠标关闭待浏览器验证 |
-| A02 | unpin 不再清除 dormant 或启动内容 | 状态测试通过 |
-| A03 | splitWith/splitOnTab/splitDropAt 不再改 group/pin/侧栏顺序；满额/重复拒绝 | 三入口、固定/普通组合、满额与 Peek 边界回归通过 |
-| A04 | unsplit 只清关系；移出当前成员保留焦点；内容区 × 始终表示关闭 | 状态测试通过；真实内容切换待验收 |
-| A05 | moveTabsTo 原子移动、同组后继、可见顺序、多选自落点与失效目标拒绝 | 状态/组件测试通过；真实多选拖动待浏览器验证 |
-| A06 | 解散组保留固定身份，优先父组/类型预设；无类型预设使用 Pinned 回退组 | 状态测试通过；没有增加 Favorites |
-| A07 | 复制固定项默认是普通临时续作；关闭恢复不重放一次性命令和旧句柄 | 状态测试通过；PTY 实机恢复待验收 |
-| A08 | 冻结项关闭的镜像回放与宿主匹配，拒绝旧 close 时不再次广播 | 13 项镜像动作测试通过；远程重连/全链路未验收 |
-| B01–B02 | DOM/native 统一意图控制器，140ms 意图确认、320ms 离开缓冲、占用锁、回返取消退出 | 7 项控制器测试通过；数值是设计初值，不是 Arc 测量值 |
-| B03 | 220/280ms 展开/收回，退出期间仍保留底层遮挡占用，Reduced Motion 去运动不去意图缓冲 | 控制器测试通过；WKWebView/traffic lights 不作已通过声明 |
-| B04 | resize 跟手，pointercancel/blur/unmount 清理占用和监听 | 已实现；真实触控板/越界操作待验收 |
-| B05 | 预览离开 360ms、键盘占用、截图完成时校验原活动 tab；拖动期间不打开预览 | 部分实现；完整 portal 跨缝/异步取消压力场景未验收 |
-| B06 | 隐藏后 inert；键盘与命名占用保持侧栏 | 组件接入完成；真实 Tab 顺序待验收 |
-| C01–C02 | 标题只激活；图标按目标 tab 返回固定地址；F2/双击标题重命名；IME/Enter/Escape 隔离 | 组件测试通过；原生导航需实机验证 |
-| C03 | 普通点击建立范围锚点，多选不激活，方向键移动焦点、Enter 激活 | 状态/组件测试通过；浏览器键盘场景未通过验证 |
-| C04–C05 | 普通侧栏拖动只排序/归组；内容区与菜单分屏；边缘滚动、drop/end/blur 清理 | 状态/组件测试通过；真实鼠标测试已编写，尚未跑通验证环境 |
-| C06 | 每个 split 成员在自己的组内显示完整行，小型关联标识；可独立选取和关闭 | 投影/快捷键测试通过；跨组显示与四成员视觉待验收 |
-| C07 | 单行34px/副信息44px、稳定图标与关闭槽、分享图标悬浮入口、低强度状态、主题 token | CSS 已实现；没有实机截图或 Arc 像素对比证据，不能算视觉收口 |
-| C08 | 当前项屏幕外时最小滚动定位，不主动夺取焦点 | 已实现，浏览器场景待验证 |
-| C09 | Tab/Group/Sidebar 菜单测量真实尺寸并钳制视口；上下/Home/End/Escape | 已实现；footer menu 尚未统一这套处理，预览键盘全流程待验收 |
-| C10 | 行、菜单、内容区、组运行项与远端 close 请求共用关闭协调；busy/dirty/share/unload 有保护；确认队列与旧代次检查 | 关闭协调测试通过；全部类型的 dirty/busy 信号完整性、未恢复类型批量关闭与分组删除仍需复核 |
-| D01–D02 | 8 个新增浏览器场景覆盖拖动、分屏、关闭恢复、键盘、菜单、显隐、长列表 | 本地浏览器测试入口被运行环境策略拦截，未在 CI 执行候选实现 |
-| D03–D05 | macOS/共享全链路、完整视觉评估、PR 质量门禁与合并 | 未完成；保持 Draft，不合并 |
+| A01–A03 | Live saved close sleeps; dormant saved close removes directly; reopen restores dormant without a Today copy; unpin never wakes | Store, contract, mirror, and Chromium tests pass |
+| A04–A06 | Reopen uses surviving group/ancestor/preset/fallback and never recreates a deleted folder; dissolve preserves saved identity | Store and sidebar contract tests pass |
+| A07–A10 | Atomic multi-tab movement, repeated-close state guard, safe runtime-handle stripping, mirror agreement | Store and mirror tests pass |
+| A11–A16 | Split entry points preserve group and identity; every member keeps a complete row; invalid or fifth-member additions do not replace the split | Store, split, presentation, and Chromium tests pass |
 
-## 实际执行的验证
+An intentional adjustment from the historical candidate is now part of the
+contract: reopening a saved entry does not recreate an explicitly deleted
+folder. It selects the nearest surviving safe placement.
 
-- 最新汇总回归：**10 个测试文件、243 项测试全部通过**。含 store 126、splitPeek 40、mirrorActions 13、tabBatch 11、appCommands 9、mirrorStore 7，以及新生命周期19、显隐7、行组件7、关闭协调4。
-- `tsc --noEmit`：通过。
-- `npm run check:workbench`：通过，包括工作台类型、架构边界、内容目录、关联生成与版本源检查。
-- `npm run build`：通过。存在构建器原有大 chunk 警告，不将其描述为零警告。
-- 完整 `npm test`：没有取得最终成功结果。多数文件完成后，`filePeek.test.ts`、`remoteViewDispatch.test.ts`、`tabContentProxyDown.test.ts` 在本地停滞；main 基线对这三个文件的尝试也未完成。没有通过跳过它们把全量结果改称通过。
-- 浏览器验证：`page.goto` 阶段返回 `ERR_BLOCKED_BY_ADMINISTRATOR`，尚未进入产品断言。这不是产品测试通过，也不能据此认定产品失败。
-- macOS 原生 WKWebView、真实 PTY、dirty 文件和分享：未执行实机验收。
+## B — auto-hide and continuous operation
 
-## 接续顺序
+| IDs | Implemented behavior | Evidence |
+| --- | --- | --- |
+| B01–B02 | One controller receives DOM and native intent; open, leave, lock, blur, and reverse paths share timers | Controller tests and Chromium edge tests pass |
+| B03 | 100 ms intent, 280 ms leave grace, 180 ms enter, 200 ms exit; Reduced Motion removes spatial motion; native cover remains through exit | Controller tests pass; native keyboard hide/show over WKWebView passed |
+| B04 | Resize, pointer cancellation, blur, drag end, and unmount clear work and locks | Unit coverage passes; physical trackpad path still pending |
+| B05 | Folder preview validates pending intent and active tab, waits across the portal gap, freezes during drag, and does not steal focus on hover | Component tests pass; native pointer traversal still pending |
+| B06 | Hidden sidebar is inert; focus and rename hold it open | Chromium focus and hidden-state checks pass |
 
-1. 保持本文与主设计为锚点，不重新引入旧 prototype 的 450ms 行内分屏或额外重置按钮。保留本地补丁，避免代码重复生成。
-2. 将整份补丁作为一个完整实现候选应用到基线兼容分支；不要只发布新 UI 文件而缺少 store、字符串和共享适配。
-3. 复核 C10 的类型保护信号、不可恢复类型批量操作、所有布局入口与镜像覆盖，再执行完整质量检查。
-4. 在正常允许访问本地测试服务器的 CI/桌面环境运行已有和新增 Browser UI，检查真实鼠标结果、截图和宽度/主题组合；不是只修断言令其通过。
-5. 用主设计第12节的概览及详细步骤做 macOS 实机验收，并据实校准动效参数。全部质量门禁与设计覆盖确认后才将 PR 转为可合并状态。
+## C — rows, drag, menus, and close safety
 
-本文记录的是当前交付的真实范围，不能把“设计覆盖”或“本地候选修改”当作全部功能已经交付。
+| IDs | Implemented behavior | Evidence |
+| --- | --- | --- |
+| C01–C03 | Title activation is separate from saved-URL reset; F2/double-click rename isolates IME; range selection does not activate | Component and Chromium keyboard tests pass |
+| C04–C05 | Row halves sort before/after; content crossing alone arms split; row dwell never changes gesture meaning; drop feedback clears globally | Real Chromium mouse-drag tests pass |
+| C06 | Split members retain complete, independently operable rows with compact relation markers | Presentation and Chromium split tests pass |
+| C07 | 34/44 px adaptive rows, stable icon/action slots, restrained active/selection states, theme tokens | Build and visual screenshots reviewed in browser and native app |
+| C08 | Offscreen activation reveals the row without taking focus | Chromium long-list test passes |
+| C09 | Tab, group, sidebar, and footer menus use measured viewport placement and keyboard navigation | Chromium viewport test and native menu inspection pass |
+| C10 | Row, menu, group batch, content, and remote requests use one serialized close coordinator with generation validation | Close coordinator tests pass |
+
+Browser subtitles were further refined after visual review: a unique page title
+stays one line; the host appears only when another browser tab has the same
+title. Paths remain visible for file and terminal rows.
+
+Group deletion now passes each member through close protection. Cancelling a
+dirty, busy, shared, or unload-protected member prevents the group deletion.
+
+## D — verification and acceptance
+
+### D01: full automated quality gate — passed
+
+`npm run check:quality` completed successfully:
+
+- Workbench TypeScript check: passed.
+- Architecture boundary, content catalog, generated associations, and release
+  source checks: passed.
+- Production TypeScript/Vite build: passed.
+- Vitest: 191 files, 2,169 tests passed.
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed.
+- `cargo test --workspace`: 653 tests passed, 2 intentionally ignored,
+  0 failed.
+
+The three page-proxy deadline tests reported running longer than 60 seconds and
+then passed at 91.27 seconds. This is a real successful completion, not a
+skipped or killed test. Vite still reports the repository’s existing dynamic
+import and large-chunk warnings.
+
+### D02: real Chromium UI — passed
+
+`npm run test:browser` completed with 13 of 13 tests passing in four workers.
+The eight sidebar scenarios cover:
+
+- real mouse lower-half insertion and final ordering;
+- no time-based conversion from sort to split;
+- split rows and identity after unsplit;
+- dormant saved removal and reopen;
+- keyboard focus, rename cancellation, and Shift range;
+- stable title width, narrow sidebar, and bottom-edge menu placement;
+- edge intent, exit grace, reverse, and inert hidden state;
+- long-list reveal without focus theft.
+
+The five existing browser smoke checks also passed.
+
+### D03: native macOS — partial, with completed evidence
+
+The isolated build used identifier `app.tabverse.sidebar-candidate`, so it did
+not read or write the installed Tabverse application database.
+
+Passed on macOS:
+
+- the native application launched with normal traffic-light controls;
+- a real PTY started, accepted
+  `printf 'TABVERSE_PTY_OK\\n'`, displayed the output, and returned status;
+- a native browser tab loaded `https://example.com` in WKWebView;
+- keyboard unpin hid the sidebar over WKWebView and keyboard toggle restored
+  the sidebar, controls, and native page coverage;
+- a tab context menu remained inside the window and left the WKWebView visible;
+- a local page with `beforeunload` displayed the Tabverse close-protection
+  dialog; Cancel retained the page;
+- a Markdown file in an isolated `/tmp` directory was edited without saving;
+  closing its Files tab displayed the same protection dialog; Cancel retained
+  the editor and dirty state.
+
+Not completed after macOS locked automatically:
+
+- physical trackpad resize and edge-hover traversal;
+- native folder-preview pointer traversal across the portal gap;
+- a two-device or second-client sharing session.
+
+These three items remain manual acceptance items. Automated controller,
+Chromium pointer, resize cleanup, preview focus, share protection, and mirror
+tests pass, but they are not relabelled as physical native acceptance.
+
+### D04: visual review — passed with stated limits
+
+Browser and native screenshots were reviewed at the default light theme. The
+row hierarchy, stable action slot, adaptive subtitle, active/co-visible
+treatment, menu size, window controls, and WKWebView boundary are legible and
+do not shift on hover. Automated tests cover light/dark theme token switching
+and narrow width. A full pixel comparison against Arc is intentionally not a
+goal, and the timing values are Tabverse choices rather than Arc measurements.
+
+### D05: repository state
+
+The branch integrates current `main` and is intended to update PR #36. It
+must remain unmerged until the PR commit, remote CI result, and the three manual
+native acceptance items above are recorded. No automatic merge into `main`
+is part of this task.
+
+## Reproduction
+
+Run:
+
+```sh
+npm ci
+npm run check:quality
+npm run test:browser
+```
+
+For isolated native validation, build with a non-production identifier:
+
+```sh
+npx tauri build --debug --bundles app \
+  --config '{"identifier":"app.tabverse.sidebar-candidate","productName":"Tabverse Sidebar Candidate"}'
+```
+
+Pass criteria are the rows in section 10 of
+`docs/sidebar-experience-design.md`. Native validation must use isolated
+state, must not close a user’s live Tabverse tabs, and must record any unsigned
+or unnotarized artifact accurately.

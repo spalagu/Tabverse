@@ -29,3 +29,21 @@ export function tabSubtitle(tab: Tab): string {
   }
   return "";
 }
+
+/**
+ * Sidebar rows stay compact unless secondary text resolves real ambiguity.
+ * Paths remain useful working context; Browser hosts appear only when two
+ * visible titles would otherwise be indistinguishable.
+ */
+export function sidebarTabSubtitle(tab: Tab, tabs: readonly Tab[]): string {
+  const subtitle = tabSubtitle(tab);
+  if (!subtitle || tab.type !== "browser") return subtitle;
+  const title = tab.title.trim().toLocaleLowerCase();
+  return tabs.some(
+    (candidate) =>
+      candidate.id !== tab.id &&
+      candidate.title.trim().toLocaleLowerCase() === title
+  )
+    ? subtitle
+    : "";
+}

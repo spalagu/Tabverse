@@ -1,24 +1,24 @@
-# ADR-0012：Remote Browser 在 Remote 渲染并使用 Host 网络
+# ADR-0012: Remote Browser Renders Remotely and Uses the Host Network
 
 ## Status
 Superseded by ADR-0017. The implementation described below has been removed.
 
-## 需求与上下文
-Remote 设备需要访问 Host localhost、LAN、VPN、内部 DNS 和 Host 信任的 HTTPS，但不应取得 Host Browser 会话。
+## Context and requirements
+A Remote device needs access to Host localhost, LAN, VPN, internal DNS, and Host-trusted HTTPS without obtaining the Host Browser session.
 
-## 决策
-Join renderer 经独立 `Http` 数据流调用 HostNetworkGateway。Remote cookie/cache 按认证连接和 `context_id` 隔离；不复制 Host cookie、localStorage、DOM 或 history。HostNetworkGateway 是能力边界，HTTP(S) 只是首个协议。
+## Decision
+The Join renderer calls HostNetworkGateway through an independent `Http` data stream. Remote cookies and caches are isolated by authenticated connection and `context_id`; Host cookies, localStorage, DOM, and history are not copied. HostNetworkGateway is the capability boundary, and HTTP(S) is only the first protocol.
 
-## 备选与拒绝原因
-- Remote 直接访问 URL：无法获得 Host 网络可达性。
-- 镜像 Host Browser：同步敏感会话并退化为远程桌面。
-- 永久定义为 HTTP proxy：阻碍后续 WebSocket/TCP 独立流。
+## Alternatives rejected
+- Direct URL access from Remote: cannot provide Host network reachability.
+- Mirroring Host Browser: synchronizes sensitive sessions and degrades into remote desktop behavior.
+- Permanently defining an HTTP proxy: blocks future independent WebSocket/TCP streams.
 
-## 跨平台影响
-Host HTTP client 使用各平台系统路由、proxy、DNS 和证书能力；协议一致。
+## Cross-platform impact
+The Host HTTP client uses platform routing, proxy, DNS, and certificate capabilities while keeping the protocol consistent.
 
-## Remote 带宽影响
-body 是原始字节流；缓存支持条件重验证；无 1 MiB 总量或 30 秒总请求限制。
+## Remote bandwidth impact
+Bodies are raw byte streams, caches support conditional revalidation, and there is no 1 MiB total-size or 30-second total-request limit.
 
-## 迁移影响与可逆性
-不迁移旧 ProxyReq/ProxyRes、base64 body 或 Host Browser session。新增协议类型不改变控制流。
+## Migration impact and reversibility
+Do not migrate legacy ProxyReq/ProxyRes, base64 bodies, or Host Browser sessions. New protocol types do not change the control flow.

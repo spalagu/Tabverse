@@ -90,11 +90,9 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   section("history", STR.settings.history, "browser"),
   section("passwords", STR.settings.passwords, "browser"),
   section("sites", STR.settings.sites, "browser"),
-  // ── Network & data: how this program reaches the outside, and what it
-  //    keeps across machines. ──
+  // ── Network: how this program reaches the outside. ──
   section("remote", STR.settings.remote, "network"),
   section("network", STR.settings.network, "network"),
-  section("backup", STR.settings.migrate, "network"),
   // ── Automation: things the app does on the user's behalf while they are
   //    not looking at it. ──
   section("background-tasks", STR.settings.backgroundTasks, "automation"),

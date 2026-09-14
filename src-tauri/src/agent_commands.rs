@@ -7,7 +7,7 @@ use tabverse_remote::{RemoteHub, SourceRegistry};
 use tauri::{AppHandle, State};
 
 use crate::{
-    agent_bridge, agent_client, agent_http, agent_login, credentials, share_commands, state_dir,
+    agent_bridge, agent_client, agent_http, agent_login, credentials, share_commands,
     terminal_commands, AppState,
 };
 
@@ -67,8 +67,10 @@ pub(crate) fn agent_login_poll() -> Result<String, String> {
 
 /// Whether there is a usable sign-in on this machine.
 #[tauri::command]
-pub(crate) fn agent_login_status() -> bool {
-    agent_http::stored_token().is_some()
+pub(crate) fn agent_login_status() -> Result<bool, String> {
+    agent_http::stored_token()
+        .map(|token| token.is_some())
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -88,9 +90,7 @@ pub(crate) fn agent_start(
     cwd: String,
     on_event: tauri::ipc::Channel<tabverse_agent::event::SessionEvent>,
 ) -> Result<String, String> {
-    // A tab whose state directory cannot be resolved still gets to run; it
-    // simply has no memory across restarts, which beats refusing to start.
-    let log_dir = state_dir(&app).ok();
+    let log_dir = Some(crate::state_commands::content_dir(&app)?);
     state
         .helper
         .ensure(&app, terminal_commands::helper_callback(&state, &app))?;

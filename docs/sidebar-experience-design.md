@@ -1,289 +1,271 @@
-# Tabverse 侧边栏体验重设计
+# Tabverse Sidebar Experience Contract
 
-版本：1.0 · 2026-09-11 · 基线：main `e44bd884e48d460e47e95db05eafeb6bdd7b49d4`
+Version 1.1, 2026-09-14. Implementation baseline: `main` at
+`c2c5352618fb31a454edf70a6658a7230b29f454`.
 
-**本文是预期行为合同，不是已完成声明。** 实施与验证逐项记录在 `sidebar-implementation-status.md`。此前 PR #36 的局部改法不作为本设计前提；尤其不沿用未经比较的 450ms 行内分屏、额外重置按钮及所有行统一增高。
+This document defines expected behavior. It is not a completion claim. Verified
+implementation and acceptance evidence live in
+`sidebar-implementation-status.md`.
 
-## 0. 一页结论
+## 0. Scope and outcome
 
-本轮不补 Arc 功能清单，而是重新设计已有侧边栏的交互逻辑、功能语义、操作反馈、动态行为与视觉秩序。用户给出的例子是问题方向，不是需求边界。
+This work refines the existing Tabverse sidebar. It does not add a product
+surface.
 
-硬边界：不做 Favorites；不新增 Spaces、同步平台、遥控架构或旧 V3 路线；不自动终止终端任务或丢弃文件编辑；不以测试通过代替体验验收。可以调整现有手势、布局和数据处理，不能为了少改代码保留错误语义。
+- Do not add Favorites, Spaces, a synchronization service, a second sidebar
+  model, or legacy V3 compatibility.
+- Preserve the SQLite local-data model on current `main`. Do not restore JSON
+  session migrations or removed compatibility fixtures.
+- Preserve terminals, files, browser tabs, agents, remote tabs, groups, saved
+  entries, split view, search, and the existing command surfaces.
+- Treat Arc as a reference for calm hierarchy and clear tab identity, not as a
+  specification to copy.
 
-关键决定：
+The expected user-visible change is a sidebar that is easier to read and safer
+to operate repeatedly: stable rows, explicit lifecycle actions, predictable
+sorting and split placement, guarded closing, measured menus, and one
+interruptible auto-hide controller.
 
-1. 固定身份、运行状态、分组归属、分屏关系分别定义。显示在一起不等于保存到一起。
-2. 正在运行的固定 tab 关闭后保留休眠入口；已经休眠的固定 tab 明确关闭后直接移除，可通过最近关闭恢复，不产生普通 tab、不启动内容。
-3. 固定 A 与普通 B 分屏后再解除：A 仍固定、B 仍普通；两个原本固定的成员仍各自固定；分屏期间用户明确做过的修改不能被回滚。
-4. 正常侧边栏拖动只排序或归组。删除“行中部立刻变分屏”的冲突手势；分屏通过已有内容区落点或明确菜单执行，不增加新的修饰键或等待阈值。
-5. 每个分屏成员在自己的归属中保留可辨识的完整行，用小型关联标记表达组合；不把 2–4 个长标题压在一行中，也不因显示需要迁移成员。
-6. 自动侧边栏采用统一的意图与占用控制。经过边缘不过早弹出，离开有缓冲，菜单/命名/拖动/调整宽度/键盘操作期间保持，反向操作可打断退出。
-7. UI 以内容识别为中心：稳定的图标、标题、动作槽；单行和双行按信息需要决定；悬浮不重排标题；活动、选择、同屏和落点不能互相覆盖。
-8. 关闭、解散、移除、取消固定必须明确目标和影响范围；所有入口遵循同一语义，批量操作先确定意图，不能让重复调用把休眠升级为删除。
+## 1. Product model and invariants
 
-## 1. 三轮发散及收敛
+A tab has four independent properties:
 
-### 1.1 从使用者与设计师出发
+1. **Identity**: stable ID, type, title, and recoverable content.
+2. **Saved placement**: a non-null group, including a type preset or a nested
+   user group.
+3. **Runtime state**: live, dormant, or removed.
+4. **Split membership**: a display relationship with up to four live tabs.
 
-沿完整过程检查：召出侧边栏 → 找到内容 → 切换 → 多选/命名 → 整理/归组 → 并排工作 → 临时离开 → 关闭/恢复 → 重启。再对每个过程施加连续操作、取消、误触、失焦、异步失败、窄宽度、深层分组和大量 tab。
+The following invariants apply to every entry point.
 
-| 方向 | 不能只检查 | 必须进一步检查 |
-| --- | --- | --- |
-| 标签身份 | 有 pin/unpin | 是否被分屏、复制、重排、解散文件夹偷偷改变；休眠是否被 unpin 唤醒 |
-| 关闭与恢复 | 能关闭 | 关闭的是进程、入口还是组合；第二次点击/批量重复是否升级破坏；恢复是否保留原身份 |
-| 分屏 | 能左右显示 | 来源、成员数量、来源位置、替换/移出/解除/关闭、显式 pin 变更、满额拒绝、恢复 |
-| 指针意图 | mouseenter/mouseleave 工作 | 经过、停留、边界回返、进入子菜单、预览跨缝、原生网页与 DOM 路径是否同样处理 |
-| 拖动 | drop 能移动 | 拖动前不激活、松手前看懂落点、目标消失、自身落点、多选顺序、空组、组尾、滚动、取消 |
-| 键盘 | 有快捷键 | 焦点与激活是否分离、选择锚点、输入法、编辑器优先级、菜单可操作、隐藏区不能被 Tab 聚焦 |
-| 视觉 | 截图好看 | 长/重名标题、目录/主机、共享/音频/运行状态、所有选择叠加、窄宽度与信息密度 |
-| 连续操作 | 一次结果正确 | 连关几项目标稳定、拖动后位置可追踪、提示不抢点击、回返动画不闪烁 |
-| 保存 | 序列化成功 | 不误保存临时状态，不重放命令，不因恢复布局再次 pin，不恢复过期授权 |
-| 安全与一致性 | 一条路径有确认 | 行按钮/中键/快捷键/菜单/批量/分组是否绕开保护，异步完成是否仍指向原对象 |
+- A01: only an explicit pin, unpin, or cross-zone organization action changes
+  saved placement.
+- A02: split, unsplit, swap, and remove-from-split do not change identity,
+  group, title, URL, or runtime state.
+- A03: close is not unpin; unpin is not wake; collapse is not sleep.
+- A04: removing a display relationship never destroys content.
+- A05: asynchronous actions capture IDs and an object generation. A completed
+  prompt may not be applied to a replacement tab with the same ID.
+- A06: non-activation work does not move focus or change the active tab.
+- A07: the previewed drop result and the committed drop use the same placement
+  calculation.
+- A08: runtime protection completes before state mutation. An unload timeout or
+  error is not permission to close.
+- A09: temporary UI state such as hover, selection, drag feedback, menus, and
+  animation progress is not persisted.
+- A10: reopening state never recreates a folder the user explicitly deleted.
 
-### 1.2 Arc 参照增加的考虑
+## 2. Lifecycle and recovery
 
-采用 macOS Arc 的官方说明作为可确认语义，公开截图只用于视觉观察，不用于推断时序。没有实机测量的动画时长、触发范围和关闭焦点策略，不标成 Arc 精确行为。
-
-| 官方可确认的参照 | 对 Tabverse 的启发与决定 |
+| Starting state and action | Required result |
 | --- | --- |
-| 固定 tab 图标可返回固定地址；Reset 与 Replace Pin 为不同命令 [A1][A3] | 标题只切换/命名，图标区承担有提示的返回；修改固定入口另有明确动作 |
-| 文件夹悬浮可预览/搜索，选中项可露在折叠文件夹下 [A2] | 收起不清空上下文；预览不强制展开全树；键盘与显示顺序必须一致 |
-| Remove Split View 不关闭其 tab [A3] | 解除关系与关闭内容分开；成员身份不受入口影响 |
-| 可以把侧栏 tab 拖向内容区创建分屏 [A4] | 保留分屏能力，但不让普通纵向排序穿过分屏触发带 |
-| 有 Reveal Tab、Reopen、Undo/Redo 等命令 [A3] | 定位与恢复必须考虑位置和身份，不能只重新打开 URL；不把全局 Cmd+Z 从编辑器抢走 |
-| 侧边栏可显隐 [A5] | 区分主动显隐与悬浮显隐；界面占用是一段连续交互，不是单个矩形的 hover |
+| Live saved tab: close runtime | Run protection, then make it dormant while preserving title, group, and saved address |
+| Dormant saved tab: remove | Remove the saved entry directly and add it to recently closed; do not start content or create a Today copy |
+| Live ordinary tab: close | Run protection, then remove and record recoverable state |
+| Any dormant tab: unpin | Preserve the dormant state and move it to Today; do not start it |
+| Removed saved tab: reopen | Restore it dormant without activation |
+| Closed ordinary tab: reopen | Restore recoverable workspace state without stale runtime handles or one-shot start commands |
 
-明确不复制：Favorites、站点预览集成、所有 Arc 快捷键、未经证实的时间参数。Tabverse 含终端、文件、Agent、Remote，浏览器“页面关闭”不能被当作所有运行时的统一销毁策略。
+Reopen placement uses the original group if it still exists, then the nearest
+surviving ancestor, then the type preset. If no suitable saved group survives,
+use a neutral `Pinned` fallback. Never recreate a deleted folder and never
+overwrite another group merely because its historical ID or name matches.
 
-### 1.3 main 实现带来的补充
+Rapid repeated close calls use the state captured by the first user action.
+They cannot turn “sleep this live saved tab” into “remove this now-dormant saved
+tab.” Closing a non-active tab does not activate it. Closing an active split
+member selects a live neighbor before falling back to the next visible row.
 
-本表为静态确认，不声称已在真实 macOS 上复现全部效果。
+Deleting a group is a protected batch operation. Every live member must pass
+the same close coordinator used by row, menu, keyboard, and remote requests.
+Cancellation leaves the group and all unprocessed members intact.
 
-| 现状及位置 | 新暴露的设计缺口 |
+## 3. Split behavior
+
+- A11: every split member remains a complete row in its own group or Today
+  position.
+- A12: a small split marker expresses the relationship. The active member uses
+  the normal active treatment; co-visible members use a quieter treatment.
+- A13: menu-based split and content-drop split call the same store operation.
+- A14: duplicate, self, dormant, peek, and fifth-member additions are rejected
+  without replacing the current split.
+- A15: explicit pin, unpin, rename, or regroup actions made while split are
+  retained after unsplit.
+- A16: unsplit preserves all tabs and current focus. Removing one member keeps
+  the remaining relationship when at least two members remain.
+
+Dragging within the sidebar is always sorting or grouping. Split placement is
+armed only after the pointer crosses into the content plane. Waiting on a row
+does not change the meaning of the gesture.
+
+## 4. Pointer, keyboard, rename, and selection
+
+- C01: clicking a title activates only. Returning a deviated saved browser tab
+  to its saved URL is a separately labelled icon action.
+- C02: double-click or F2 renames. Enter saves a non-empty trimmed value,
+  Escape cancels, and ordinary blur saves. IME composition never submits.
+- C03: ordinary click establishes the range anchor. Command/Ctrl selection and
+  Shift range selection do not activate their target.
+- C04: Up, Down, Home, and End move sidebar focus; Enter or Space activates.
+  Shift+F10 and the Menu key open the row menu.
+- C05: activating an offscreen tab minimally reveals its row without moving
+  keyboard focus into the sidebar.
+- C06: hidden sidebar controls are inert and unreachable through Tab.
+- C07: row actions stop propagation; dragging a title does not first activate
+  it, and cancelling a drag does not become a click.
+
+The editor and terminal keep ownership of their editing shortcuts. The sidebar
+does not install a global undo stack that captures Command+Z.
+
+## 5. Sorting and grouping
+
+- C08: upper and lower row halves mean insert-before and insert-after.
+- C09: a group head means move into the group; the group tail means append.
+- C10: multi-tab moves commit once with IDs, destination group, and insertion
+  anchor. The selected order is the current visible order.
+- C11: dropping a selection onto itself, using an invalid target, or cancelling
+  has no state effect.
+- C12: a group tail never uses the next group’s first item as its anchor.
+- C13: preview, selected IDs, content-drop state, edge-scroll work, and all drop
+  decoration are cleared by drop, drag end, blur, or unmount.
+
+Drop feedback is a stable insertion line. It may not resize rows or place a
+large label under the pointer.
+
+## 6. Auto-hide controller
+
+One controller owns DOM edge events, panel events, document movement, native
+browser-pointer reports, focus, menus, previews, rename, drag, split drag, and
+resize locks.
+
+The states are hidden, awaiting-open, open, awaiting-close, closing, and hidden.
+Any reverse intent cancels a pending timer. Returning during closing reverses
+from the current visual position.
+
+Initial calibrated values are:
+
+| Parameter | Value |
 | --- | --- |
-| `store.ts` 的 pin 通过 `groupId !== null` 表达；`demoteTab` 清除 dormant | 取消固定混入启动运行时的副作用 |
-| `closeTab` 对 dormant pin 直接 return；`TabMenu` 隐藏 dormant 的 Close | 冻结入口没有直接关闭路径；被迫 unpin 才能清理 |
-| `splitWith` 不改归组；`splitOnTab`/`splitDropAt` 会 promote/demote；`unsplit` 只清空 split | 相同意图因入口不同而结果不同；取消后身份取决于创建方式 |
-| 分屏满额/已有成员的若干拖放分支会回退为新两项组合 | 应拒绝的动作可能替换正在工作的布局 |
-| `Sidebar.tsx` 用 split.ids[0] 代表整行；`visibleOrdered` 隐藏其他成员 | 左右顺序与侧栏身份耦合；跨分组后某项可能难以寻找；多选与快捷键对象不清楚 |
-| 行 clickRow 再点击当前固定页会 go-pinned；重命名走双击 | 激活/重置/改名的点击链相互干扰 |
-| 非分屏行 drop 总是 move before；多次 assign + move | 下面松手也放上面，复数移动有中间态与空组清理风险 |
-| 分享按钮 hover 从 display:none 参与布局 | 标题宽度发生变化；局部修复为保留所有按钮又会浪费标题空间 |
-| 所有行 30px 但 title+subtitle 可双行；active/selected/drop 都写 box-shadow | 信息密度和视觉状态没有统一优先级 |
-| Sidebar、App document move、native browser-pointer 均直接改 peeking | 单处加延迟会被其他入口绕过；原生网页另有 snapshot/遮挡协调 |
-| FolderPreview 有自己的异步截图与开关计时 | stale completion、切页、拖动和离开可能使旧预览重新出现 |
-| TabMenu/GroupHeader 部分关闭路径直接调 store；菜单位置使用估计高度 | 保护可能不一致；菜单靠底部溢出且键盘行为不足 |
-| 最近关闭缓存原本仅面向普通 tab | 新增移除固定项时必须保存身份/分组祖先，且恢复休眠项不能启动它 |
+| Edge intent | 100 ms |
+| Leave grace | 280 ms |
+| Enter movement | 180 ms |
+| Exit movement | 200 ms |
+| Folder-preview intent / grace | 300 ms / 360 ms |
 
-## 2. 对象与不可违反的规则
+These values are Tabverse choices, not measured Arc values. Reduced Motion
+removes spatial movement while preserving intent delays. Resize follows the
+pointer and does not animate width.
 
-### 2.1 概念模型
+During exit movement, the native page remains covered until the sidebar is
+actually hidden. A late native snapshot or pointer event is accepted only when
+the active tab, request generation, and current intent still match. Losing
+window focus clears candidates and drag work; it does not close tabs, expand
+groups, or change scroll position.
 
-- **Tab**：稳定内容身份 `id`；类型、标题、当前位置、可恢复状态。
-- **固定身份**：用户要长期保存的入口；不是“当前在运行”。本轮沿用固定文件夹/类型预设的存储映射，不扩展独立根级固定区；概念独立不要求马上新增一套持久化字段。
-- **运行状态**：运行、休眠、已经移除。休眠不代表丢掉入口，也不代表可被误唤醒。
-- **Group**：侧栏归属和组织层级；明确拖进固定组表达固定意图，分屏不是拖进组。
-- **Split**：现有最多四项的显示关系，独立于 pin、group、url。左右换位只改变布局顺序。
-- **终端 Pane**：一个 tab 里面的 PTY 窗格；不是另一 tab，不与跨 tab split 混用生命周期。
-- **临时 UI**：悬浮、焦点、选择、拖放落点、预览、动画进度、菜单。均不写入会话。
+## 7. Visual contract
 
-本轮继续使用现有单一跨 tab split 关系的能力上限，不悄悄引入多工作区布局系统。创建另一个独立组合可以替换显示关系，但必须保留旧成员全部内容与身份；满额、重复、无效成员拒绝而不替换。多独立持久化 split 属于明确的未来扩展，不用于拖延本轮基础语义修正。
+The visual direction is quiet, legible, and stable across light, dark, and
+custom themes.
 
-### 2.2 不变量
-
-I1. 只有明确 pin/unpin、移动到固定/临时区等组织意图改变固定身份。
-I2. split / unsplit / 左右交换不改成员固定身份、分组、标题、地址或运行状态。
-I3. remove / close 不是 unpin；unpin 不是 wake；collapse 不是 sleep。
-I4. 解除显示关系不销毁内容；空占位可取消，已创建内容不可当空占位抛弃。
-I5. 操作对象以 ID 捕获，不在异步确认之后重新解释为当前 tab。
-I6. 非激活操作不夺走当前内容与键盘输入；关闭当前项才选择继任者。
-I7. 拖放提示与提交必须用同一计算规则；失效、自身落点、取消没有副作用。
-I8. 所有具有同一用户意图的入口结果一致；原生与 DOM 显隐走同一控制器。
-I9. 运行时保护先于状态提交；失败不静默视为用户同意。
-I10. 撤销/恢复不覆盖用户之后的新操作，也不重放 runOnStart/旧授权。
-
-## 3. 生命周期与恢复
-
-| 目标及操作 | 结果 | 不得发生 |
-| --- | --- | --- |
-| live pin：关闭运行内容 | 通过必要保护后 sleep，保留入口、名称、组与固定地址 | unpin、永久删除 |
-| dormant pin：明确关闭/移除 | 删除该入口，进入最近关闭；不产生普通 tab | 先 unpin、重新启动页面或 shell |
-| live 普通 tab：关闭 | 移除并按已有恢复能力进入最近关闭 | 自动固定 |
-| dormant 普通 tab：关闭 | 直接移除 | 为了关闭先启动 |
-| pin：取消固定 | 保留 ID、运行状态和当前内容，进入 Today | 清除 dormant 并启动进程 |
-| dormant：打开 | 原身份恢复运行 | 变成普通 tab、复制新 ID |
-| 移除休眠固定项：恢复 | 恢复固定身份、名称、组/缺失祖先和原位置，仍休眠 | 自动激活启动；覆盖已改名的现有组 |
-| 关闭普通 live：重开 | 重新打开同一个可恢复工作区；不携带过期运行句柄/一次性命令 | 重新执行脚本或复用已关闭的 PTY id |
-
-“固定 live 的关闭”与“固定 dormant 的移除”在图标/提示上不同，后者明确写 Remove saved tab；直接可达，不要求先去菜单 unpin。按钮的单击意图按呈现状态捕获；快速双击不得把一次 close 自动升级为 remove。底层支持预期状态校验。重复 ID 的批量动作去重。
-
-关闭非当前项不切换。关闭当前 split 成员，优先同组合相邻仍运行的成员；否则按操作前可见列表顺序选择下一项，再上一项；没有候选就显示空状态，不唤醒休眠项。解除 split 保持当前焦点；从组合移出当前项后仍关注该项，内容单独显示，其余组合保留。
-
-批量“关闭选中项”按开始时的对象意图执行；“关闭分组运行内容”仅处理开始时 live 成员，不删除其中 dormant 入口。失败/取消不破坏未处理成员。永久删除文件夹及其内容必须明确确认；解散文件夹保留标签，优先搬至父组，无父组则保留既有固定身份到类型预设，不能偷偷 unpin。
-
-## 4. 分屏完整语义
-
-| 场景 | 成员身份和归属 | 解除后 |
-| --- | --- | --- |
-| pin A + 新开 B | A 固定；B 默认普通；选新类型/URL后才创建内容 | A 固定、B 普通，均保留 |
-| pin A + 已有普通 B | 不改任何成员 group/pin | 各归各处 |
-| pin A + pin B（可跨组） | 保留两个固定身份和位置 | 两个 pin |
-| ordinary A + ordinary B | 都普通 | 都普通 |
-| 期间显式 pin B / unpin A / 改名 / 归组 | 立即生效，属于用户新的持久意图 | 不恢复旧快照 |
-| 左右换位 | 只改 split.ids/ratios | 不改侧栏顺序与固定入口 |
-| 重复成员 / 自身 / 第五项 / 休眠 / Peek | 拒绝并清落点状态 | 原 split 不变 |
-| 关闭一侧 | 对该成员按生命周期处理；不足两项关系自然消失 | 幸存者身份不变 |
-| 从组合移出一侧 | 移出者独立，余下 >=2 则保留；焦点不意外转移 | 不关闭任何成员 |
-| 解除整个组合 | 清显示关系 | 保留内容、身份与最近修改 |
-| 使用已有 + 添加一侧 | 使用现有候选规则，菜单不得暗示“新建”而实际拿走别处内容 | 文案与对象范围一致 |
-
-本轮不提供“把整个 split 固定成一个可复用模板”；要保存多个入口，明确分别 pin。没有该意图时，不自动制造两个 pin。终端内部窗格继续保留自己的新建/关闭/放大流程，不因为解除外层 split 而转换成标签。
-
-侧栏展示选用**独立完整行 + 分屏关联标识**：每项都在自己的位置显示、可独立关闭/菜单/选择；当前项实底突出，其余正在同屏的成员用低强度背景和关联标记。避免在 248px 内压缩四个标题，并从根本上解除“代表行位置”和 pin 的耦合。该选择是针对多工具工作台的适配，不声称 Arc 相同。
-
-## 5. 指针、命名与键盘
-
-P1. 标题/主行：单击只激活；选中已激活项不返回固定地址。图标单独可重置（仅有偏离时），提供 tooltip/aria-label；重置准确投递到该 tab，不广播给旧活动页面。
-P2. 双击主标题或 F2：命名。Enter 保存非空 trim 值，Escape 无保存退出，普通失焦保存；输入法 composition/keyCode229 不提交，键盘不冒泡到应用命令。
-P3. 普通点击建立范围锚点；Cmd/Ctrl 选择与 Shift 范围选择不切换内容。Shift 无锚点从当前 tab 起。拖动已选集合保留选择，拖非选中项只拖该项。按显示顺序形成范围和移动集合。
-P4. 拖动与单击分离；mousedown 不激活；拖动取消不执行 click。行按钮、图标动作、输入框不会冒泡触发改名/切页。
-P5. 主行使用语义化按钮，Enter/Space 激活；Up/Down/Home/End 在侧栏中移动焦点，不自动激活。F2 命名，Shift+F10/菜单键菜单。分组左右键折叠/展开。
-P6. 编辑器/终端自己的按键优先，不创建抢全局 Cmd+Z 的 sidebar undo。冻结项与所有可见项可通过键盘到达；隐藏侧栏不可 Tab 到隐形按钮。
-P7. 激活屏幕外条目时仅滚动侧栏到最近可见边界，不 steal focus，不平滑长距离滚动妨碍连续切换。用户正在手动滚动时，标题/状态更新不改变 scrollTop。
-P8. 菜单、预览关闭后，键盘操作恢复到合理触发者；原 tab 删除时选择最近仍存在的目标。
-
-## 6. 拖放设计
-
-D1. 正常 sidebar 行的上半/下半分别插前/插后，整个标题区都属于排序，提示为窄插入线；不再使用 28%–72% 中带和停留计时猜分屏。
-D2. 内容区分屏槽和右键 Split with active 仍可分屏，所有入口只调用统一关系操作；不存在“同一次拖动同时排序又分屏”。
-D3. 组头 drop 表达进入该组，组尾为末尾；空组有足够落点。组级排序/嵌套继续明确区分，祖先拖入后代和 preset 非法移动无副作用。
-D4. 多项移动原子提交：指定 ids + destination group + insertion anchor。组尾不能借下一个组的首 tab 当 anchor；选中集合拖回自己 no-op；目标失效拒绝，不偷偷追加到 Today。
-D5. 跨组排序才改变固定归属；在当前组内部排序不重置固定 URL，不醒 dormant。
-D6. 上下边缘自动滚动随指针靠近加速，离开边界/释放/取消/失焦停止。子组件消费 drop 也必须完成全局清理；组件卸载不留下 timer/RAF/dragging IDs。
-D7. 落点不采用占据行间空间的巨大文字标签，不因提示改变指针命中位置。多选 ghost 显示数量，不泄露长目录。
-D8. 拖动期间冻结 hover preview，维持侧栏可见。取消不改变分组、活动项、pin 或内容。
-
-## 7. 自动侧边栏：统一状态与动效
-
-### 7.1 状态机
-
-状态：hidden → awaiting-open → open → awaiting-close → closing → hidden。可随时取消候选计时；closing 遇到回返从当前位置反向，不先完成退出。固定模式不参与自动计时。
-
-事件统一来自 DOM edge/panel、document pointer、native browser-pointer、键盘焦点、拖动、命名、resize、菜单/预览。所有来源只报告意图；实际 peeking 由一个控制器修改。低层 setSidebarPeeking 仍作为显式状态提交接口供镜像/既有调用，不在三个地方分别装 timer。
-
-占用包括：指针在侧栏或其菜单/预览；侧栏拥有键盘焦点；正在命名、拖动、调整宽度；正在打开预览。任何占用都不能因为跨出矩形立即收回；解锁后若指针已离开，再开始完整收回缓冲，不能瞬间消失。
-
-### 7.2 初始设计参数（不是 Arc 测量值）
-
-| 参数 | 初始值 | 理由/验收 |
-| --- | --- | --- |
-| 边缘意图确认 | 140ms | 快速扫过不打开；停留明确可达 |
-| 离开缓冲 | 320ms | 比展开更宽容，覆盖短暂越界与回返 |
-| 展开运动 | 220ms，减速，无回弹 | 看清运动，不延迟显式响应 |
-| 收回运动 | 280ms，平顺退出 | 不瞬间抽走，允许反向 |
-| Folder preview 打开/离开缓冲 | 300/360ms | 不抢经过，不跨缝闪退 |
-| Tooltip | 600ms 级别或原生系统策略 | 不与短时操作竞争 |
-
-参数集中管理；CSS 运动时长与状态提交边界来自同一常量/变量。Reduced Motion 将空间运动压到 0–1ms，但保留防误触的意图缓冲。resize 跟手，不以 width transition 追逐指针。
-
-### 7.3 原生网页与输入区域
-
-closing 期间仍保持原生页面遮挡/snapshot 的占用，直到退出完成才释放，避免“面板还在但点击落到后面页面”。Snapshot 返回时必须校验 active tab、请求代次与当前意图；过期结果丢弃。固定/浮动切换不能闪动 traffic lights；此项必须真实 macOS 验收，Chromium fixture 不能证明。
-
-窗口失焦、页面切换、组件卸载应取消悬浮候选和拖动循环；不能因旧 native edge 消息把已经隐藏的栏重新唤醒。自动隐藏不应关闭 tab、暂停任务、展开分组或重置滚动。
-
-## 8. 视觉规范
-
-方向：安静、有层次、稳定，而非发光高亮叠加。继续使用现有主题 token，不引入固定色污染 dark/light/custom theme。
-
-| 元素 | 预期 |
+| Element | Required treatment |
 | --- | --- |
-| 主标签 | 图标16px，标题约13px；常规单行34px；有必要副信息的行44px；不因 hover 改高度 |
-| 副信息 | 目录/主机/域名帮助区分重名时保留；11px级，次级但可读；不全局 RTL 显示域名 |
-| 标题/动作 | 图标槽稳定；尾部一个主要 close/remove 槽固定；共享入口移至图标悬浮或菜单，已共享状态仍常驻；音频单独状态槽，不保留一排空按钮 |
-| 当前项 | 克制实体/轻混色底 + 清楚字色，不用大面积渐变发光 |
-| 多选 | 独立 inset outline；可与当前态共存 |
-| 同屏成员 | 低强度关联提示，与当前项区分；小型 split 标记带完整说明 |
-| 分组 | 30px级标题行、统一图标基线与12px级缩进；展开与折叠均可辨认；计数是总入口数，不伪装运行数 |
-| 层级 | 适度组间距，Today 分隔清楚；深嵌套最多使用受限视觉缩进，完整层级通过标题提示可读，不改真实归属 |
-| 休眠/结束 | 休眠不整行灰到像禁用；结束不把长标题全部划掉；状态小而清楚 |
-| 菜单/预览 | 根据实测尺寸钳制到 viewport 内，内容过多内部滚动；无弹簧过冲；标题/操作区层级明确 |
-| 浮动面板 | 合理边缘留白、圆角、克制阴影；不改变 pin/today 的空间位置 |
+| Row | 34 px for title-only content; 44 px when useful secondary text exists |
+| Icon and actions | Stable icon slot and one stable close/remove slot; hover does not change title width |
+| Browser subtitle | Omit for a unique title; show the host when another browser tab has the same title |
+| File/terminal subtitle | Keep the path or distinguishing runtime context |
+| Active | Restrained solid or mixed background with clear foreground, not a large glow |
+| Selection | Independent inset outline that can coexist with active and split states |
+| Dormant/exited | Communicate status without reducing the entire row to disabled contrast |
+| Split | Complete rows plus a compact, explained relation marker |
+| Group | Consistent baseline, bounded nesting indent, honest total count |
+| Menu/preview | Measure real content, clamp to the viewport, scroll internally, and avoid spring overshoot |
+| Floating sidebar | Modest radius and shadow; no layout shift between saved and Today areas |
 
-桌面按钮命中区不少于24px，触摸至少40–44px；键盘 focus-visible 清晰；指针不触发整行按压位移；hover 不改变标题宽度和截断点。窄侧栏必须能辨认名称，不把更多常驻按钮当作“更方便”。
+Hover preview does not steal focus from a terminal, editor, or webpage. It may
+receive focus after an explicit click. Desktop action targets are at least
+24 px, focus-visible is clear, and a narrow sidebar still preserves a readable
+title.
 
-## 9. 文件夹、预览与菜单的一致性
+## 8. Menus and close coordination
 
-折叠仅改变显示，不更改运行和身份。保留当前实现的“运行项露出、休眠项藏入预览”作为本轮兼容策略；不为追求 Arc 外观改变键盘数量和已有操作习惯。只露当前项的进一步调整必须同时修改树投影、范围选择、关闭邻居和远端投影，不能仅在 CSS 隐藏。该候选记录于后续项，不视为已完成。
+Tab, group, sidebar, and footer menus share measured placement and keyboard
+behavior. Arrow keys cycle enabled commands; Home and End jump; Escape closes
+and restores the trigger when it still exists. Text inputs keep their own keys.
 
-预览中的搜索匹配标题与可识别副信息；异步打开时再次验证组存在、仍折叠、指针意图、无拖动/命名。搜索输入和键盘焦点是占用；搜索无结果提供清楚空状态；选择不展开整棵树。退出预览与退出侧栏协调，不互相安装竞争 timer。
+Labels must state scope: `Close running tab`, `Remove saved tab`, `Unpin`,
+`Remove from split`, and `Separate split into tabs` are different actions.
 
-菜单选择捕获 tab/group ID；出现多个菜单时只保留当前适用层。菜单应区分 Remove saved tab、Close running tab、Unpin、Remove from split、Separate split，不能同一个 Close 在同一呈现状态下改变范围。破坏性动作与常规布局操作分组展示。
+Row button, middle click, menu, content chrome, group batch, keyboard command,
+and remote close request use one close coordinator. Protection covers:
 
-## 10. 运行时安全、保存及失败
+- dirty Files workspaces;
+- busy agents and terminals;
+- active terminal or application sharing;
+- native browser `beforeunload`;
+- inability to determine whether a page can unload.
 
-- 行/菜单/中键/快捷键必须进入同一 close coordinator；批量也使用该协调而不是绕过确认。文件 dirty、Agent busy、终端 busy/共享与页面 beforeunload 要有明确保护策略。
-- 现有 PTY 后台任务能力按已启用配置提供继续后台或停止，不能为侧栏重设计偷偷开启。detach 失败保留标签并显示原因。
-- native unload 检查超时/错误不能证明页面安全；应保留/询问而不是静默强关。
-- 休眠/移除要清理瞬态 share/audible/drag/selection 指针，但不得删除仍可恢复的工作区状态；最近关闭的淘汰沿用已有容量政策。
-- 不增加“只有 UI 端明白、远端照样改错”的操作；host store 必须执行核心身份与容量约束，镜像重放需要回归验证。
-- 会话保持 v1/zones3 兼容。新行为不臆造旧 split 的来源身份：已有被自动 pin 的成员没有来源证据，保留现状，不能迁移时猜测并 unpin。
-- 还原休眠入口不自动激活；还原已关闭内容不携带一次性命令、过期 PTY/attach ID。永久清理不宣称可恢复已经结束的进程。
-- 不通过仅测试 fixture mock 来宣称 macOS 输入、窗口控件、活跃任务与文件保存已经验收。
+Prompts are serialized. Repeated requests for the same object are deduplicated.
+After a prompt, the coordinator revalidates presence, runtime state, URL,
+working directory, dirty/busy state, terminal/session IDs, and share identity.
 
-## 11. 实施结构与阶段
+## 9. A/B/C/D delivery map
 
-所有阶段以本文编号和测试为锚点。变更需求先修改本文并说明理由，不能用代码现状反写预期。
+### A — identity and lifecycle
 
-### A. 身份与生命周期（先于视觉）
+A01–A10 cover close, sleep, remove, reopen, unpin, placement fallback, atomic
+movement, protected group deletion, and host/mirror agreement. A11–A16 cover
+split identity and display invariants.
 
-A01 dormant pin 直接关闭与原身份恢复；A02 unpin 不 wake；A03 splitWith/splitOnTab/splitDropAt 不改归属且满额/重复不破坏；A04 unsplit/移出保持内容与焦点；A05 多选去重、原子归组排序、自身落点；A06 解散组保留固定身份；A07 复制默认普通且不继承一次性运行命令；A08 会话/镜像/组合关闭回归。
+### B — auto-hide and continuous operation
 
-### B. 显隐与连续交互
+B01 single intent controller; B02 open/leave/reverse timing; B03 exit coverage
+and Reduced Motion; B04 resize and cancellation cleanup; B05 preview
+invalidation and focus behavior; B06 hidden focus exclusion.
 
-B01 单一控制器与 native/DOM 接入；B02 开关计时/回返/锁/失焦；B03 退出动画期间占用与 reduced motion；B04 resize 跟手、取消清理；B05 预览请求失效与占用；B06 键盘焦点不在隐藏栏。
+### C — rows, drag, menus, and visual hierarchy
 
-### C. 标签行、拖动和视觉
+C01–C07 cover activation, reset, rename, IME, selection, navigation, and focus.
+C08–C13 cover real sorting, grouping, atomic movement, and cleanup. C14 covers
+complete split rows; C15 covers adaptive subtitles and stable action slots;
+C16 covers measured menus; C17 covers unified close entry points.
 
-C01 标题激活与图标 reset 分开；C02 IME 命名与取消；C03 多选锚点与键盘导航；C04 普通拖动前/后、组头/组尾与内容分屏；C05 边缘滚动与全局清理；C06 分屏独立完整行与关联状态；C07 单/双行与固定动作槽、全主题；C08 视口定位不夺焦点；C09 菜单实测边界与键盘；C10 close coordinator 全入口。
+### D — acceptance
 
-### D. 完整收口
+D01 lifecycle, batch, nested-group, split-capacity, and long-list automated
+scenarios. D02 real Chromium mouse drag, interrupted motion, viewport, focus,
+and layout checks. D03 native macOS WKWebView, window chrome, PTY, dirty file,
+beforeunload, sharing, and trackpad checks. D04 records incomplete items
+explicitly. D05 requires review before merge; this work does not merge itself
+into `main`.
 
-D01 冻结/关闭/恢复/批量/嵌套/长列表场景集；D02真实浏览器鼠标拖动、动效中断、布局稳定截图；D03 macOS WKWebView/traffic lights/PTY/dirty 文件/分享实机验收；D04 需求覆盖表含未完成项，不把测试绿当完成；D05 PR 审阅后再合并，不自动改 main。
+## 10. Acceptance summary
 
-文档可以完整、实施分批，但必须诚实显示各阶段状态，不能把未来项写成已支持；没有可验证行为的模块拆分不算完成交付。
-
-## 12. 验收概览
-
-| 验证 | 通过标准 |
+| Verify | Pass condition |
 | --- | --- |
-| 冻结固定项关闭 | 直接消失，无 Today 副本，无运行时启动；恢复后仍固定休眠且归属可找 |
-| 固定/普通组合 | 通过菜单、内容拖放分别组合同样成员并解除，身份、地址、归属结果一致 |
-| 分屏边界 | 满四项/重复/自身拒绝且原组合不变；移出或关闭一侧不误固定幸存者 |
-| 批量与归组 | Shift 从普通点击锚点工作；跨组按可见顺序移动；自己落自己无变化；组尾不误归其他组 |
-| 不误操作 | 双击命名不重置；按钮不激活；拖动不切页；取消不清选择或销毁内容 |
-| 侧栏手感 | 掠过不弹，停留打开；离开不即刻消失；回返平顺反向；菜单/改名/拖动/resize 不收回 |
-| 真实布局 | 长标题悬浮前后宽度相同；四个 split 成员均可辨认；浅/深色与窄侧栏均无遮挡 |
-| 键盘/输入法 | 主行、菜单、命名可用；焦点不意外切页；IME确认不提交；隐藏栏不可聚焦 |
-| 运行中保护 | 忙终端、脏文件、网页 unload 与批量不会绕开保护；失败不当成同意 |
-| 恢复/保存 | 重启不因重建布局改变 pin；一次性命令不重放；恢复固定项不误启动 |
+| Saved lifecycle | Live close sleeps; dormant remove creates no Today copy; reopen stays saved and dormant |
+| Deleted folder recovery | Folder stays deleted and the restored entry lands in a surviving safe group |
+| Split identity | Menu and content-drop splits preserve each member’s group through reorder and unsplit |
+| Drag | Before/after feedback equals final order; row dwell never becomes split; all feedback clears |
+| Keyboard and IME | Focus and activation remain separate; rename handles Enter, Escape, and composition |
+| Auto-hide | Fly-by does not open; dwell opens; leave has grace; return reverses; locks hold the panel |
+| Layout | Hover does not shrink titles; unique browser titles stay compact; menus fit the viewport |
+| Runtime protection | Busy, dirty, shared, and beforeunload cases cannot bypass the prompt |
+| Native page | Sidebar covers and uncovers WKWebView content without dead zones or stale overlays |
+| Persistence | No JSON session path returns; no restored content replays one-shot runtime commands |
 
-### 关键详细路径
+## 11. References
 
-1. 在固定 A 中导航到新地址 → 点击标题两次 → 双击改名并 Escape → 点击图标返回固定地址。前三步不得导航；只有最后一步返回。
-2. 固定 A + 普通 B，通过菜单创建 split → 左右换位 → 明确 pin B / unpin A → 解除。最终以用户新的身份选择为准，不恢复旧快照。换用内容拖放再跑一次。
-3. 四成员 split → 拖入第五项 / 重复成员 / 休眠项。组合、比例、活动项和归属都不变，仅清理落点。
-4. 关闭运行固定项 → 休眠项明确移除 → 最近关闭恢复。验证没有普通副本且恢复不启动；删除其旧组后再恢复，确认安全恢复归属、不覆盖现存同 ID 组。
-5. 多选跨组条目 → 拖到组尾 → 再拖回所选集合 → 取消下一次拖动。验证内部顺序、自身无变化、无残留提示、非激活操作不夺焦点。
-6. 自动侧栏：边缘掠过、停留、离开后回返、退出一半时回返、菜单跨界、IME命名、拖到列表边缘、resize 到内容外、窗口失焦。再在原生网页而非 DOM fixture 重复。
-7. 准备40项、重复名称、长目录、共享/音频状态；在窄/正常宽度与 light/dark 下截图并连续关闭/切换/滚动。核对截断、命中区、焦点与补位。
+- Arc Pinned Tabs:
+  https://resources.arc.net/hc/en-us/articles/19231060187159-Pinned-Tabs-Tabs-you-want-to-stick-around
+- Arc Folders:
+  https://resources.arc.net/hc/en-us/articles/19228419623447-Folders-Stash-Similar-Tabs-Together
+- Arc Command Bar Actions: https://start.arc.net/command-bar-actions
+- Arc Find deep focus: https://start.arc.net/find-focus
+- Arc Hide Sidebar:
+  https://resources.arc.net/hc/en-us/articles/25619487530519-How-Do-You-Hide-the-Sidebar
 
-## 13. 证据与限制
-
-[A1] Arc Pinned Tabs：https://resources.arc.net/hc/en-us/articles/19231060187159-Pinned-Tabs-Tabs-you-want-to-stick-around
-[A2] Arc Folders：https://resources.arc.net/hc/en-us/articles/19228419623447-Folders-Stash-Similar-Tabs-Together
-[A3] Arc Command Bar Actions：https://start.arc.net/command-bar-actions
-[A4] Arc Find deep focus：https://start.arc.net/find-focus
-[A5] Arc Hide Sidebar：https://resources.arc.net/hc/en-us/articles/25619487530519-How-Do-You-Hide-the-Sidebar
-
-代码证据：基线 SHA 下的 `src/state/store.ts`、`src/components/{Sidebar,TabMenu,GroupMenu,FolderPreview,TabContent}.tsx`、`src/App.tsx`、`src/styles.css`、`src/appCommands.ts`、`packages/workbench/src/sidebarPresentation.tsx`。官方事实、设计选择、静态判断、自动化结果和实机观察必须分开记录。
+Repository evidence includes `src/state/store.ts`, `src/appCommands.ts`,
+`src/sidebarHover.ts`, `src/components/Sidebar*.tsx`,
+`src/components/{TabMenu,GroupMenu,FolderPreview,TabContent}.tsx`,
+`src/components/sidebar-experience.css`, and
+`packages/workbench/src/sidebarPresentation.tsx`.

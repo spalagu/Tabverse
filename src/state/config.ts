@@ -849,27 +849,15 @@ export function upsertProfile(
 
 const DEMO_EDITS_KEY = "tabverse.demo.config";
 
-/**
- * What the demo answers `sources` with once it has an edit store, and why it
- * is not the empty list forever.
+/** The demo's edit carrier once local changes exist.
  *
- * `sources` is not decoration: the store reads "no source at all" as "this
- * user has no configuration file yet", and that is the trigger for moving
- * the five session-held settings and the theme into it — a migration meant
- * to happen exactly once, whose done-marker on the desktop is the file it
- * has just created. A demo that reported no source forever would re-run it
- * on every read, and the visible damage is precise: resetting the theme
- * would appear to do nothing, because the migration puts the old stored
- * preference straight back. Naming the carrier is what makes it once here
- * too.
- *
- * Not a path, and deliberately shaped so it cannot be mistaken for one — it
- * gates an "open the file" button that no demo banner shows and that
- * `revealConfigFile` declines to act on anyway.
+ * Not a path, and deliberately shaped so it cannot be mistaken for one. The
+ * value disables file-only actions while still reporting that edits have a
+ * persistent source.
  */
 const DEMO_EDITS_SOURCE = `localStorage:${DEMO_EDITS_KEY}`;
 
-/** The demo's own carrier, listed once it exists — see above for why. */
+/** The demo's own carrier, listed once it exists. */
 function demoSources(): string[] {
   try {
     return localStorage.getItem(DEMO_EDITS_KEY) === null
@@ -1090,14 +1078,7 @@ export const NO_CONFIG_BACKEND = "no configuration backend";
 
 type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 
-/**
- * The import, kept as a promise rather than repeated per call.
- *
- * Caching the promise, not the module, is what makes it one import: several
- * settings can be written in the same tick — a migration moves six at once —
- * and each would otherwise start its own dynamic import of the same module.
- * Resolved once, every caller gets the same function.
- */
+/** Cache the dynamic import so concurrent settings writes share one request. */
 let invokePromise: Promise<Invoke> | null = null;
 
 function invoker(): Promise<Invoke> {
@@ -1265,6 +1246,7 @@ const pending = new Map<string, unknown>();
 const reporters = new Map<string, (o: WriteOutcome) => void>();
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 const inFlight = new Set<Promise<void>>();
+let writesPaused = false;
 
 function writeNow(key: string): Promise<void> {
   const timer = timers.get(key);
@@ -1316,6 +1298,7 @@ export function configSetSoon(
   value: unknown,
   onDone?: (o: WriteOutcome) => void
 ): void {
+  if (writesPaused) return;
   pending.set(key, value);
   if (onDone !== undefined && !reporters.has(key)) reporters.set(key, onDone);
   const timer = timers.get(key);
@@ -1334,6 +1317,37 @@ export function configSetSoon(
 export function flushConfigWrites(): Promise<void> {
   const writes = [...pending.keys()].map((key) => writeNow(key));
   return Promise.all([...writes, ...inFlight]).then(() => undefined);
+}
+
+/**
+ * Quiesce registered-setting writes around the backend's factory-reset
+ * transaction. Writes queued before the reset are discarded; in-flight
+ * writes finish before the reset starts, and no new write may land behind it.
+ */
+export async function pauseConfigWrites(): Promise<() => void> {
+  writesPaused = true;
+  for (const timer of timers.values()) clearTimeout(timer);
+  timers.clear();
+  pending.clear();
+  reporters.clear();
+  await Promise.all(inFlight);
+  return () => {
+    writesPaused = false;
+  };
+}
+
+/** Reset the registered settings and content choices through their owner. */
+export async function factoryResetSettings(): Promise<void> {
+  if (!isTauri()) {
+    const schema = demoSchema();
+    if (schema === null) throw NO_CONFIG_BACKEND;
+    const edits = demoEdits();
+    for (const setting of schema) delete edits[setting.key];
+    writeDemoEdits(edits);
+    return;
+  }
+  const invoke = await invoker();
+  await invoke<void>("state_factory_reset");
 }
 
 // --------------------------------------------------------- error reading

@@ -392,7 +392,7 @@ mod tests {
             let request = stream.recv().unwrap();
             assert_eq!(
                 request,
-                Frame::new(Kind::Prompt, r#"{"text":"你好"}"#.as_bytes().to_vec())
+                Frame::new(Kind::Prompt, r#"{"text":"hello"}"#.as_bytes().to_vec())
             );
             stream
                 .send(&Frame::new(Kind::Event, br#"{"type":"done"}"#.to_vec()))
@@ -404,7 +404,7 @@ mod tests {
         client
             .send(&Frame::new(
                 Kind::Prompt,
-                r#"{"text":"你好"}"#.as_bytes().to_vec(),
+                r#"{"text":"hello"}"#.as_bytes().to_vec(),
             ))
             .unwrap();
         assert_eq!(

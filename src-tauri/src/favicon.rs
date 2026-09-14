@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use base64::Engine as _;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Disk cache bound: enough for every host anyone actually revisits,
-/// small enough that the state dir never grows without limit.
+/// small enough that the cache never grows without limit.
 const CACHE_FILES_LIMIT: usize = 300;
 /// An icon bigger than this is not an icon; stop reading rather than
 /// letting a hostile or misconfigured server feed us a movie.
@@ -41,7 +41,7 @@ fn is_image_data_url(url: &str) -> bool {
 }
 
 fn cache_dir(app: &AppHandle) -> Option<PathBuf> {
-    crate::state_dir(app).ok().map(|d| d.join("favicons"))
+    app.path().app_cache_dir().ok().map(|d| d.join("favicons"))
 }
 
 /// The host names a file; it arrives from a page script, so the name is

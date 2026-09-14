@@ -6,6 +6,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 pub mod agent_ipc;
 
 const HOST_STALE_AFTER_SECONDS: i64 = 5;
+const SCHEMA_VERSION: i64 = 1;
+const APPLICATION_ID: i64 = 0x5456_5233;
+const TABLES: &[&str] = &[
+    "runtime_hosts",
+    "runtime_interruptions",
+    "runtimes",
+    "schema_migrations",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeRecord {
@@ -44,12 +52,18 @@ impl RuntimeStore {
         std::fs::create_dir_all(runtime_dir).with_context(|| {
             format!("cannot create runtime directory {}", runtime_dir.display())
         })?;
+        secure_dir(runtime_dir)?;
         let store = Self {
             path: runtime_dir.join("runtime.db"),
             host_instance: host_instance.to_owned(),
         };
-        let connection = store.connection()?;
-        connection.execute_batch(
+        let existed = store.path.exists();
+        if existed {
+            validate_schema(&store.path)?;
+        }
+        let mut connection = store.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute_batch(
             "CREATE TABLE IF NOT EXISTS schema_migrations (\
                version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL\
              );\
@@ -65,9 +79,15 @@ impl RuntimeStore {
              CREATE TABLE IF NOT EXISTS runtime_hosts (\
                instance TEXT PRIMARY KEY, heartbeat_at INTEGER NOT NULL, stopped_at INTEGER\
              );\
-             INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, unixepoch());\
-             INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, unixepoch());",
+             INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, unixepoch());",
         )?;
+        transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        transaction.commit()?;
+        secure_database_files(&store.path)?;
+        if !existed {
+            validate_schema(&store.path)?;
+        }
         claim_host(&connection, host_instance, now, stale_after)?;
         Ok(store)
     }
@@ -169,8 +189,112 @@ impl RuntimeStore {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "busy_timeout", 5_000_i64)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
+        secure_database_files(&self.path)?;
         Ok(connection)
     }
+}
+
+fn validate_schema(path: &Path) -> Result<()> {
+    use rusqlite::OpenFlags;
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("cannot inspect {}", path.display()))?;
+    let application_id: i64 =
+        connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
+    let user_version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let mut statement = connection.prepare(
+        "SELECT name FROM sqlite_master \
+         WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )?;
+    let tables = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let versions = connection
+        .prepare("SELECT version FROM schema_migrations ORDER BY version")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap_or_default();
+    let columns = |table: &str| -> rusqlite::Result<Vec<String>> {
+        let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect();
+        columns
+    };
+    anyhow::ensure!(
+        application_id == APPLICATION_ID
+            && user_version == SCHEMA_VERSION
+            && tables == TABLES
+            && versions == [SCHEMA_VERSION],
+        "{} is not the current V3 runtime.db schema",
+        path.display()
+    );
+    for (table, expected) in [
+        (
+            "runtime_hosts",
+            &["instance", "heartbeat_at", "stopped_at"][..],
+        ),
+        (
+            "runtime_interruptions",
+            &["id", "runtime_id", "generation", "reason", "occurred_at"][..],
+        ),
+        (
+            "runtimes",
+            &[
+                "id",
+                "kind",
+                "generation",
+                "state",
+                "host_instance",
+                "checkpoint_json",
+                "created_at",
+                "updated_at",
+            ][..],
+        ),
+        ("schema_migrations", &["version", "applied_at"][..]),
+    ] {
+        anyhow::ensure!(
+            columns(table)? == expected,
+            "{} has a noncurrent {table} table",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn secure_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("cannot secure {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn secure_dir(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn secure_database_files(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for candidate in [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", path.display())),
+        PathBuf::from(format!("{}-shm", path.display())),
+    ] {
+        if candidate.exists() {
+            std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("cannot secure {}", candidate.display()))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_database_files(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn generation_from_row(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
@@ -261,6 +385,47 @@ mod tests {
         next.state = "detached".into();
         store.put(&next).unwrap();
         assert_eq!(store.list().unwrap(), [next]);
+    }
+
+    #[test]
+    fn a_noncurrent_runtime_database_is_rejected_without_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE old_runtime(value TEXT); INSERT INTO old_runtime VALUES ('kept');",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(RuntimeStore::open(temp.path(), "host-a").is_err());
+        let connection = Connection::open(&path).unwrap();
+        let value: String = connection
+            .query_row("SELECT value FROM old_runtime", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, "kept");
+        assert!(connection.prepare("SELECT * FROM runtimes").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_database_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        RuntimeStore::open(temp.path(), "host-a").unwrap();
+        assert_eq!(
+            std::fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(temp.path().join("runtime.db"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     #[test]

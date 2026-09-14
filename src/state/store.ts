@@ -5,16 +5,16 @@ export { rootGroups, subtreeTabs } from "@tabverse/workbench/sidebar";
 import { coreLog } from "../errlog";
 import {
   SESSION_SCOPE,
-  THEME_SCOPE,
   deleteState,
   listScopes,
   loadState,
   loadStateResult,
+  markStateInvalid,
   saveState,
   scopeTabId,
 } from "../persist";
 import { errorText } from "../strings/errors";
-import { asThemePreference, resolve as resolveTheme } from "../theme/resolve";
+import { resolve as resolveTheme } from "../theme/resolve";
 import {
   FALLBACK_THEME,
   groupColor as themeGroupColor,
@@ -32,7 +32,6 @@ import {
   configSchema,
   configSetSoon,
   configSlice,
-  flushConfigWrites,
   numberRange,
   type ConfigSlice,
   type ConfigSnapshot,
@@ -339,9 +338,7 @@ export function withPresetGroups(groups: Group[]): Group[] {
     );
   }).map((g, i) => ({
     ...g,
-    // A session saved before presets existed has the group but not the
-    // marking; without this it would be deletable and would not attract
-    // new tabs.
+    // Preset identity is derived from its fixed position and type.
     preset: PRESET_GROUPS[i].type,
   }));
   const custom = groups.filter((g) => !presets.some((p) => p.id === g.id));
@@ -359,54 +356,7 @@ export function groupColor(g: Pick<Group, "colorIndex">): string {
   return themeGroupColor(useStore.getState().resolvedTheme, g.colorIndex);
 }
 
-const LEGACY_PALETTE_THEME: ThemeName = "dark";
-
-function legacyColorIndex(color: string): number {
-  const channels = (c: string): [number, number, number] | null => {
-    const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(c.trim());
-    return m
-      ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)]
-      : null;
-  };
-  const target = channels(color);
-  if (!target) return 0;
-  let best = 0;
-  let bestDist = Infinity;
-  groupColors(LEGACY_PALETTE_THEME).forEach((c, i) => {
-    const p = channels(c);
-    if (!p) return;
-    const d =
-      (p[0] - target[0]) ** 2 + (p[1] - target[1]) ** 2 + (p[2] - target[2]) ** 2;
-    if (d < bestDist) {
-      bestDist = d;
-      best = i;
-    }
-  });
-  return best;
-}
-
-export type PersistedGroup = Omit<Group, "colorIndex"> & {
-  colorIndex?: number;
-  color?: string;
-};
-
-/** Read-side compatibility only — saved files are rewritten as the current
- *  shape on the next ordinary persist, never migrated in place. Exported
- *  for the app-share mirror, which restores a host snapshot through the
- *  same hydrate → presets → sanitize chain in the remote runtime. */
-export function hydrateGroup(g: PersistedGroup): Group {
-  const { color, colorIndex, ...rest } = g;
-  return {
-    ...rest,
-    colorIndex:
-      typeof colorIndex === "number" && Number.isInteger(colorIndex)
-        ? ((colorIndex % GROUP_PALETTE_SIZE) + GROUP_PALETTE_SIZE) %
-          GROUP_PALETTE_SIZE
-        : typeof color === "string"
-          ? legacyColorIndex(color)
-          : 0,
-  };
-}
+export type PersistedGroup = Group;
 
 const TYPE_TITLES: Record<TabType, string> = {
   terminal: "Terminal",
@@ -475,7 +425,7 @@ export type ArchiveThreshold = "12h" | "24h" | "7d" | "off";
 
 export type SearchEngineId = "duckduckgo" | "google" | "bing" | "custom";
 
-/** The classification of one startup attempt to restore `session.json`. */
+/** The classification of one startup attempt to restore the session scope. */
 export type SessionRestoreResult =
   | "restored"
   | "missing"
@@ -531,7 +481,7 @@ const requestTrafficLightReapply = () => {
 /** What survives a restart. Live handles (PTY ids, shares) never do. */
 export interface PersistedState {
   version: 1;
-  zones?: 2 | 3;
+  zones: 3;
   tabs: {
     id: string;
     type: TabType;
@@ -541,20 +491,169 @@ export interface PersistedState {
     url?: string;
     renamed?: boolean;
     pinnedUrl?: string;
-    lastActiveAt?: number;
+    lastActiveAt: number;
     panes?: PaneNode;
     dormant?: true;
   }[];
   groups: PersistedGroup[];
   activeTabId: string | null;
-  sidebarWidth?: number;
-  sidebarPinned?: boolean;
-  archiveThreshold?: ArchiveThreshold;
-  searchEngine?: SearchEngineId;
-  /** The user's own %s template; only read while searchEngine is "custom". */
-  customSearchTemplate?: string;
   split?: SplitGroup;
-  splitPair?: { leftId: string; rightId: string; ratio: number };
+}
+
+const SESSION_TAB_TYPES = new Set<TabType>([
+  "terminal",
+  "files",
+  "browser",
+  "agent",
+  "settings",
+]);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const optionalString = (record: Record<string, unknown>, key: string): boolean =>
+  !(key in record) || typeof record[key] === "string";
+
+function decodeArchive(raw: unknown): ArchiveEntry[] | null {
+  if (!Array.isArray(raw) || raw.length > ARCHIVE_LIMIT) return null;
+  if (
+    raw.some(
+      (entry) =>
+        !isRecord(entry) ||
+        typeof entry.id !== "string" ||
+        entry.id.length === 0 ||
+        !SESSION_TAB_TYPES.has(entry.type as TabType) ||
+        entry.type === "remote" ||
+        entry.type === "settings" ||
+        typeof entry.title !== "string" ||
+        typeof entry.archivedAt !== "number" ||
+        !Number.isFinite(entry.archivedAt) ||
+        !optionalString(entry, "cwd") ||
+        !optionalString(entry, "url")
+    )
+  ) return null;
+  return raw as ArchiveEntry[];
+}
+
+const optionalBoolean = (record: Record<string, unknown>, key: string): boolean =>
+  !(key in record) || typeof record[key] === "boolean";
+
+function isCurrentPaneTree(raw: unknown): boolean {
+  const seen = new Set<string>();
+  const visit = (value: unknown): boolean => {
+    if (!isRecord(value) || typeof value.id !== "string" || value.id.length === 0) return false;
+    if (seen.has(value.id)) return false;
+    seen.add(value.id);
+    if (value.kind === "leaf") return optionalString(value, "cwd");
+    if (
+      value.kind !== "split" ||
+      typeof value.vertical !== "boolean" ||
+      !Array.isArray(value.children) ||
+      value.children.length < 2 ||
+      !Array.isArray(value.ratios) ||
+      value.ratios.length !== value.children.length ||
+      !value.ratios.every((ratio) => typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0) ||
+      Math.abs(value.ratios.reduce((sum, ratio) => sum + ratio, 0) - 1) > 1e-6
+    ) return false;
+    return value.children.every(visit);
+  };
+  return visit(raw);
+}
+
+function readCurrentSession(raw: Record<string, unknown>): PersistedState | null {
+  if (
+    raw.zones !== 3 ||
+    !Array.isArray(raw.tabs) ||
+    !Array.isArray(raw.groups) ||
+    !(raw.activeTabId === null || typeof raw.activeTabId === "string")
+  ) return null;
+
+  const tabIds = new Set<string>();
+  const tabs: PersistedState["tabs"] = [];
+  for (const value of raw.tabs) {
+    if (!isRecord(value)) return null;
+    const type = value.type as TabType;
+    if (
+      typeof value.id !== "string" || value.id.length === 0 || tabIds.has(value.id) ||
+      !SESSION_TAB_TYPES.has(type) || typeof value.title !== "string" ||
+      !(value.groupId === null || typeof value.groupId === "string") ||
+      typeof value.lastActiveAt !== "number" || !Number.isFinite(value.lastActiveAt) || value.lastActiveAt < 0 ||
+      !optionalString(value, "cwd") || !optionalString(value, "url") ||
+      !optionalString(value, "pinnedUrl") || !optionalBoolean(value, "renamed") ||
+      !(value.dormant === undefined || value.dormant === true) ||
+      ("panes" in value && (type !== "terminal" || !isCurrentPaneTree(value.panes)))
+    ) return null;
+    tabIds.add(value.id);
+    tabs.push(value as unknown as PersistedState["tabs"][number]);
+  }
+
+  const groupIds = new Set<string>();
+  const presetIds = new Set<string>();
+  const seenPresets = new Set<TabType>();
+  const groups: PersistedGroup[] = [];
+  const presetTypes = new Set<TabType>(["terminal", "files", "browser"]);
+  for (const value of raw.groups) {
+    if (!isRecord(value)) return null;
+    if (
+      typeof value.id !== "string" || value.id.length === 0 || groupIds.has(value.id) ||
+      typeof value.name !== "string" || !Number.isInteger(value.colorIndex) ||
+      (value.colorIndex as number) < 0 || (value.colorIndex as number) >= GROUP_PALETTE_SIZE ||
+      typeof value.collapsed !== "boolean" ||
+      !(value.parentId === undefined || typeof value.parentId === "string") ||
+      !(value.preset === undefined || presetTypes.has(value.preset as TabType)) ||
+      !(value.keepWhenEmpty === undefined || value.keepWhenEmpty === true)
+    ) return null;
+    if (value.preset !== undefined) {
+      const preset = value.preset as TabType;
+      if (value.id !== presetGroupId(preset) || seenPresets.has(preset)) return null;
+      seenPresets.add(preset);
+      presetIds.add(value.id);
+    } else if (["terminal", "files", "browser"].some((type) => value.id === presetGroupId(type as TabType))) {
+      return null;
+    }
+    groupIds.add(value.id);
+    groups.push(value as unknown as PersistedGroup);
+  }
+  if (
+    tabs.some((tab) => tab.groupId !== null && !groupIds.has(tab.groupId)) ||
+    groups.some((group) => group.parentId !== undefined && !groupIds.has(group.parentId)) ||
+    (typeof raw.activeTabId === "string" && !tabIds.has(raw.activeTabId))
+  ) return null;
+  for (const group of groups) {
+    const seen = new Set([group.id]);
+    let parentId = group.parentId;
+    while (parentId !== undefined) {
+      if (seen.has(parentId)) return null;
+      seen.add(parentId);
+      parentId = groups.find((candidate) => candidate.id === parentId)?.parentId;
+    }
+    if (presetIds.has(group.id) && group.parentId !== undefined) return null;
+  }
+
+  let split: SplitGroup | undefined;
+  if ("split" in raw && raw.split !== undefined) {
+    if (!isRecord(raw.split)) return null;
+    const ids = raw.split.ids;
+    const ratios = raw.split.ratios;
+    if (
+      !Array.isArray(ids) || ids.length < 2 || ids.length > SPLIT_MAX_PANES ||
+      !ids.every((id) => typeof id === "string" && tabIds.has(id)) || new Set(ids).size !== ids.length ||
+      ids.some((id) => tabs.find((tab) => tab.id === id)?.dormant === true) ||
+      !Array.isArray(ratios) || ratios.length !== ids.length ||
+      !ratios.every((ratio) => typeof ratio === "number" && Number.isFinite(ratio) && ratio > 0) ||
+      Math.abs(ratios.reduce((sum, ratio) => sum + ratio, 0) - 1) > 1e-6 ||
+      typeof raw.split.vertical !== "boolean"
+    ) return null;
+    split = { ids: ids as string[], ratios: ratios as number[], vertical: raw.split.vertical };
+  }
+  return {
+    version: 1,
+    zones: 3,
+    tabs,
+    groups,
+    activeTabId: raw.activeTabId as string | null,
+    ...(split === undefined ? {} : { split }),
+  };
 }
 
 /**
@@ -810,7 +909,8 @@ export interface AppStore {
     reveal: { path: string; line?: number; nonce: number }
   ) => void;
   showCommand: (text: string, cwd?: string) => void;
-  closeTab: (id: string) => void;
+  /** expectedDormant captures the presented action; stale close events cannot become remove. */
+  closeTab: (id: string, expectedDormant?: boolean) => void;
   closeTabs: (
     ids: string[],
     askFinal?: (tab: Tab) => Promise<boolean>
@@ -823,6 +923,8 @@ export interface AppStore {
   activateIndex: (i: number) => void;
   cycleTab: (delta: number) => void;
   moveTab: (id: string, beforeId: string | null) => void;
+  /** One atomic placement. Only an explicit destination changes retention. */
+  moveTabsTo: (ids: string[], groupId: string | null, beforeId: string | null) => boolean;
   setTabTitle: (id: string, title: string) => void;
   renameTab: (id: string, title: string) => void;
   markTabExited: (id: string) => void;
@@ -859,6 +961,8 @@ export interface AppStore {
   sidebarPinned: boolean | null;
   /** Unpinned and currently slid back in because the pointer is on it. */
   sidebarPeeking: boolean;
+  /** Native obstruction stays held until the exit motion completes. Not persisted. */
+  sidebarClosing: boolean;
   setSidebarPeeking: (on: boolean) => void;
   setSidebarWidth: (px: number) => void;
   toggleSidebar: () => void;
@@ -996,10 +1100,11 @@ function dropTabState(ids: string[]) {
 }
 
 const CLOSED_LIMIT = 10;
-let closedTabs: Array<{ tab: Tab; index: number; closedAt: number }> = [];
+let closedTabs: ClosedEntry[] = [];
 
 export interface ClosedEntry {
   tab: Tab;
+  groups?: Group[];
   /** Where the tab sat when it closed; reopen puts it back there. */
   index: number;
   /** When it closed (the moment rememberClosed ran): the "3m ago" the
@@ -1007,7 +1112,7 @@ export interface ClosedEntry {
   closedAt: number;
 }
 
-function rememberClosed(tab: Tab, index: number) {
+function rememberClosed(tab: Tab, index: number, groups: Group[] = []) {
   // A remote tab is someone else's session joined by ticket, and a settings
   // tab is a singleton the app reopens on demand — neither is work to
   // restore, so neither is kept.
@@ -1015,7 +1120,20 @@ function rememberClosed(tab: Tab, index: number) {
     dropTabState([tab.id]);
     return;
   }
-  closedTabs = [{ tab, index, closedAt: Date.now() }, ...closedTabs];
+  // Restoring an entry is not permission to replay one-shot execution or
+  // reuse a dead native handle. Retain the durable workspace identity.
+  const saved: Tab = { ...tab, termId: undefined, attachSessionId: undefined,
+    runOnStart: undefined, command: undefined, share: undefined,
+    ...(tab.panes ? paneFields(paneTreeSnapshot(tab.panes)) : {}) };
+  const ancestry: Group[] = [];
+  const seen = new Set<string>();
+  let group = groups.find((g) => g.id === tab.groupId);
+  while (group && !seen.has(group.id)) {
+    seen.add(group.id); ancestry.unshift({ ...group });
+    group = groups.find((g) => g.id === group!.parentId);
+  }
+  closedTabs = [{ tab: saved, index, groups: ancestry, closedAt: Date.now() },
+    ...closedTabs.filter((entry) => entry.tab.id !== tab.id)];
   const evicted = closedTabs.slice(CLOSED_LIMIT);
   closedTabs = closedTabs.slice(0, CLOSED_LIMIT);
   if (evicted.length > 0) dropTabState(evicted.map((e) => e.tab.id));
@@ -1025,8 +1143,13 @@ export async function sweepOrphanTabState(): Promise<void> {
   if (freshRun) return; // must not eat the real session's files
   const live = new Set(useStore.getState().tabs.map((t) => t.id));
   for (const e of useStore.getState().archive) live.add(e.id);
-  const shelved = await loadState<ArchiveEntry[]>(ARCHIVE_SCOPE);
-  if (Array.isArray(shelved)) {
+  const rawShelved = await loadState<unknown>(ARCHIVE_SCOPE);
+  const shelved = rawShelved === null ? [] : decodeArchive(rawShelved);
+  if (shelved === null) {
+    markStateInvalid(ARCHIVE_SCOPE, "invalid current browser archive record");
+    return;
+  }
+  {
     for (const e of shelved) {
       if (e && typeof e.id === "string") live.add(e.id);
     }
@@ -1054,7 +1177,7 @@ export function sessionSnapshot(state: AppStore): PersistedState {
       url: t.url,
       renamed: t.renamed,
       pinnedUrl: t.pinnedUrl,
-      lastActiveAt: t.lastActiveAt,
+      lastActiveAt: t.lastActiveAt ?? Date.now(),
       panes: t.panes ? paneTreeSnapshot(t.panes) : undefined,
       // Manual sleep persists (requirement change 2026-08-21): a restart
       // must not wake what the user closed, nor sleep what they left open.
@@ -1065,6 +1188,10 @@ export function sessionSnapshot(state: AppStore): PersistedState {
       // one-time instruction from the system, and carrying them across a
       // restart would reopen a document or re-run a command nobody asked for.
     }));
+  const activeTabId = savedTabs.some((tab) => tab.id === state.activeTabId)
+    ? state.activeTabId
+    : (savedTabs.find((tab) => tab.dormant !== true)?.id ?? null);
+  const split = validSplit(state.split, savedTabs);
   return {
     version: 1,
     zones: 3,
@@ -1072,10 +1199,10 @@ export function sessionSnapshot(state: AppStore): PersistedState {
     groups: state.groups.filter((g) =>
       subtreeEarnsItsKeep(state.groups, savedTabs, g.id)
     ),
-    activeTabId: state.activeTabId,
+    activeTabId,
     // Valid by construction: every commit re-validates the split, and a
     // peek tab can never be a member of it.
-    split: state.split ?? undefined,
+    split: split ?? undefined,
   };
 }
 
@@ -1099,16 +1226,6 @@ function persist(state: AppStore) {
 function saveArchive(entries: ArchiveEntry[]) {
   if (freshRun) return;
   saveState(ARCHIVE_SCOPE, entries);
-}
-
-function persistThemePreference(pref: ThemePreference): void {
-  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
-    void import("@tauri-apps/api/core")
-      .then(({ invoke }) => invoke("theme_pref_save", { pref }))
-      .catch((e) => coreLog("error", `theme_pref_save failed: ${String(e)}`));
-  } else if (!freshRun) {
-    saveState(THEME_SCOPE, { preference: pref });
-  }
 }
 
 function writeSetting(key: string, value: unknown, previous: unknown): void {
@@ -1203,51 +1320,12 @@ function writeEnded(o: WriteOutcome, previous: unknown): void {
     if (field === "themePreference") {
       // The one setting with a consequence past itself: everything on screen
       // subscribes to resolvedTheme, so a preference put back without being
-      // re-resolved is a rollback nobody can see. The cold-start snapshot
-      // goes back with it, or the next launch paints a colour the file was
-      // never able to record.
+      // re-resolved is a rollback nobody can see.
       const pref = previous as ThemePreference | null;
       Object.assign(patch, themeFanOut(pref, s.systemDark));
-      if (pref !== null) persistThemePreference(pref);
     }
   }
   useStore.setState(patch as Partial<AppStore>);
-}
-
-/** The six fields, as the file spells them, from the store's own names. */
-function settingWrites(slice: Partial<ConfigSlice>): Array<[string, unknown]> {
-  const out: Array<[string, unknown]> = [];
-  if (slice.themePreference !== undefined)
-    out.push([CONFIG_KEYS.theme, slice.themePreference]);
-  if (slice.sidebarWidth !== undefined)
-    out.push([CONFIG_KEYS.sidebarWidth, slice.sidebarWidth]);
-  if (slice.sidebarPinned !== undefined)
-    out.push([CONFIG_KEYS.sidebarPinned, slice.sidebarPinned]);
-  if (slice.searchEngine !== undefined)
-    out.push([CONFIG_KEYS.searchEngine, slice.searchEngine]);
-  if (slice.customSearchTemplate !== undefined)
-    out.push([CONFIG_KEYS.customSearchTemplate, slice.customSearchTemplate]);
-  if (slice.archiveThreshold !== undefined)
-    out.push([CONFIG_KEYS.archiveAfter, slice.archiveThreshold]);
-  return out;
-}
-
-/**
- * The legacy-settings migration rewrites session.json, so it may only touch
- * a payload that startup can actually restore. A parseable-but-invalid file
- * belongs to the recovery decision instead of to this migration.
- */
-function isRecoverableSessionPayload(
-  value: unknown
-): value is Record<string, unknown> & PersistedState {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    (value as { version?: unknown }).version === 1 &&
-    Array.isArray((value as { tabs?: unknown }).tabs) &&
-    (value as { tabs: unknown[] }).tabs.length > 0
-  );
 }
 
 /**
@@ -1290,92 +1368,14 @@ export function storeSlice(s: Pick<AppStore, keyof ConfigSlice>): ConfigSlice {
 }
 
 export function forgetSessionScopes(all: readonly string[]): string[] {
-  return all.filter((scope) => scope !== THEME_SCOPE);
+  return all.filter(
+    (scope) => scope === SESSION_SCOPE || scope === ARCHIVE_SCOPE || scopeTabId(scope) !== null
+  );
 }
 
-async function migrateSettingsIntoConfig(
-  snap: ConfigSnapshot
-): Promise<Partial<ConfigSlice>> {
-  if (freshRun || snap.sources.length > 0) return {};
-  const current = configSlice(snap.values);
-  const moved: Partial<ConfigSlice> = {};
-
-  const loaded = await loadStateResult<Record<string, unknown>>(SESSION_SCOPE);
-  const stored =
-    loaded.kind === "value" && isRecoverableSessionPayload(loaded.value)
-      ? loaded.value
-      : null;
-  if (stored !== null) {
-    const width = stored.sidebarWidth;
-    if (typeof width === "number" && width !== current.sidebarWidth) {
-      moved.sidebarWidth = width;
-    }
-    const pinned = stored.sidebarPinned;
-    if (typeof pinned === "boolean" && pinned !== current.sidebarPinned) {
-      moved.sidebarPinned = pinned;
-    }
-    const threshold = stored.archiveThreshold;
-    if (
-      typeof threshold === "string" &&
-      threshold !== current.archiveThreshold
-    ) {
-      moved.archiveThreshold = threshold as ArchiveThreshold;
-    }
-    const engine = stored.searchEngine;
-    if (typeof engine === "string" && engine !== current.searchEngine) {
-      moved.searchEngine = engine as SearchEngineId;
-    }
-    const template = stored.customSearchTemplate;
-    if (
-      typeof template === "string" &&
-      template !== current.customSearchTemplate
-    ) {
-      moved.customSearchTemplate = template;
-    }
-  }
-
-  // The theme came from a scope of its own rather than the session blob, so
-  // its old value is read from there.
-  const themeScope = await loadState<{ preference?: unknown }>(THEME_SCOPE);
-  if (themeScope !== null && themeScope.preference !== undefined) {
-    const pref = asThemePreference(themeScope.preference);
-    if (pref !== current.themePreference) moved.themePreference = pref;
-  }
-
-  const writes = settingWrites(moved);
-  // What the file already says is what a failed move would leave standing —
-  // the store is still on those values here, `moved` not having been applied
-  // yet. So the rollback these carry is a no-op by construction (the guard in
-  // writeEnded sees a store that never held the moved value), and what a
-  // failure actually produces is the banner, which is the whole of what a
-  // migration that could not write should produce.
-  const before = settingValues(current);
-  for (const [key, value] of writes) writeSetting(key, value, before[key]);
-  if (writes.length > 0) await flushConfigWrites();
-
-  // Step 1's second half: the five fields leave the session snapshot. Done
-  // even when nothing moved, so a session carrying default-valued copies
-  // stops carrying them too.
-  if (stored !== null) {
-    const pruned = { ...stored };
-    let changed = false;
-    for (const field of [
-      "sidebarWidth",
-      "sidebarPinned",
-      "archiveThreshold",
-      "searchEngine",
-      "customSearchTemplate",
-    ]) {
-      if (field in pruned) {
-        delete pruned[field];
-        changed = true;
-      }
-    }
-    if (changed) saveState(SESSION_SCOPE, pruned);
-  }
-  return moved;
-}
-
+/** Product-state scopes cleared by factory reset. The default-app takeover
+ * record is safety state: deleting it while Tabverse owns a system default
+ * would make the previous handler unrecoverable. */
 /**
  * The theme's derived value, recomputed — or left exactly as it is while the
  * preference has not been read. Never a substitute preference: resolving a
@@ -1400,7 +1400,7 @@ function demoteTab(t: Tab): Tab {
     ...t,
     groupId: null,
     pinnedUrl: undefined,
-    dormant: undefined,
+    dormant: t.dormant,
   };
 }
 
@@ -1547,6 +1547,11 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         next = { ...next, split };
         (patch as Partial<AppStore>).split = split;
       }
+      const selected = next.selectedTabIds.filter((id) => next.tabs.some((t) => t.id === id));
+      if (selected.length !== next.selectedTabIds.length) {
+        next = { ...next, selectedTabIds: selected };
+        patch.selectedTabIds = selected;
+      }
       persist(next);
       return patch;
     });
@@ -1629,6 +1634,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
     draggingTabIds: [],
     closedCount: 0,
     sidebarPeeking: false,
+    sidebarClosing: false,
 
     splitWith: (id) => {
       const s = get();
@@ -1672,6 +1678,11 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         return false;
       }
       const cur = s.split;
+      if (cur?.ids.includes(targetId) &&
+          (cur.ids.includes(draggedId) || cur.ids.length >= SPLIT_MAX_PANES)) {
+        set({ contentDrag: null });
+        return false;
+      }
       let group: SplitGroup;
       if (
         cur !== null &&
@@ -1691,27 +1702,9 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
           vertical: cur?.vertical ?? false,
         };
       }
-      const rest = s.tabs.filter((t) => t.id !== draggedId);
-      const placed =
-        target.groupId !== null
-          ? promoteTab(dragged, target.groupId)
-          : demoteTab(dragged);
-      const at = rest.findIndex((t) => t.id === targetId);
-      const order =
-        at < 0
-          ? [...rest, placed]
-          : side === "left"
-            ? [...rest.slice(0, at), placed, ...rest.slice(at)]
-            : [...rest.slice(0, at + 1), placed, ...rest.slice(at + 1)];
-      // A split only shows when one of its members is the tab in front, and
-      // the one the user just placed is the one they are looking at.
-      commit(() => ({
-        tabs: order,
-        split: group,
-        activeTabId: draggedId,
-        contentDrag: null,
-        menu: null,
-      }));
+      // Layout is not filing: keep every member's retention, folder and
+      // sidebar position unchanged, exactly like the menu entry point.
+      commit(() => ({ split: group, activeTabId: draggedId, contentDrag: null, menu: null }));
       return true;
     },
 
@@ -1726,6 +1719,11 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         return false;
       }
       const cur = s.split;
+      if (cur?.ids.includes(active.id) &&
+          (cur.ids.includes(other.id) || cur.ids.length >= SPLIT_MAX_PANES)) {
+        set({ contentDrag: null });
+        return false;
+      }
       let group: SplitGroup;
       if (
         cur !== null &&
@@ -1744,29 +1742,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
           vertical: cur?.vertical ?? false,
         };
       }
-      // Same placement rule as splitOnTab: the pair shows at the position of
-      // the tab that was already on screen, so the dragged one comes to sit
-      // beside it rather than leaving the merged row somewhere else.
-      const rest = s.tabs.filter((t) => t.id !== id);
-      const anchor = group.ids.find((x) => x !== id) ?? active.id;
-      const at = rest.findIndex((t) => t.id === anchor);
-      const before = group.ids.indexOf(id) < group.ids.indexOf(anchor);
-      const placed =
-        active.groupId !== null
-          ? promoteTab(other, active.groupId)
-          : demoteTab(other);
-      const order =
-        at < 0
-          ? [...rest, placed]
-          : before
-            ? [...rest.slice(0, at), placed, ...rest.slice(at)]
-            : [...rest.slice(0, at + 1), placed, ...rest.slice(at + 1)];
-      commit(() => ({
-        tabs: order,
-        split: group,
-        contentDrag: null,
-        menu: null,
-      }));
+      commit(() => ({ split: group, contentDrag: null, menu: null }));
       return true;
     },
 
@@ -1814,11 +1790,9 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         const g = s.split;
         if (g === null || !g.ids.includes(id)) return {};
         const ids = g.ids.filter((x) => x !== id);
-        let activeTabId = s.activeTabId;
-        if (s.activeTabId === id) {
-          const at = g.ids.indexOf(id);
-          activeTabId = g.ids[at + 1] ?? g.ids[at - 1] ?? s.activeTabId;
-        }
+        // Detaching the current member means looking at that member on
+        // its own, not jumping to a different pane.
+        const activeTabId = s.activeTabId;
         const split =
           ids.length >= 2
             ? { ids, ratios: equalRatios(ids.length), vertical: g.vertical }
@@ -2205,6 +2179,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       const id = s.peekTabId;
       if (id === null) return null;
       const sourceId = s.tabs.find((t) => t.id === id)?.peekOver ?? null;
+      if (sourceId && s.split?.ids.includes(sourceId) && s.split.ids.length >= SPLIT_MAX_PANES) return null;
       const promoted = get().promotePeek();
       if (promoted === null || sourceId === null) return promoted;
       const source = get().tabs.find((t) => t.id === sourceId);
@@ -2357,9 +2332,10 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       });
     },
 
-    closeTab: (id) => {
+    closeTab: (id, expectedDormant) => {
       const dying = get().tabs.find((t) => t.id === id);
-      if (!dying) return;
+      if (!dying || (expectedDormant !== undefined &&
+          (dying.dormant === true) !== expectedDormant)) return;
       if (dying.peek === true) {
         if (get().peekTabId === id) {
           get().discardPeek();
@@ -2369,8 +2345,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         }
         return;
       }
-      if (dying.groupId !== null) {
-        if (dying.dormant === true) return; // already asleep; nothing to do
+      if (dying.groupId !== null && dying.dormant !== true) {
         commit((s) => {
           const t = s.tabs.find((x) => x.id === id);
           if (!t || t.groupId === null || t.dormant === true) return {};
@@ -2409,7 +2384,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       // files, the draft, the directory. rememberClosed evicts the oldest
       // entry and reclaims that one, so nothing leaks — and a crash in
       // between is caught by the boot sweep.
-      rememberClosed(dying, get().tabs.findIndex((t) => t.id === id));
+      rememberClosed(dying, get().tabs.findIndex((t) => t.id === id), get().groups);
       set({ closedCount: closedTabs.length });
       commit((s) => {
         const idx = s.tabs.findIndex((t) => t.id === id);
@@ -2447,7 +2422,9 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
 
 
     closeTabs: async (ids, askFinal) => {
-      for (const id of ids) {
+      const targets = [...new Set(ids)].map((id) => ({ id,
+        dormant: get().tabs.find((t) => t.id === id)?.dormant === true }));
+      for (const { id, dormant } of targets) {
         // Re-read each turn: an answer awaited between closes may have
         // watched the list change underneath it, and an id that stopped
         // existing between click and close is simply done.
@@ -2460,7 +2437,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
           // page's own say. Without an asker, the close proceeds.
           if (askFinal && !(await askFinal(t))) continue;
         }
-        get().closeTab(id);
+        get().closeTab(id, dormant);
       }
       // The picking has done its job; a selection left standing over rows
       // that no longer exist would rope ghosts into the next drag.
@@ -2493,8 +2470,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
 
     activateIndex: (i) => {
       const { tabs, groups, split } = get();
-      // ⌘n means "the n-th row I can see", in sidebar drawing order — a
-      // split counts once, and landing on it activates its first pane.
+      // ⌘n names the n-th visible full row, including each split member.
       const visible = visibleOrdered(tabs, groups, split);
       if (i >= 0 && i < visible.length) get().activateTab(visible[i].id);
     },
@@ -2503,13 +2479,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       const { tabs, groups, activeTabId, split } = get();
       const visible = visibleOrdered(tabs, groups, split);
       if (visible.length === 0) return;
-      const fromId =
-        split !== null &&
-        activeTabId !== null &&
-        split.ids.includes(activeTabId) &&
-        activeTabId !== split.ids[0]
-          ? split.ids[0]
-          : activeTabId;
+      const fromId = activeTabId;
       const idx = Math.max(
         0,
         visible.findIndex((t) => t.id === fromId)
@@ -2660,7 +2630,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         renamed: src.renamed,
         cwd: src.cwd,
         url: src.url,
-        groupId: src.groupId,
+        groupId: null,
       });
       // Right after its source, not at the end: it is a continuation of
       // that work and belongs beside it.
@@ -2683,9 +2653,39 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       // restores the work: the same id finds the same open files, draft and
       // directory it had when it was closed.
       commit((s) => {
+        const wasPinned = entry.tab.groupId !== null;
+        const nearestExistingAncestor = [...(entry.groups ?? [])]
+          .reverse()
+          .find((group) => s.groups.some((current) => current.id === group.id));
+        const preset = s.groups.find((group) => group.preset === entry.tab.type);
+        let destination = !wasPinned
+          ? null
+          : s.groups.some((group) => group.id === entry.tab.groupId)
+            ? entry.tab.groupId
+            : nearestExistingAncestor?.id ?? preset?.id ?? null;
+        let groups = s.groups;
+        if (wasPinned && destination === null) {
+          destination = "saved-tabs";
+          if (!groups.some((group) => group.id === destination)) {
+            groups = [
+              ...groups,
+              {
+                id: destination,
+                name: "Pinned",
+                collapsed: false,
+                colorIndex: 0,
+                keepWhenEmpty: true,
+              },
+            ];
+          }
+        }
+        // Reopening content must not resurrect a folder the user explicitly
+        // deleted after the close. Use the closest surviving filing location.
+        const restored = { ...entry.tab, groupId: destination };
         const tabs = [...s.tabs];
-        tabs.splice(Math.min(entry.index, tabs.length), 0, entry.tab);
-        return { tabs, activeTabId: entry.tab.id, closedCount: closedTabs.length };
+        tabs.splice(Math.min(entry.index, tabs.length), 0, restored);
+        return { tabs, groups, activeTabId: restored.dormant === true ? s.activeTabId : restored.id,
+          closedCount: closedTabs.length };
       });
       return entry.tab.id;
     },
@@ -2712,7 +2712,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
     toggleSidebar: () => {
       const previous = get().sidebarPinned;
       const pinned = !previous;
-      set({ sidebarPinned: pinned, sidebarPeeking: false });
+      set({ sidebarPinned: pinned, sidebarPeeking: false, sidebarClosing: false });
       writeSetting(CONFIG_KEYS.sidebarPinned, pinned, previous);
       requestTrafficLightReapply();
     },
@@ -2726,6 +2726,7 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
       const peeking = on && !get().sidebarPinned;
       set((s) => ({
         sidebarPeeking: peeking,
+        sidebarClosing: false,
         ...(!peeking && s.folderPreviewGroupId === null && s.pageFreeze !== null
           ? { pageFreeze: null }
           : {}),
@@ -2835,8 +2836,35 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
 
     clearSelection: () => set({ selectedTabIds: [], selectionAnchor: null }),
 
+    moveTabsTo: (ids, groupId, beforeId) => {
+      const state = get();
+      const picked = new Set(ids);
+      if (groupId !== null && !state.groups.some((g) => g.id === groupId)) return false;
+      if (beforeId !== null && (picked.has(beforeId) ||
+          !state.tabs.some((t) => t.id === beforeId && t.groupId === groupId))) return false;
+      const ordered = visibleOrdered(state.tabs, state.groups);
+      const shown = new Set(ordered.map((t) => t.id));
+      const moving = [...ordered, ...state.tabs.filter((t) => !shown.has(t.id))]
+        .filter((t) => picked.has(t.id));
+      if (!moving.length) return false;
+      commit((s) => {
+        const rest = s.tabs.filter((t) => !picked.has(t.id));
+        let at = beforeId === null ? -1 : rest.findIndex((t) => t.id === beforeId);
+        if (at < 0) {
+          // Append to this folder, not the next raw-array folder.
+          const last = rest.reduce((found, t, index) => t.groupId === groupId ? index : found, -1);
+          at = last < 0 ? rest.length : last + 1;
+        }
+        const placed = moving.map((t) => t.groupId === groupId ? t :
+          groupId === null ? demoteTab(t) : promoteTab(t, groupId));
+        return { tabs: [...rest.slice(0, at), ...placed, ...rest.slice(at)] };
+      });
+      return true;
+    },
+
     moveTabs: (ids, beforeId) =>
       commit((s) => {
+        if (beforeId !== null && (ids.includes(beforeId) || !s.tabs.some((t) => t.id === beforeId))) return {};
         // The order among the moved tabs is the order they already had:
         // dragging three rows must not shuffle them on arrival.
         const moving = s.tabs.filter((t) => ids.includes(t.id));
@@ -2950,18 +2978,24 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         const parentId = g.parentId;
         const parentAlive =
           parentId !== undefined && s.groups.some((x) => x.id === parentId);
+        const fallbackId = "saved-tabs";
+        const needsFallback = !parentAlive && s.tabs.some((t) => t.groupId === groupId &&
+          !s.groups.some((candidate) => candidate.preset === t.type));
+        const keptGroups = needsFallback && !s.groups.some((item) => item.id === fallbackId)
+          ? [...s.groups, { id: fallbackId, name: "Pinned", collapsed: false, colorIndex: 0, keepWhenEmpty: true as const }]
+          : s.groups;
         return {
           tabs: s.tabs.map((t) =>
             t.groupId === groupId
               ? parentAlive
                 ? promoteTab(t, parentId)
-                : demoteTab(t)
+                : promoteTab(t, s.groups.find((candidate) => candidate.preset === t.type)?.id ?? fallbackId)
               : t
           ),
           // Subfolders adopt the deleted folder's parent (or become
           // roots), keeping their own subtrees intact. Ones that end up
           // empty and were not made-as-a-place are swept by commit.
-          groups: s.groups
+          groups: keptGroups
             .filter((x) => x.id !== groupId)
             .map((x) =>
               x.parentId === groupId ? { ...x, parentId } : x
@@ -3220,47 +3254,16 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
     restoreArchive: async () => {
       // A fresh run must neither show nor touch the real archive.
       if (freshRun) return;
-      const data = await loadState<Array<Record<string, unknown>>>(ARCHIVE_SCOPE);
-      if (!Array.isArray(data)) return;
-      const entries = data.flatMap((e): ArchiveEntry[] => {
-        if (!e || typeof e.archivedAt !== "number") return [];
-        if (
-          typeof e.id === "string" &&
-          typeof e.type === "string" &&
-          (["terminal", "files", "browser"] as string[]).includes(e.type)
-        ) {
-          return [
-            {
-              id: e.id,
-              type: e.type as TabType,
-              title: typeof e.title === "string" ? e.title : "",
-              cwd: typeof e.cwd === "string" ? e.cwd : undefined,
-              url: typeof e.url === "string" ? e.url : undefined,
-              archivedAt: e.archivedAt,
-            },
-          ];
-        }
-        if (typeof e.url === "string") {
-          return [
-            {
-              id: crypto.randomUUID(),
-              type: "browser",
-              title: typeof e.title === "string" ? e.title : "",
-              url: e.url,
-              archivedAt: e.archivedAt,
-            },
-          ];
-        }
-        return [];
-      });
-      // A persisted file longer than the limit (an older build wrote more)
-      // is trimmed on arrival; those entries count toward the eviction
-      // report like any other, so the panel's line never understates by
-      // exactly the run's oldest losses.
-      const droppedAtRestore = Math.max(0, entries.length - ARCHIVE_LIMIT);
+      const data = await loadState<unknown>(ARCHIVE_SCOPE);
+      if (data === null) return;
+      const entries = decodeArchive(data);
+      if (entries === null) {
+        markStateInvalid(ARCHIVE_SCOPE, "invalid current browser archive record");
+        return;
+      }
       set((s) => ({
-        archive: entries.slice(-ARCHIVE_LIMIT),
-        archiveEvicted: s.archiveEvicted + droppedAtRestore,
+        archive: entries,
+        archiveEvicted: s.archiveEvicted,
       }));
     },
 
@@ -3364,19 +3367,6 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
           snap.warnings[0]?.path ??
           null,
       }));
-      const moved = await migrateSettingsIntoConfig(snap);
-      // What was just moved into the file applies to this run too, so a
-      // migrating user does not watch their sidebar width reset and come
-      // back only after a restart.
-      if (Object.keys(moved).length > 0) {
-        set((s) => ({
-          ...moved,
-          ...themeFanOut(
-            moved.themePreference ?? s.themePreference,
-            s.systemDark
-          ),
-        }));
-      }
     },
 
     dismissConfigWarnings: () => set({ configWarningsDismissed: true }),
@@ -3407,7 +3397,6 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         resolvedTheme: resolveTheme(p, s.systemDark),
       }));
       writeSetting(CONFIG_KEYS.theme, p, previous);
-      persistThemePreference(p);
     },
     onSystemTheme: (dark) =>
       set((s) => ({
@@ -3529,20 +3518,25 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         set({ sessionRestoreResult: loaded.kind });
         return false;
       }
-      const data = loaded.value;
-      if (!data || typeof data !== "object" || Array.isArray(data)) {
+      const raw = loaded.value as unknown;
+      if (!isRecord(raw)) {
+        markStateInvalid(SESSION_SCOPE, "invalid current session record shape");
         set({ sessionRestoreResult: "invalid-shape" });
         return false;
       }
-      if (data.version !== 1) {
+      if (raw.version !== 1) {
+        markStateInvalid(SESSION_SCOPE, "unsupported current session record version");
         set({ sessionRestoreResult: "unsupported-version" });
         return false;
       }
-      if (!Array.isArray(data.tabs)) {
+      const data = readCurrentSession(raw);
+      if (data === null) {
+        markStateInvalid(SESSION_SCOPE, "invalid current session record fields");
         set({ sessionRestoreResult: "invalid-shape" });
         return false;
       }
       if (data.tabs.length === 0) {
+        markStateInvalid(SESSION_SCOPE, "current session record has no tabs");
         set({ sessionRestoreResult: "empty-tabs" });
         return false;
       }
@@ -3550,68 +3544,20 @@ export function createAppStore(set: StoreSetter, get: StoreGetter): AppStore {
         id: t.id,
         type: t.type,
         title: t.title,
-        groupId: t.groupId ?? null,
+        groupId: t.groupId,
         cwd: t.cwd,
         url: t.url,
         renamed: t.renamed,
         pinnedUrl: t.pinnedUrl,
         dormant: t.dormant,
-        // A v1 session carries no activity clock; stamping the restore
-        // moment starts it now, instead of an absent value reading as
-        // "idle forever" and shelving yesterday's whole session at boot.
-        lastActiveAt: t.lastActiveAt ?? Date.now(),
-        // A stored layout is data somebody could have edited by hand, so it
-        // is validated rather than trusted: anything that is not a tree of
-        // two or more distinctly identified panes comes back as no tree,
-        // which is a single terminal — the behaviour that predates panes.
+        lastActiveAt: t.lastActiveAt,
+        // The session decoder already validated the complete tree. Live PTY
+        // identifiers are still stripped by readPaneTree on restoration.
         ...paneFields(t.type === "terminal" ? readPaneTree(t.panes) : null),
       }));
-      const groups = sanitizeGroupTree(
-        withPresetGroups(
-          (Array.isArray(data.groups) ? data.groups : []).map(hydrateGroup)
-        )
-      );
-      const filed =
-        data.zones !== undefined
-          ? tabs
-          : tabs.map((t) => {
-              if (!t.groupId) return t;
-              const g = groups.find((x) => x.id === t.groupId);
-              if (!g || g.preset === undefined) return t;
-              if (t.type === "browser" && t.pinnedUrl !== undefined) return t;
-              return { ...t, groupId: null };
-            });
-      const payloaded =
-        data.zones === 3
-          ? filed
-          : filed.map((t) =>
-              t.groupId !== null &&
-              t.type === "browser" &&
-              t.pinnedUrl === undefined &&
-              t.url !== undefined
-                ? { ...t, pinnedUrl: t.url }
-                : t
-            );
-      const savedSplit: SplitGroup | null =
-        data.split && Array.isArray(data.split.ids)
-          ? {
-              ids: data.split.ids.filter((x): x is string => typeof x === "string"),
-              ratios: Array.isArray(data.split.ratios) ? data.split.ratios : [],
-              vertical: data.split.vertical === true,
-            }
-          : data.splitPair &&
-              typeof data.splitPair.leftId === "string" &&
-              typeof data.splitPair.rightId === "string"
-            ? {
-                ids: [data.splitPair.leftId, data.splitPair.rightId],
-                ratios:
-                  typeof data.splitPair.ratio === "number"
-                    ? [data.splitPair.ratio, 1 - data.splitPair.ratio]
-                    : [0.5, 0.5],
-                vertical: false,
-              }
-            : null;
-      const restoredDormant = payloaded.map((t) =>
+      const groups = withPresetGroups(data.groups);
+      const savedSplit = data.split ?? null;
+      const restoredDormant = tabs.map((t) =>
         "dormant" in t && t.dormant === true ? { ...t, dormant: true as const } : t
       );
       const wokenActive =
@@ -3720,39 +3666,10 @@ function subtreeEarnsItsKeep(
   });
 }
 
-/**
- * Repair a restored tree so every group can be reached from a root: preset
- * groups are forced back to the top level, and a group whose parent chain
- * never reaches a root (a cycle in a corrupt file) is cut loose to the top
- * rather than left hiding its tabs forever. Exported for the app-share
- * mirror, which restores a host snapshot's groups through the same chain.
- */
-export function sanitizeGroupTree(groups: Group[]): Group[] {
-  const byId = new Map(groups.map((g) => [g.id, g]));
-  const reachesRoot = (g: Group): boolean => {
-    const seen = new Set<string>([g.id]);
-    let cur: Group | undefined = g;
-    while (cur?.parentId !== undefined) {
-      if (seen.has(cur.parentId)) return false;
-      seen.add(cur.parentId);
-      cur = byId.get(cur.parentId);
-      if (!cur) return true; // dangling parent: rootGroups treats it as root
-    }
-    return true;
-  };
-  return groups.map((g) => {
-    if (g.parentId === undefined) return g;
-    if (g.preset !== undefined || !reachesRoot(g)) {
-      return { ...g, parentId: undefined };
-    }
-    return g;
-  });
-}
-
 export function visibleOrdered(
   tabs: Tab[],
   groups: Group[],
-  split?: SplitGroup | null
+  _split?: SplitGroup | null
 ): Tab[] {
   const out: Tab[] = [];
   const visited = new Set<string>();
@@ -3779,10 +3696,7 @@ export function visibleOrdered(
   );
   const today = tabs.filter((t) => !t.groupId && t.peek !== true);
   const all = [...out, ...stranded, ...today];
-  const valid = validSplit(split, tabs);
-  if (valid === null) return all;
-  const merged = new Set(valid.ids.slice(1));
-  return all.filter((t) => !merged.has(t.id));
+  return all; // Each split member remains an independently addressable sidebar row.
 }
 
 /**

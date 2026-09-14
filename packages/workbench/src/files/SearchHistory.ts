@@ -21,6 +21,7 @@ export interface SearchHistoryStoragePort {
   save: (value: unknown) => void;
   remove: () => void;
   isFreshRun: () => boolean;
+  invalid?: (reason: string) => void;
 }
 
 export interface SearchHistoryController extends SearchHistoryPort {
@@ -53,29 +54,51 @@ export function mergeSearchHistory(
 function sanitizeEntry(value: unknown): SearchParams | null {
   if (typeof value !== "object" || value === null) return null;
   const record = value as Record<string, unknown>;
-  if (typeof record.query !== "string" || !record.query.trim()) return null;
-  const stringOrNull = (candidate: unknown): string | null =>
-    typeof candidate === "string" ? candidate : null;
+  const keys = Object.keys(record).sort();
+  if (
+    keys.join("\0") !==
+      [
+        "caseSensitive",
+        "exclude",
+        "include",
+        "query",
+        "regex",
+        "replacement",
+        "wholeWord",
+      ].join("\0") ||
+    typeof record.query !== "string" ||
+    !record.query.trim() ||
+    typeof record.replacement !== "string" ||
+    typeof record.caseSensitive !== "boolean" ||
+    typeof record.wholeWord !== "boolean" ||
+    typeof record.regex !== "boolean" ||
+    !(record.include === null || typeof record.include === "string") ||
+    !(record.exclude === null || typeof record.exclude === "string")
+  ) return null;
   return {
     query: record.query,
-    replacement:
-      typeof record.replacement === "string" ? record.replacement : "",
-    caseSensitive: record.caseSensitive === true,
-    wholeWord: record.wholeWord === true,
-    regex: record.regex === true,
-    include: stringOrNull(record.include),
-    exclude: stringOrNull(record.exclude),
+    replacement: record.replacement,
+    caseSensitive: record.caseSensitive,
+    wholeWord: record.wholeWord,
+    regex: record.regex,
+    include: record.include,
+    exclude: record.exclude,
   };
 }
 
-function sanitize(value: unknown): SearchParams[] {
-  if (typeof value !== "object" || value === null) return [];
-  const searches = (value as { searches?: unknown }).searches;
-  if (!Array.isArray(searches)) return [];
-  return searches
-    .map(sanitizeEntry)
-    .filter((entry): entry is SearchParams => entry !== null)
-    .slice(0, SEARCH_HISTORY_MAX);
+function sanitize(value: unknown): SearchParams[] | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).sort().join("\0") !== "searches\0version" ||
+    record.version !== 1 ||
+    !Array.isArray(record.searches) ||
+    record.searches.length > SEARCH_HISTORY_MAX
+  ) return null;
+  const searches = record.searches.map(sanitizeEntry);
+  return searches.some((entry) => entry === null)
+    ? null
+    : (searches as SearchParams[]);
 }
 
 export function searchHistoryStep(
@@ -106,7 +129,12 @@ export function createSearchHistoryController(
     const ownGeneration = generation;
     const stored = await storage.load();
     if (generation !== ownGeneration) return cache ?? [];
-    cache ??= sanitize(stored);
+    const decoded = sanitize(stored);
+    if (decoded === null) {
+      storage.invalid?.("invalid current Files search-history record");
+      return [];
+    }
+    cache ??= decoded;
     return cache.slice();
   };
 

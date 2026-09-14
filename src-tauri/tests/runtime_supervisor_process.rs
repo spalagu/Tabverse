@@ -36,10 +36,16 @@ impl Drop for HelperProcess {
     }
 }
 
-fn start_helper(state: &std::path::Path) -> (HelperProcess, EndpointRecord) {
+fn start_helper(
+    runtime_store: &std::path::Path,
+    endpoint: &std::path::Path,
+    content: &std::path::Path,
+) -> (HelperProcess, EndpointRecord) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_tabverse"))
         .arg("--helper")
-        .arg(state)
+        .arg(runtime_store)
+        .arg(endpoint)
+        .arg(content)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -49,7 +55,7 @@ fn start_helper(state: &std::path::Path) -> (HelperProcess, EndpointRecord) {
     input.write_all(&TOKEN_BYTES).unwrap();
     drop(input);
 
-    let endpoint_path = state.join("terminal-helper.json");
+    let endpoint_path = endpoint.join("terminal-helper.json");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !endpoint_path.exists() && Instant::now() < deadline {
         assert!(
@@ -98,6 +104,12 @@ fn wait_for_terminal_output(rx: &mpsc::Receiver<Frame>, marker: &[u8]) {
 fn receive_agent_until(stream: &mut AgentIpcStream, wanted: AgentKind) -> AgentFrame {
     loop {
         let frame = stream.recv().unwrap();
+        if frame.kind == AgentKind::Error {
+            panic!(
+                "agent supervisor returned an error while waiting for {wanted:?}: {}",
+                String::from_utf8_lossy(&frame.payload)
+            );
+        }
         if frame.kind == wanted {
             return frame;
         }
@@ -107,8 +119,10 @@ fn receive_agent_until(stream: &mut AgentIpcStream, wanted: AgentKind) -> AgentF
 #[test]
 fn terminal_and_agent_survive_a_real_gui_process_boundary() {
     let root = tempfile::tempdir().unwrap();
-    let state = root.path().join("state");
-    let (mut helper, endpoint) = start_helper(&state);
+    let runtime_store = root.path().join("data");
+    let endpoint_dir = root.path().join("cache/runtime");
+    let content = root.path().join("content");
+    let (mut helper, endpoint) = start_helper(&runtime_store, &endpoint_dir, &content);
     assert_eq!(endpoint.pid, helper.child.id());
 
     let (first_terminal, first_events) = terminal_client(&endpoint.name);
@@ -206,7 +220,8 @@ fn terminal_and_agent_survive_a_real_gui_process_boundary() {
 
     assert!(helper.child.try_wait().unwrap().is_none());
     let published_again: EndpointRecord =
-        serde_json::from_slice(&fs::read(state.join("terminal-helper.json")).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(endpoint_dir.join("terminal-helper.json")).unwrap())
+            .unwrap();
     assert_eq!(published_again.pid, endpoint.pid);
 
     let (second_terminal, second_events) = terminal_client(&endpoint.name);

@@ -1,23 +1,23 @@
-# ADR-0009：Runtime 使用平台本地 IPC
+# ADR-0009: Runtime Uses Platform-Local IPC
 
-## 状态
-已接受。
+## Status
+Accepted.
 
-## 需求与上下文
-GUI 与 Runtime Supervisor 需要认证、可流式传输且不暴露网络端口的 IPC。
+## Context and requirements
+The GUI and Runtime Supervisor need authenticated, streaming IPC without exposing a network port.
 
-## 决策
-Unix 使用 owner-only Unix domain socket，Windows 使用 Named Pipe。握手 token 不进入后续 wire payload；frame 大小有上限。
+## Decision
+Use an owner-only Unix domain socket on Unix and a Named Pipe on Windows. The handshake token never enters subsequent wire payloads, and frame size is bounded.
 
-## 备选与拒绝原因
-- localhost TCP：增加端口发现、防火墙和本机其他用户探测面。
-- 文件轮询：不能承载实时终端和 Agent event。
+## Alternatives rejected
+- Localhost TCP: adds port discovery, firewall concerns, and a probe surface for other local users.
+- File polling: cannot carry real-time terminal and Agent events.
 
-## 跨平台影响
-transport 分平台，frame、认证、generation 和错误语义共享。
+## Cross-platform impact
+Transport is platform-specific; frame, authentication, generation, and error semantics are shared.
 
-## Remote 带宽影响
-IPC 只在 Host 本机；Remote 仍走 iroh。
+## Remote bandwidth impact
+IPC remains local to the Host; Remote traffic still uses iroh.
 
-## 迁移影响与可逆性
-不读取旧 TCP endpoint。transport adapter 可单独替换，不改变 runtime protocol。
+## Migration impact and reversibility
+Do not read legacy TCP endpoints. A transport adapter can be replaced independently without changing the runtime protocol.

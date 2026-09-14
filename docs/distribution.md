@@ -1,34 +1,34 @@
-# Tabverse 零付费分发说明
+# Tabverse Zero-Cost Distribution
 
-## 产物来源
+## Artifact provenance
 
-Tabverse 安装包由 GitHub Actions 从对应版本 tag 或明确指定的源码 ref 构建。下载后先核对同一构建提供的 `SHA256SUMS`，再安装应用。
+GitHub Actions builds Tabverse installers from the corresponding version tag or an explicitly selected source ref. Verify the downloaded file against the `SHA256SUMS` from the same build before installing it.
 
 ## macOS
 
-macOS 安装包使用 ad-hoc 签名，没有 Apple Developer ID，也没有提交 Apple notarization。Apple Silicon 使用 `aarch64` 或 `arm64` DMG，Intel 使用 `x64` DMG。
+macOS installers use ad-hoc signatures. They do not use an Apple Developer ID and are not submitted for Apple notarization. Use an `aarch64` or `arm64` DMG on Apple Silicon and an `x64` DMG on Intel.
 
-首次打开时：
+On first launch:
 
-1. 将 `Tabverse.app` 拖入 `/Applications`。
-2. 在 Finder 中右键 `Tabverse.app`，选择“打开”。
-3. 如果仍被拦截，进入“系统设置 → 隐私与安全性”，仅对 Tabverse 选择“仍要打开”。
+1. Drag `Tabverse.app` to `/Applications`.
+2. In Finder, right-click `Tabverse.app` and choose **Open**.
+3. If macOS still blocks it, open **System Settings → Privacy & Security** and choose **Open Anyway** for Tabverse only.
 
-如果系统没有显示上述单应用入口，可以执行：
+If macOS does not show the per-application option above, run:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Tabverse.app
 ```
 
-该命令只移除 Tabverse 应用的下载隔离标记。不要运行 `spctl --master-disable`，不要全局关闭 Gatekeeper。
+This command removes the download quarantine attribute only from Tabverse. Do not run `spctl --master-disable` and do not disable Gatekeeper globally.
 
-## Windows 和 Linux
+## Windows and Linux
 
-Windows 和 Linux 安装包同样不使用付费代码签名服务。系统或安全软件可能显示未知发布者提示。请只从 `spalagu/Tabverse` GitHub Release 或对应 GitHub Actions run 下载，并核对 SHA-256。
+Windows and Linux installers also avoid paid code-signing services. The operating system or security software may show an unknown-publisher warning. Download only from a `spalagu/Tabverse` GitHub Release or the corresponding GitHub Actions run, and verify the SHA-256 checksum.
 
-## 发布约束
+## Release constraints
 
-- Release Candidate 只作为 GitHub Actions artifact 保存，不创建 tag 或 release。
-- 正式发布使用新的不可变版本 tag。
-- 发布流程不得覆盖已有 tag 或已有 GitHub Release。
-- `v0.0.1` 是历史版本，不会被 V3 发布覆盖。
+- Keep release candidates only as GitHub Actions artifacts; do not create a tag or release.
+- Publish a final release from a new immutable version tag.
+- Never overwrite an existing tag or GitHub Release.
+- Preserve `v0.0.1` as a historical release; V3 does not overwrite it.

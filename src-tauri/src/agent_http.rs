@@ -342,14 +342,16 @@ pub async fn post_form(url: &str, fields: &[(String, String)]) -> Result<(u16, S
 /// Where the agent's sign-in is filed in the credential vault.
 const TOKEN_KEY: &str = "codex-token";
 
-/// Read the stored sign-in, if there is one.
-///
-/// A vault that will not open is reported as "not signed in" rather than as an
-/// error: from where the caller stands the two are the same, and the second
-/// spelling invites a retry that cannot help.
-pub fn stored_token() -> Option<Token> {
-    let raw = crate::credentials::read_agent_secret(TOKEN_KEY).ok()??;
-    serde_json::from_str(&raw).ok()
+/// Read the stored sign-in, if there is one. A missing credential means signed
+/// out; a vault or record failure is a real error and must not impersonate it.
+pub fn stored_token() -> Result<Option<Token>> {
+    let Some(raw) = crate::credentials::read_agent_secret(TOKEN_KEY).map_err(|e| anyhow!(e))?
+    else {
+        return Ok(None);
+    };
+    serde_json::from_str(&raw)
+        .context("the stored Codex sign-in is invalid")
+        .map(Some)
 }
 
 /// File a sign-in, replacing whatever was there.
@@ -364,13 +366,37 @@ pub fn forget_token() -> Result<()> {
 }
 
 /// A token source backed by the vault, writing back every renewal.
-pub fn token_source() -> Result<StoredToken> {
-    let token = stored_token().ok_or_else(|| anyhow!("not signed in to Codex"))?;
-    Ok(StoredToken::new(token, |renewed| {
-        // A renewal that cannot be filed is not worth failing the request
-        // over — the token in hand still works. It will simply be renewed
-        // again next time rather than read back from disk.
-        let _ = store_token(renewed);
+pub fn token_source() -> Result<Option<StoredToken>> {
+    Ok(stored_token()?.map(|token| {
+        let expected = std::sync::Arc::new(Mutex::new(
+            serde_json::to_string(&token).expect("Token serialization must succeed"),
+        ));
+        StoredToken::new(token, move |renewed| {
+            // The request can finish with its in-memory renewed token, but a
+            // failed durable write must remain visible instead of becoming a
+            // silent sign-out on the next launch.
+            let replacement = match serde_json::to_string(renewed) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("[agent] cannot serialize renewed Codex sign-in: {error}");
+                    return;
+                }
+            };
+            let mut current = expected.lock().unwrap_or_else(|error| error.into_inner());
+            match crate::credentials::compare_exchange_agent_secret(
+                TOKEN_KEY,
+                &current,
+                &replacement,
+            ) {
+                Ok(true) => *current = replacement,
+                Ok(false) => eprintln!(
+                    "[agent] did not persist renewed Codex sign-in because the user changed it"
+                ),
+                Err(error) => {
+                    eprintln!("[agent] cannot persist renewed Codex sign-in: {error}")
+                }
+            }
+        })
     }))
 }
 
@@ -416,7 +442,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _vault = crate::credentials::test_vault_guard(dir.path().to_path_buf());
 
-        assert!(stored_token().is_none(), "nothing filed yet");
+        assert!(stored_token().unwrap().is_none(), "nothing filed yet");
         let token = Token {
             access: "at".into(),
             refresh: "rt".into(),
@@ -424,7 +450,9 @@ mod tests {
         };
         store_token(&token).unwrap();
 
-        let read_back = stored_token().expect("what was filed must come back");
+        let read_back = stored_token()
+            .expect("the vault must open")
+            .expect("what was filed must come back");
         assert_eq!(
             read_back, token,
             "including the expiry, which decides renewal"
@@ -432,7 +460,7 @@ mod tests {
 
         forget_token().unwrap();
         assert!(
-            stored_token().is_none(),
+            stored_token().unwrap().is_none(),
             "signing out must actually forget it"
         );
     }
@@ -456,23 +484,62 @@ mod tests {
 
         assert_eq!(forgotten, 1, "the web login went");
         assert!(
-            stored_token().is_some(),
+            stored_token().unwrap().is_some(),
             "the agent's sign-in must have stayed"
         );
     }
 
     #[test]
-    fn a_source_cannot_be_built_without_a_sign_in() {
+    fn a_missing_sign_in_selects_no_token_source() {
         // Named for what it is. A provider that started with an empty token
         // would fail later, as a 401, and send whoever reads it looking at
         // permissions.
         let dir = tempfile::tempdir().unwrap();
         let _vault = crate::credentials::test_vault_guard(dir.path().to_path_buf());
-        let err = match token_source() {
-            Ok(_) => panic!("a source must not exist without a sign-in"),
-            Err(e) => e,
+        assert!(token_source().unwrap().is_none());
+    }
+
+    #[test]
+    fn an_invalid_stored_sign_in_is_not_treated_as_signed_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let _vault = crate::credentials::test_vault_guard(dir.path().to_path_buf());
+        crate::credentials::save_agent_secret(TOKEN_KEY, std::any::type_name::<Token>()).unwrap();
+
+        let error = stored_token().expect_err("invalid credentials must remain visible");
+        assert!(error
+            .to_string()
+            .contains("stored Codex sign-in is invalid"));
+    }
+
+    #[test]
+    fn a_stale_refresh_cannot_overwrite_a_new_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let _vault = crate::credentials::test_vault_guard(dir.path().to_path_buf());
+        let old = Token {
+            access: "old".into(),
+            refresh: "old-r".into(),
+            expires_at_ms: 1,
         };
-        assert!(err.to_string().contains("not signed in"), "got {err}");
+        let new = Token {
+            access: "new".into(),
+            refresh: "new-r".into(),
+            expires_at_ms: 2,
+        };
+        let refreshed = Token {
+            access: "stale-refresh".into(),
+            refresh: "old-r".into(),
+            expires_at_ms: 3,
+        };
+        store_token(&old).unwrap();
+        store_token(&new).unwrap();
+
+        assert!(!crate::credentials::compare_exchange_agent_secret(
+            TOKEN_KEY,
+            &serde_json::to_string(&old).unwrap(),
+            &serde_json::to_string(&refreshed).unwrap(),
+        )
+        .unwrap());
+        assert_eq!(stored_token().unwrap(), Some(new));
     }
 
     #[test]

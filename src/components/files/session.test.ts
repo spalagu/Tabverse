@@ -10,10 +10,10 @@ import {
   pruneWorkspace,
   storedPanes,
   utf8Bytes,
-  type FilesSessionState,
   type FilesSnapshot,
   type PaneSnapshot,
   type SessionFile,
+  type StoredPane,
 } from "./session";
 
 const file = (over: Partial<SessionFile> & { path: string }): SessionFile => ({
@@ -63,14 +63,22 @@ describe("buildFilesSession", () => {
     );
     expect(state).toEqual({
       v: 1,
-      root: "/jumped/via/location/bar",
-      expanded: ["/work/src", "/work/src/deep"],
-      open: ["/work/a.ts", "/work/b.md"],
-      active: "/work/b.md",
-      viewModes: { "/work/b.md": "split" },
       showDiff: false,
-      drafts: {},
       term: { open: false, height: PANEL_DEFAULT_PX, cwd: "/work" },
+      panes: [
+        {
+          root: "/jumped/via/location/bar",
+          expanded: ["/work/src", "/work/src/deep"],
+          open: ["/work/a.ts", "/work/b.md"],
+          active: "/work/b.md",
+          viewModes: { "/work/b.md": "split" },
+          drafts: {},
+          treeModes: {},
+        },
+      ],
+      layout: "row",
+      activePane: 0,
+      panelMode: "tree",
     });
   });
 
@@ -101,7 +109,7 @@ describe("buildFilesSession", () => {
         ],
       })
     );
-    expect(state.drafts).toEqual({
+    expect(state.panes[0].drafts).toEqual({
       "/work/a.ts": { text: "my edit", modified: 4242 },
     });
   });
@@ -112,7 +120,7 @@ describe("buildFilesSession", () => {
         panes: [pane({ drafts: new Map([["/work/a.ts", "on disk"]]) })],
       })
     );
-    expect(state.drafts).toEqual({});
+    expect(state.panes[0].drafts).toEqual({});
   });
 
   it("never stores a draft for a file that could not be written back", () => {
@@ -126,7 +134,7 @@ describe("buildFilesSession", () => {
         ],
       })
     );
-    expect(state.drafts).toEqual({});
+    expect(state.panes[0].drafts).toEqual({});
   });
 
   it("skips a draft above the per-draft cap and names it", () => {
@@ -145,7 +153,7 @@ describe("buildFilesSession", () => {
       })
     );
     expect(skippedDrafts).toEqual(["/work/a.ts"]);
-    expect(Object.keys(state.drafts)).toEqual(["/work/b.ts"]);
+    expect(Object.keys(state.panes[0].drafts)).toEqual(["/work/b.ts"]);
   });
 
   it("keeps the total under the budget when many drafts are large", () => {
@@ -159,12 +167,14 @@ describe("buildFilesSession", () => {
     const { state, skippedDrafts } = buildFilesSession(
       snapshot({ panes: [pane({ open, drafts })] })
     );
-    const total = Object.values(state.drafts).reduce(
+    const total = Object.values(state.panes[0].drafts).reduce(
       (n, d) => n + d.text.length,
       0
     );
     expect(total).toBeLessThanOrEqual(4 * 1024 * 1024);
-    expect(skippedDrafts.length).toBe(8 - Object.keys(state.drafts).length);
+    expect(skippedDrafts.length).toBe(
+      8 - Object.keys(state.panes[0].drafts).length
+    );
   });
 
   it("keeps view modes and the active file tied to what is open", () => {
@@ -182,13 +192,13 @@ describe("buildFilesSession", () => {
         ],
       })
     );
-    expect(state.viewModes).toEqual({ "/work/a.ts": "source" });
-    expect(state.active).toBe("/work/a.ts");
+    expect(state.panes[0].viewModes).toEqual({ "/work/a.ts": "source" });
+    expect(state.panes[0].active).toBe("/work/a.ts");
   });
 
   it("omits the sort when it is the default, so old and untouched payloads stay identical", () => {
     const { state } = buildFilesSession(snapshot());
-    expect("sort" in state).toBe(false);
+    expect("sort" in state.panes[0]).toBe(false);
   });
 
   it("stores a non-default sort as three plain fields", () => {
@@ -197,20 +207,28 @@ describe("buildFilesSession", () => {
         panes: [pane({ sort: { key: "modified", asc: false, dirsFirst: false } })],
       })
     );
-    expect(state.sort).toEqual({ key: "modified", asc: false, dirsFirst: false });
+    expect(state.panes[0].sort).toEqual({
+      key: "modified",
+      asc: false,
+      dirsFirst: false,
+    });
     // And it survives the normalize round trip.
     const back = normalizeFilesState(JSON.parse(JSON.stringify(state)));
-    expect(back!.sort).toEqual({ key: "modified", asc: false, dirsFirst: false });
+    expect(back!.panes[0].sort).toEqual({
+      key: "modified",
+      asc: false,
+      dirsFirst: false,
+    });
   });
 
-  it("one pane writes NO panes field — the payload is the shape it always was", () => {
+  it("one pane writes the current explicit pane list", () => {
     const { state } = buildFilesSession(snapshot());
-    expect("panes" in state).toBe(false);
-    expect("layout" in state).toBe(false);
-    expect("activePane" in state).toBe(false);
+    expect(state.panes).toHaveLength(1);
+    expect(state.layout).toBe("row");
+    expect(state.activePane).toBe(0);
   });
 
-  it("two panes write the pair, the arrangement and the front pane, pane 0 in the legacy fields", () => {
+  it("two panes write the pair, the arrangement and the front pane", () => {
     const { state } = buildFilesSession(
       snapshot({
         panes: [
@@ -228,10 +246,6 @@ describe("buildFilesSession", () => {
         activePane: 1,
       })
     );
-    // The legacy half describes pane 0, so the oldest reader still sees a
-    // complete workspace.
-    expect(state.root).toBe("/left");
-    expect(state.open).toEqual(["/left/a.ts"]);
     expect(state.panes).toHaveLength(2);
     expect(state.panes![1].root).toBe("/right");
     expect(state.panes![1].expanded).toEqual(["/right/sub"]);
@@ -276,225 +290,29 @@ describe("utf8Bytes", () => {
 });
 
 describe("normalizeFilesState", () => {
-  it("rejects junk and unknown payload versions", () => {
+  it("accepts the current explicit pane list", () => {
+    const raw = buildFilesSession(snapshot()).state;
+    const state = normalizeFilesState(JSON.parse(JSON.stringify(raw)));
+    expect(state).not.toBeNull();
+    expect(storedPanes(state!)).toHaveLength(1);
+    expect(state!.panes[0].root).toBe("/work");
+  });
+
+  it("rejects missing panes and unknown payload versions", () => {
     expect(normalizeFilesState(null)).toBeNull();
-    expect(normalizeFilesState("nonsense")).toBeNull();
-    expect(normalizeFilesState({ v: 99, root: "/work" })).toBeNull();
-  });
-
-  it("keeps the usable parts of a half-corrupt payload", () => {
-    const s = normalizeFilesState({
-      v: 1,
-      root: "/work",
-      expanded: ["/work/src", 7],
-      open: ["/work/a.ts", null, "/work/b.ts"],
-      active: "/work/gone.ts",
-      viewModes: { "/work/a.ts": "source", "/work/gone.ts": "split" },
-      showDiff: false,
-      drafts: {
-        "/work/a.ts": { text: "edit", modified: 12 },
-        "/work/b.ts": { text: 5 },
-      },
-    });
-    expect(s).not.toBeNull();
-    expect(s!.expanded).toEqual(["/work/src"]);
-    expect(s!.open).toEqual(["/work/a.ts", "/work/b.ts"]);
-    // The stored active file is not among the open ones: fall back, not crash.
-    expect(s!.active).toBe("/work/a.ts");
-    expect(s!.viewModes).toEqual({ "/work/a.ts": "source" });
-    expect(s!.showDiff).toBe(false);
-    expect(s!.drafts).toEqual({ "/work/a.ts": { text: "edit", modified: 12 } });
-  });
-
-  it("gives a workspace saved before the panel existed a closed panel", () => {
-    // The whole point of not bumping `v` for the new field: this payload is
-    // exactly what earlier versions wrote, and it must still restore the
-    // files it carries.
-    const s = normalizeFilesState({
-      v: 1,
-      root: "/work",
-      expanded: [],
-      open: ["/work/a.ts"],
-      active: "/work/a.ts",
-      viewModes: {},
-      showDiff: true,
-      drafts: {},
-    });
-    expect(s).not.toBeNull();
-    expect(s!.open).toEqual(["/work/a.ts"]);
-    expect(s!.term).toEqual({
-      open: false,
-      height: PANEL_DEFAULT_PX,
-      cwd: "",
-    });
-  });
-
-  it("brings the panel back as it was left", () => {
-    const s = normalizeFilesState({
-      v: 1,
-      open: [],
-      term: { open: true, height: 260, cwd: "/work/src" },
-    });
-    expect(s!.term).toEqual({ open: true, height: 260, cwd: "/work/src" });
-  });
-
-  it("defaults each panel field on its own when it is missing or junk", () => {
-    const s = normalizeFilesState({
-      v: 1,
-      open: [],
-      term: { open: "yes", height: "tall", cwd: 7 },
-    });
-    expect(s!.term).toEqual({
-      open: false,
-      height: PANEL_DEFAULT_PX,
-      cwd: "",
-    });
-  });
-
-  it("makes a stored height legal rather than trusting the file", () => {
-    const s = normalizeFilesState({
-      v: 1,
-      open: [],
-      term: { open: true, height: 4, cwd: "/work" },
-    });
-    expect(s!.term.height).toBe(PANEL_MIN_PX);
-  });
-
-  it("defaults the sort field by field, for a payload without one and for junk", () => {
-    // Absent means the default — the reader's contract is `sort ?? DEFAULT_SORT`.
-    const before = normalizeFilesState({ v: 1, open: [] });
-    expect(before!.sort).toBeUndefined();
-    const junk = normalizeFilesState({ v: 1, open: [], sort: { key: "colour" } });
-    expect(junk!.sort).toBeUndefined();
-    const half = normalizeFilesState({
-      v: 1,
-      open: [],
-      sort: { key: "size", asc: false, dirsFirst: "no" },
-    });
-    // Half-recognizable keeps the half that parsed.
-    expect(half!.sort).toEqual({ key: "size", asc: false, dirsFirst: true });
-  });
-
-  it("treats a missing mtime as unknown rather than dropping the draft", () => {
-    const s = normalizeFilesState({
-      v: 1,
-      open: ["/work/a.ts"],
-      drafts: { "/work/a.ts": { text: "edit" } },
-    });
-    expect(s!.drafts["/work/a.ts"]).toEqual({ text: "edit", modified: null });
+    expect(normalizeFilesState({ v: 1 })).toBeNull();
+    expect(normalizeFilesState({ v: 99, panes: [] })).toBeNull();
   });
 });
 
-const PRE_DUAL_PAYLOAD = {
-  v: 1 as const,
-  root: "/work",
-  expanded: ["/work/src", "/work/src/deep"],
-  open: ["/work/a.ts", "/work/b.md"],
-  active: "/work/b.md",
-  viewModes: { "/work/b.md": "split" },
-  showDiff: false,
-  drafts: { "/work/a.ts": { text: "my edit", modified: 4242 } },
-  term: { open: true, height: 260, cwd: "/work/src" },
-};
-
-describe("storedPanes — the single-pane compatibility rule", () => {
-  it("a payload with no panes restores as one pane, field for field", () => {
-    const s = normalizeFilesState(PRE_DUAL_PAYLOAD)!;
-    expect(s).not.toBeNull();
-    expect(s.panes).toBeUndefined();
-    const panes = storedPanes(s);
-    expect(panes).toHaveLength(1);
-    // Field for field, the legacy values come through untouched — this is
-    // the "restore = current behavior, field by field" assertion.
-    expect(panes[0]).toEqual({
-      root: "/work",
-      expanded: ["/work/src", "/work/src/deep"],
-      open: ["/work/a.ts", "/work/b.md"],
-      active: "/work/b.md",
-      viewModes: { "/work/b.md": "split" },
-      drafts: { "/work/a.ts": { text: "my edit", modified: 4242 } },
-      treeModes: {},
-      sort: undefined,
-    });
-  });
-
-  it("a legacy payload that round-trips through a single pane writes back the same shape", () => {
-    const s = normalizeFilesState(PRE_DUAL_PAYLOAD)!;
-    const one = storedPanes(s);
-    // What a restore-then-immediate-save writes: identical to the input it
-    // came from (the legacy mirror of pane 0 with nothing added).
-    const { state } = buildFilesSession({
-      panes: [
-        {
-          root: one[0].root,
-          expanded: one[0].expanded,
-          open: [
-            file({ path: "/work/a.ts", modified: 4242 }),
-            file({ path: "/work/b.md" }),
-          ],
-          active: one[0].active,
-          viewModes: new Map(Object.entries(one[0].viewModes) as [string, "split"][]),
-          drafts: new Map([["/work/a.ts", "my edit"]]),
-          treeModes: new Map<string, never>(),
-          sort: DEFAULT_SORT,
-        },
-      ],
-      layout: "row",
-      activePane: 0,
-      showDiff: s.showDiff,
-      term: s.term,
-      panelMode: s.panelMode ?? "tree",
-    });
-    expect("panes" in state).toBe(false);
-    expect(state.root).toBe(PRE_DUAL_PAYLOAD.root);
-    expect(state.active).toBe(PRE_DUAL_PAYLOAD.active);
-    expect(state.viewModes).toEqual(PRE_DUAL_PAYLOAD.viewModes);
-  });
-
-  it("a stored pair restores both panes, and junk in the second falls back to one", () => {
-    const dual = normalizeFilesState({
-      ...PRE_DUAL_PAYLOAD,
-      panes: [
-        PRE_DUAL_PAYLOAD,
-        {
-          root: "/right",
-          expanded: [],
-          open: ["/right/c.txt"],
-          active: "/right/c.txt",
-          viewModes: {},
-          drafts: {},
-          treeModes: { "/right": "miller" },
-        },
-      ],
-      layout: "column",
-      activePane: 1,
-    })!;
-    expect(dual.panes).toHaveLength(2);
-    expect(dual.panes![1].root).toBe("/right");
-    expect(dual.panes![1].treeModes).toEqual({ "/right": "miller" });
-    expect(dual.layout).toBe("column");
-    expect(dual.activePane).toBe(1);
-    expect(storedPanes(dual)).toHaveLength(2);
-
-    const broken = normalizeFilesState({
-      ...PRE_DUAL_PAYLOAD,
-      panes: [PRE_DUAL_PAYLOAD, "junk"],
-    })!;
-    expect(broken.panes).toBeUndefined();
-    expect(storedPanes(broken)).toHaveLength(1);
-  });
-});
-
-const state = (over: Partial<FilesSessionState> = {}): FilesSessionState => ({
-  v: 1,
+const state = (over: Partial<StoredPane> = {}): StoredPane => ({
   root: "/work",
   expanded: [],
   open: ["/work/a.ts", "/work/gone.ts", "/work/b.ts"],
   active: "/work/gone.ts",
   viewModes: { "/work/gone.ts": "split", "/work/b.ts": "source" },
-  showDiff: true,
   drafts: {},
-  term: { open: false, height: PANEL_DEFAULT_PX, cwd: "/work" },
+  treeModes: {},
   ...over,
 });
 
@@ -603,30 +421,29 @@ describe("mtimeUnchanged", () => {
 });
 
 describe("panelMode", () => {
-  it("is written only when it differs from the tree default", () => {
+  it("is always written in the current representation", () => {
     const { state } = buildFilesSession(snapshot({ panelMode: "search" }));
     expect(state.panelMode).toBe("search");
     const { state: tree } = buildFilesSession(snapshot({ panelMode: "tree" }));
-    // Absent on write means default — byte-identical to a payload from
-    // before the field existed.
-    expect("panelMode" in tree).toBe(false);
+    expect(tree.panelMode).toBe("tree");
   });
 
-  it("restores through normalize, with absence and junk both meaning tree", () => {
+  it("restores the current value and rejects missing or invalid values", () => {
     const saved = normalizeFilesState(
       buildFilesSession(snapshot({ panelMode: "changes" })).state
     );
     expect(saved?.panelMode).toBe("changes");
     expect(normalizeFilesState(null)?.panelMode).toBeUndefined();
-    // A payload with no panelMode at all: the reader fills the tree in.
-    const legacy = buildFilesSession(snapshot()).state;
-    delete (legacy as Partial<FilesSessionState>).panelMode;
-    expect(normalizeFilesState(legacy)?.panelMode).toBe("tree");
+    const missing = buildFilesSession(snapshot()).state as Partial<
+      ReturnType<typeof buildFilesSession>["state"]
+    >;
+    delete missing.panelMode;
+    expect(normalizeFilesState(missing)).toBeNull();
     const junk = buildFilesSession(snapshot()).state as unknown as Record<
       string,
       unknown
     >;
     junk.panelMode = "sideways";
-    expect(normalizeFilesState(junk)?.panelMode).toBe("tree");
+    expect(normalizeFilesState(junk)).toBeNull();
   });
 });

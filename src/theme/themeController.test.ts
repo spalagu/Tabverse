@@ -43,9 +43,6 @@ const NO_SUCH_THEME = "no-such-theme-here";
 const EXTRA_THEME =
   themeIds().find((t) => !(BUILTIN_THEMES as readonly string[]).includes(t)) ?? "";
 
-/** The browser-demo carrier key for the theme scope (persist.ts). */
-const CARRIER_KEY = "tabverse.state.theme";
-
 /** A controllable stand-in for matchMedia("(prefers-color-scheme: dark)"). */
 function stubMatchMedia(matches: boolean) {
   const listeners: Array<(e: { matches: boolean }) => void> = [];
@@ -79,9 +76,7 @@ beforeEach(async () => {
   delete markerWindow.__TABVERSE_BOOT_THEME__;
   resetThemeControllerForTest();
   mocks.invoke.mockReset();
-  mocks.invoke.mockImplementation(async (cmd) =>
-    cmd === "theme_pref_load" ? "system" : undefined
-  );
+  mocks.invoke.mockResolvedValue(undefined);
   mocks.logs.length = 0;
   stubMatchMedia(true);
   useStore.setState({
@@ -196,11 +191,9 @@ describe("applyResolvedTheme ①/② discipline", () => {
 });
 
 describe("initTheme hydration and the OS listener", () => {
-  it("desktop: theme_pref_load hydrates the store and applies the theme", async () => {
+  it("desktop: the app.db-backed store preference is applied", async () => {
     markerWindow.__TAURI_INTERNALS__ = {};
-    mocks.invoke.mockImplementation(async (cmd) =>
-      cmd === "theme_pref_load" ? "light" : undefined
-    );
+    useStore.setState({ themePreference: "light" });
     await initTheme();
     const s = useStore.getState();
     expect(s.themePreference).toBe("light");
@@ -227,25 +220,25 @@ describe("initTheme hydration and the OS listener", () => {
     expect(useStore.getState().systemDark).toBe(true);
   });
 
-  it("demo: reads the carrier scope back at boot", async () => {
-    localStorage.setItem(CARRIER_KEY, JSON.stringify({ preference: "light" }));
+  it("demo: applies the preference already loaded by config", async () => {
+    useStore.setState({ themePreference: "light" });
     await initTheme();
     expect(useStore.getState().themePreference).toBe("light");
     expect(useStore.getState().resolvedTheme).toBe("light");
   });
 
-  it("demo: an unknown stored value falls back to system", async () => {
+  it("an unknown configured value falls back to system", async () => {
     // A theme id tokens.json does not declare. It used to be enough to
     // write "sepia" here; sepia is a real theme now, and the two tests
     // together are the point — a stored id is honoured when the file knows
     // it and refused when it does not, with no list of names in this file.
-    localStorage.setItem(CARRIER_KEY, JSON.stringify({ preference: NO_SUCH_THEME }));
+    useStore.setState({ themePreference: NO_SUCH_THEME as never });
     await initTheme();
     expect(useStore.getState().themePreference).toBe("system");
   });
 
-  it("demo: a stored theme beyond the built-in two is honoured", async () => {
-    localStorage.setItem(CARRIER_KEY, JSON.stringify({ preference: EXTRA_THEME }));
+  it("a configured theme beyond the built-in two is honoured", async () => {
+    useStore.setState({ themePreference: EXTRA_THEME });
     await initTheme();
     expect(useStore.getState().themePreference).toBe(EXTRA_THEME);
     expect(useStore.getState().resolvedTheme).toBe(EXTRA_THEME);
@@ -268,7 +261,7 @@ describe("bootstrapTheme and the injected boot marker", () => {
   it("desktop: the injected resolved theme beats matchMedia", () => {
     markerWindow.__TAURI_INTERNALS__ = {};
     markerWindow.__TABVERSE_BOOT_THEME__ = "light";
-    stubMatchMedia(true); // the OS says dark; theme.json knew better
+    stubMatchMedia(true); // the OS says dark; the app.db preference knew better
     bootstrapTheme();
     expect(useStore.getState().resolvedTheme).toBe("light");
     expect(document.documentElement.dataset.theme).toBe("light");
@@ -301,13 +294,13 @@ describe("bootstrapTheme and the injected boot marker", () => {
     );
   });
 
-  it("the marker outranks the demo carrier — the read order is fixed", () => {
-    localStorage.setItem(CARRIER_KEY, JSON.stringify({ preference: "dark" }));
+  it("the resolved marker outranks the configured preference for first paint", () => {
+    useStore.setState({ themePreference: "dark" });
     markerWindow.__TABVERSE_BOOT_THEME__ = "light";
     stubMatchMedia(true);
     bootstrapTheme();
     expect(useStore.getState().resolvedTheme).toBe("light");
-    // The preference itself still reads from the carrier: the marker only
+    // The preference still comes from config: the marker only
     // decides the first frame's resolved theme.
     expect(useStore.getState().themePreference).toBe("dark");
   });
@@ -343,38 +336,16 @@ describe("③/④ fan-out: consumers subscribe to resolvedTheme", () => {
 });
 
 describe("preference persistence", () => {
-  it("desktop: setThemePreference fires theme_pref_save", async () => {
-    markerWindow.__TAURI_INTERNALS__ = {};
-    useStore.getState().setThemePreference("light");
-    // The import inside persistThemePreference is async; let it land.
-    for (let i = 0; i < 20; i++) await Promise.resolve();
-    const saves = mocks.invoke.mock.calls.filter(
-      ([cmd]) => cmd === "theme_pref_save"
-    );
-    expect(saves).toEqual([["theme_pref_save", { pref: "light" }]]);
-  });
-
-  it("demo: the preference lands in the carrier under its own scope", async () => {
-    useStore.getState().setThemePreference("dark");
-    await flushAll();
-    expect(localStorage.getItem(CARRIER_KEY)).toBe(
-      JSON.stringify({ preference: "dark" })
-    );
-  });
-
   // LAST on purpose: markFreshRun is one-way for this module registry, and
   // every test after it would inherit the fresh-run rule.
   it("fresh run: the switch applies, nothing lands, nothing is read", async () => {
-    localStorage.setItem(CARRIER_KEY, JSON.stringify({ preference: "light" }));
+    useStore.setState({ themePreference: "light" });
     markFreshRun();
     await initTheme();
-    // Inherit nothing: the stored preference stays unread.
+    // Inherit nothing: the configured preference stays unread.
     expect(useStore.getState().themePreference).toBe("system");
     localStorage.clear();
     useStore.getState().setThemePreference("light");
     expect(useStore.getState().resolvedTheme).toBe("light");
-    await flushAll();
-    // Write nothing: the carrier stays empty.
-    expect(localStorage.getItem(CARRIER_KEY)).toBeNull();
   });
 });

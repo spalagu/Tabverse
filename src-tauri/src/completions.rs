@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 /// The ceiling one fetched spec may carry. The bundled snapshot is a few
 /// tens of kilobytes; a document worth calling a completion spec has no
@@ -12,13 +12,12 @@ const MAX_SPEC_BYTES: usize = 2 * 1024 * 1024;
 /// The fetch deadline, shared with the userscript installer's URL fetch.
 const FETCH_TIMEOUT_SECS: u64 = 30;
 
-/// Where the state directory holds the spec: `<state>/completions/spec.json`
-/// (a directory of its own, the way userscripts' bodies have one).
+/// Where the cache directory holds the downloaded spec.
 fn spec_file(dir: &Path) -> PathBuf {
     dir.join("completions").join("spec.json")
 }
 
-/// Read the state-directory copy. `Ok(None)` is "never updated" — a normal
+/// Read the cached copy. `Ok(None)` is "never updated" — a normal
 /// first launch, not an error. Exposed to the commands as a plain function
 /// so the tests can point it at a temp dir.
 fn read_spec(dir: &Path) -> Result<Option<String>, String> {
@@ -29,9 +28,7 @@ fn read_spec(dir: &Path) -> Result<Option<String>, String> {
     }
 }
 
-/// Write the state-directory copy, staged through a `.tmp` and renamed into
-/// place — the state doorway's own rule (crates/tabverse-fs/src/state.rs),
-/// so a crash mid-write leaves the previous good spec, never a half of one.
+/// Write the cached copy, staged through a `.tmp` and renamed into place.
 fn write_spec(dir: &Path, text: &str) -> Result<(), String> {
     let dest = spec_file(dir);
     let parent = dest
@@ -45,7 +42,7 @@ fn write_spec(dir: &Path, text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Judge a fetched document before it is allowed near the state directory.
+/// Judge a fetched document before it is allowed near the cache directory.
 ///
 /// The same bar the interface's `parseSpec` applies — shaped like a spec,
 /// not complete: an object carrying a string `version` and an array
@@ -105,11 +102,14 @@ pub struct CompletionUpdate {
     pub version: String,
 }
 
-/// The state-directory copy's text, or `None` when none was ever written.
+/// The cached copy's text, or `None` when none was ever written.
 ///
 #[tauri::command]
 pub async fn completions_get(app: AppHandle) -> Result<Option<String>, String> {
-    let dir = crate::state_dir(&app)?;
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("cannot resolve app cache dir: {e}"))?;
     tauri::async_runtime::spawn_blocking(move || read_spec(&dir))
         .await
         .map_err(|e| e.to_string())?
@@ -119,7 +119,7 @@ pub async fn completions_get(app: AppHandle) -> Result<Option<String>, String> {
 ///
 /// The userscript URL installer's shape (30 s timeout, byte cap while
 /// streaming, http(s) only, first-party fetch), then the shape gate
-/// [`validate_spec`] before anything is stored in the state directory.
+/// [`validate_spec`] before anything is stored in the cache directory.
 #[tauri::command]
 pub async fn completions_update(app: AppHandle, url: String) -> Result<CompletionUpdate, String> {
     let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url: {e}"))?;
@@ -155,7 +155,10 @@ pub async fn completions_update(app: AppHandle, url: String) -> Result<Completio
     }
     let text = String::from_utf8(buf).map_err(|_| "the file is not UTF-8 text".to_string())?;
     let version = validate_spec(&text)?;
-    let dir = crate::state_dir(&app)?;
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("cannot resolve app cache dir: {e}"))?;
     tauri::async_runtime::spawn_blocking(move || write_spec(&dir, &text))
         .await
         .map_err(|e| e.to_string())??;
@@ -180,7 +183,7 @@ mod tests {
         )
     }
 
-    /// The state-directory half: write, read, and the replace that never
+    /// The cache-directory half: write, read, and the replace that never
     /// leaves a half-written spec behind (the .tmp is renamed, not edited
     /// in place — a crash between the two leaves the old copy).
     #[test]

@@ -16,5 +16,6 @@ Later commits are treated as a knowledge and bug-fix source. Each meaningful lat
 ## Consequences
 - CEF and the custom Tauri fork never enter V3 unless a future product decision explicitly reintroduces them.
 - Plugin/Resident V1 code is not inherited merely for compatibility.
-- User data migration must still consider data written by 0.0.2/0.0.3.
+- The first V3 release defines one new local-data baseline and ships no importer for data
+  written by unreleased 0.0.2/0.0.3 builds.
 - Useful later fixes are reproduced and forward-ported in V3-native form rather than blindly cherry-picked.

@@ -71,7 +71,6 @@ mod fs_commands;
 mod fs_watch;
 mod http;
 mod keys;
-mod migrate;
 pub mod page_proxy;
 mod passwords;
 mod profiles;
@@ -109,7 +108,7 @@ pub(crate) use browser_commands::{
     browser_label, cmd_token, dirs_next_download, webview_label, AppCommandEvent, PageProxySlot,
     BROWSER_UA, CMD_SCHEME,
 };
-pub(crate) use state_commands::{app_state_store, state_dir, AppDatabase};
+pub(crate) use state_commands::{app_state_store, AppDatabase};
 
 fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
@@ -721,6 +720,13 @@ pub fn run() {
             );
             app.manage(AppDatabase(app_db.clone()));
             credentials::set_app_data_dir(app_data_dir);
+            if let Err(e) = config::install_network_policy(&app_db) {
+                eprintln!("[network] cannot load settings from app.db: {e}");
+                http::set_policy(http::DnsPolicy::System);
+            }
+            let initial_theme = config::registered_config(&app_db)
+                .map(|values| values.appearance.theme.token())
+                .unwrap_or(config::SYSTEM_THEME);
             {
                 let main_cfg = app
                     .config()
@@ -733,10 +739,9 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 let traffic_light_position = main_cfg.traffic_light_position.clone();
                 let mut wb = tauri::WebviewWindowBuilder::from_config(app.handle(), &main_cfg)?;
-                let pref = appearance_commands::theme_preference(app.handle());
-                if theme_gen::theme(&pref).is_some() {
+                if theme_gen::theme(initial_theme).is_some() {
                     wb = wb.initialization_script(format!(
-                        "window.__TABVERSE_BOOT_THEME__ = \"{pref}\";"
+                        "window.__TABVERSE_BOOT_THEME__ = \"{initial_theme}\";"
                     ));
                 }
                 // The settings the interface needs before it can paint anything,
@@ -781,8 +786,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 if let Some(window) = app.get_window("main") {
-                    let pref = appearance_commands::theme_preference(app.handle());
-                    let backdrop = match theme_gen::theme(&pref) {
+                    let backdrop = match theme_gen::theme(initial_theme) {
                         Some(t) => &t.backdrop,
                         None => theme_gen::backdrop(
                             window
@@ -874,9 +878,8 @@ pub fn run() {
             state_commands::state_load,
             state_commands::state_delete,
             state_commands::state_list,
+            state_commands::state_factory_reset,
             appearance_commands::set_theme,
-            appearance_commands::theme_pref_save,
-            appearance_commands::theme_pref_load,
             browser_commands::browser_create,
             browser_commands::browser_find,
             browser_commands::browser_clear_find,
@@ -901,10 +904,6 @@ pub fn run() {
             credential_commands::pw_forget_all,
             credential_commands::pw_export,
             credential_commands::pw_import,
-            credential_commands::migrate_authorize_export,
-            credential_commands::migrate_export,
-            credential_commands::migrate_import_check,
-            credential_commands::migrate_import_apply,
             browser_commands::browser_dialog_answer,
             browser_commands::browser_ask_unload,
             trusted_hosts::trust_certificate_host,
@@ -1452,46 +1451,6 @@ mod theme_gen_drift {
                 .as_str()
                 .unwrap_or_else(|| panic!("tokens.json has no shared.findHighlight.{key}"));
             assert_eq!(got, want, "{name} drifted from shared.findHighlight.{key}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod theme_preference_read {
-    use super::appearance_commands::theme_preference_in;
-    use std::path::PathBuf;
-
-    // Same sandbox convention as tabverse-fs's own state tests: a pid-tagged
-    // dir under the OS temp dir, removed at the end of each test.
-    fn dir_with(tag: &str, contents: Option<&str>) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tabverse-theme-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        if let Some(json) = contents {
-            std::fs::write(dir.join("theme.json"), json).unwrap();
-        }
-        dir
-    }
-
-    #[test]
-    fn explicit_preferences_come_back_as_written() {
-        for pref in ["light", "dark", "system"] {
-            let dir = dir_with(pref, Some(&format!("{{\"preference\":{pref:?}}}")));
-            assert_eq!(theme_preference_in(&dir), pref);
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-    }
-
-    #[test]
-    fn missing_file_and_broken_shapes_fall_back_to_system() {
-        for (tag, contents) in [
-            ("missing", None), // first launch: no file at all
-            ("truncated", Some("{\"preference\":")),
-            ("unknown", Some("{\"preference\":\"blue\"}")), // no version ever wrote this
-            ("shape", Some("[]")),                          // valid JSON, wrong shape
-        ] {
-            let dir = dir_with(tag, contents);
-            assert_eq!(theme_preference_in(&dir), "system", "for {contents:?}");
-            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }

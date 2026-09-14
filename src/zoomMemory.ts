@@ -1,4 +1,4 @@
-import { loadState, saveState } from "./persist";
+import { loadState, markStateInvalid, saveState } from "./persist";
 import { isFreshRun } from "./state/store";
 
 
@@ -41,18 +41,25 @@ let entries: ZoomEntry[] = [];
 export async function loadZoomMemory(): Promise<void> {
   if (isFreshRun()) return;
   const stored = await loadState<StoredZoom>(ZOOM_SCOPE);
-  if (stored && Array.isArray(stored.entries)) {
-    entries = stored.entries.filter(
-      (e) =>
-        e &&
-        typeof e.host === "string" &&
-        e.host.length > 0 &&
-        typeof e.scale === "number" &&
-        e.scale > 0
-    );
-    // Trust the file no further than the cap: a hand-edited file cannot make
-    // the memory grow without bound.
-    if (entries.length > ZOOM_MAX) entries = entries.slice(entries.length - ZOOM_MAX);
+  if (stored !== null) {
+    if (
+      stored.version !== 1 ||
+      !Array.isArray(stored.entries) ||
+      stored.entries.length > ZOOM_MAX ||
+      stored.entries.some(
+        (e) =>
+          !e ||
+          typeof e.host !== "string" ||
+          e.host.length === 0 ||
+          typeof e.scale !== "number" ||
+          !Number.isFinite(e.scale) ||
+          e.scale <= 0
+      )
+    ) {
+      markStateInvalid(ZOOM_SCOPE, "invalid current site zoom record");
+      return;
+    }
+    entries = stored.entries;
   }
 }
 

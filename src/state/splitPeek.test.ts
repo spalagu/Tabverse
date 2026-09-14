@@ -11,7 +11,6 @@ import {
   flushAll,
   listScopes,
   saveState,
-  SESSION_SCOPE,
   tabScope,
 } from "../persist";
 
@@ -225,7 +224,7 @@ describe("multi-pane growth and removal", () => {
     expect(st().tabs.some((t) => t.id === b)).toBe(true);
   });
 
-  it("separating the focus member hands focus to a neighbour, the split staying", () => {
+  it("design A04: separating the focused member keeps focus on that content", () => {
     const a = addBrowser("https://a.example/");
     const b = addBrowser("https://b.example/");
     const c = addBrowser("https://c.example/");
@@ -234,7 +233,7 @@ describe("multi-pane growth and removal", () => {
     st().splitWith(c); // [a, b, c], active a
     st().separateFromSplit(a); // remove the focus member
     expect(st().split!.ids).toEqual([b, c]);
-    expect(st().activeTabId).toBe(b); // a's right neighbour
+    expect(st().activeTabId).toBe(a); // layout removal is not closing
     expect(st().tabs.some((t) => t.id === a)).toBe(true); // survives
   });
 
@@ -318,29 +317,6 @@ describe("split orientation and ratios", () => {
     expect(st().split!.ratios[0]).toBeCloseTo(0.5, 6);
   });
 
- it("migrates a pre- two-pane splitPair from an old session", async () => {
-    const a = addBrowser("https://a.example/");
-    const b = addBrowser("https://b.example/");
-    st().activateTab(a);
-    const snap = sessionSnapshot(st()) as unknown as Record<string, unknown>;
-    delete snap.split;
-    snap.splitPair = { leftId: a, rightId: b, ratio: 0.3 };
-    await flushAll();
-    saveState(SESSION_SCOPE, snap);
-    await flushAll();
-    useStore.setState({
-      tabs: [],
-      groups: withPresetGroups([]),
-      activeTabId: null,
-      split: null,
-    });
-    expect(await st().restoreSession()).toBe(true);
-    expect(st().split!.ids).toEqual([a, b]);
-    expect(st().split!.vertical).toBe(false);
-    expect(st().split!.ratios[0]).toBeCloseTo(0.3, 6);
-    expect(st().split!.ratios[1]).toBeCloseTo(0.7, 6);
-  });
-
   it("restore drops a split whose survivors fall below two", async () => {
     const a = addBrowser("https://a.example/");
     const b = addBrowser("https://b.example/");
@@ -359,10 +335,10 @@ describe("split orientation and ratios", () => {
   });
 });
 
-describe("merged split row and navigation", () => {
+describe("design C06: independent split rows and navigation", () => {
   beforeEach(reset);
 
-  it("counts a multi-pane split once — the first member stands for it", () => {
+  it("keeps every split member independently visible and addressable", () => {
     const a = addBrowser("https://a.example/");
     const b = addBrowser("https://b.example/");
     const c = addBrowser("https://c.example/");
@@ -373,29 +349,27 @@ describe("merged split row and navigation", () => {
     // Un-merged, every row counts (pre-split callers).
     const flat = visibleOrdered(st().tabs, st().groups).map((t) => t.id);
     expect(flat).toEqual([d, c, b, a]);
-    // Merged, only the first member is its own row; b and c drop out.
+    // Relation membership never hides another tab's sidebar identity.
     const merged = visibleOrdered(st().tabs, st().groups, st().split).map(
       (t) => t.id
     );
-    expect(merged).toEqual([d, a]);
-    expect(merged).not.toContain(b);
-    expect(merged).not.toContain(c);
+    expect(merged).toEqual([d, c, b, a]);
   });
 
-  it("⌘n lands on the split's first pane; ⌃Tab counts it once from any member", () => {
+  it("⌘n and sequential cycling follow the independently visible rows", () => {
     const a = addBrowser("https://a.example/");
     const b = addBrowser("https://b.example/");
     const c = addBrowser("https://c.example/");
     const d = addBrowser("https://d.example/");
     st().activateTab(a);
     st().splitWith(b);
-    st().splitWith(c); // merged order: [d, a]
-    st().activateIndex(1); // the split's row
-    expect(st().activeTabId).toBe(a); // its first pane
+    st().splitWith(c); // sidebar order stays [d, c, b, a]
+    st().activateIndex(1);
+    expect(st().activeTabId).toBe(c);
     st().cycleTab(1);
-    expect(st().activeTabId).toBe(d);
-    // Focus a later pane, then ⌃Tab: the split still counts once.
-    st().activateTab(c);
+    expect(st().activeTabId).toBe(b);
+    st().cycleTab(1);
+    expect(st().activeTabId).toBe(a);
     st().cycleTab(1);
     expect(st().activeTabId).toBe(d);
   });
@@ -470,7 +444,7 @@ describe("drag-to-split drop judgment", () => {
 describe("split pane operations legacy end states", () => {
   beforeEach(reset);
 
-  it("separates a two-pane split: it dissolves, the OTHER gets focus, both survive", () => {
+  it("design A04: separating a two-pane split preserves focus and both members", () => {
     const a = addBrowser("https://a.example/");
     const b = addBrowser("https://b.example/");
     st().activateTab(a);
@@ -479,7 +453,7 @@ describe("split pane operations legacy end states", () => {
     expect(st().split).toBeNull();
     expect(st().tabs.some((t) => t.id === a)).toBe(true);
     expect(st().tabs.some((t) => t.id === b)).toBe(true);
-    expect(st().activeTabId).toBe(b);
+    expect(st().activeTabId).toBe(a);
   });
 });
 

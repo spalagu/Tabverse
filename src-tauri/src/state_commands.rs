@@ -9,11 +9,24 @@ use tauri::{AppHandle, Manager, State};
 
 pub(crate) struct AppDatabase(pub(crate) Arc<tabverse_state::AppStateStore>);
 
-pub(crate) fn state_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+pub(crate) fn runtime_store_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     app.path()
         .app_data_dir()
-        .map(|dir| dir.join("state"))
-        .map_err(|e| format!("cannot resolve app data dir: {e}"))
+        .map_err(|e| format!("cannot resolve runtime store dir: {e}"))
+}
+
+pub(crate) fn runtime_endpoint_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_cache_dir()
+        .map(|dir| dir.join("runtime"))
+        .map_err(|e| format!("cannot resolve runtime endpoint dir: {e}"))
+}
+
+pub(crate) fn content_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("content"))
+        .map_err(|e| format!("cannot resolve content dir: {e}"))
 }
 
 pub(crate) fn app_state_store(app: &AppHandle) -> Result<tabverse_state::AppStateStore, String> {
@@ -42,8 +55,7 @@ pub(crate) async fn config_set(
 ) -> Result<(), String> {
     let store = db.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        crate::config::set_with_store(&store, &key, &value)?;
-        crate::config::project_network_setting(&key, Some(&value))
+        crate::config::set_with_store(&store, &key, &value)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -52,12 +64,9 @@ pub(crate) async fn config_set(
 #[tauri::command]
 pub(crate) async fn config_reset(db: State<'_, AppDatabase>, key: String) -> Result<(), String> {
     let store = db.0.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::config::reset_with_store(&store, &key)?;
-        crate::config::project_network_setting(&key, None)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || crate::config::reset_with_store(&store, &key))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -98,6 +107,17 @@ pub(crate) async fn state_list(app: AppHandle) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         app_state_store(&app)?
             .list_scopes()
+            .map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn state_factory_reset(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app_state_store(&app)?
+            .factory_reset()
             .map_err(|e| format!("{e:#}"))
     })
     .await

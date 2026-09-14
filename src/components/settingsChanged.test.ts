@@ -95,10 +95,7 @@ const CHANGED_KEY = CONFIG_KEYS.archiveAfter;
 const CHANGED_TO = "12h";
 
 /**
- * What `config_get` answers with while the file is at its defaults. Sources
- * is non-empty on purpose: a file that exists is what the migration step
- * checks for, and an empty list would send it looking for old settings to
- * move in the middle of these tests.
+ * What `config_get` answers with while the file is at its defaults.
  */
 function snapshot(values: ConfigValues = AT_THE_DEFAULTS): ConfigSnapshot {
   return {
@@ -302,7 +299,7 @@ describe("resetting one setting", () => {
     );
   });
 
-  it("deletes the line rather than writing the default into the file", async () => {
+  it("deletes the override rather than storing the current default", async () => {
     serve(SCHEMA);
     useStore.setState({ archiveThreshold: CHANGED_TO });
 
@@ -310,14 +307,12 @@ describe("resetting one setting", () => {
     await flushConfigWrites();
 
     expect(calls()).toContainEqual(["config_reset", { key: CHANGED_KEY }]);
-    // The whole point of the requirement: a default spelled out in the
-    // user's file is frozen there, so no config_set may carry it — not for
-    // this key, not for any other.
+    // No config_set may freeze today's default as a stored override.
     const writes = calls().filter(([cmd]) => cmd === "config_set");
     expect(writes, "no setting was written back").toEqual([]);
   });
 
-  it("re-reads the file rather than assuming what the reset left", async () => {
+  it("re-reads app.db rather than assuming what the reset left", async () => {
     serve(SCHEMA);
     useStore.setState({ archiveThreshold: CHANGED_TO });
 
@@ -328,7 +323,7 @@ describe("resetting one setting", () => {
     expect(reset, "config_reset was issued").toBeGreaterThanOrEqual(0);
     expect(
       order.slice(reset).includes("config_get"),
-      "the file was read back afterwards"
+      "app.db was read back afterwards"
     ).toBe(true);
   });
 });
