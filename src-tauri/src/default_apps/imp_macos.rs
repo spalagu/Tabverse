@@ -189,34 +189,18 @@ pub fn current_handler(target: &Target) -> Option<String> {
     }
 }
 
-/// Point a target at `handler`.
+/// Point a target at Tabverse.
 ///
 /// A non-zero status is reported, but a zero status proves nothing on its own:
 /// the browser prompt has not been answered yet when this returns, and Launch
 /// Services accepts undeclared types without complaint. The caller reads back.
 ///
-/// `Nobody` is the awkward one. Launch Services has no call for "let go of
-/// this" — it can only be told who the owner is — so this passes an empty
-/// identifier and lets the caller's read-back decide whether it took. What is
-/// at stake is small and bounded: only the types that had no owner at all
-/// before Tabverse claimed them, which on a developer's machine is a handful of
-/// suffixes nothing else had ever registered for. If the system declines, those
-/// stay with Tabverse after the switch goes off and show up in the count, which
-/// is visible rather than hidden.
-pub fn set_handler(target: &Target, handler: super::Handler<'_>) -> Result<(), String> {
-    let me;
-    let bundle_id = match handler {
-        super::Handler::Other(h) => h,
-        super::Handler::Nobody => "",
-        super::Handler::This => {
-            me = self_id();
-            if me.is_empty() {
-                return Err("not running from an installed app bundle".into());
-            }
-            &me
-        }
-    };
-    let id = CFString::new(bundle_id);
+pub fn set_handler(target: &Target) -> Result<(), String> {
+    let me = self_id();
+    if me.is_empty() {
+        return Err("not running from an installed app bundle".into());
+    }
+    let id = CFString::new(&me);
     let status = unsafe {
         match target {
             Target::Scheme(scheme) => {
@@ -258,7 +242,7 @@ pub fn set_handler(target: &Target, handler: super::Handler<'_>) -> Result<(), S
 /// daemon the same writes apply immediately and the read-back sees them. The
 /// kill is user-scoped (a non-root `killall` only reaches the caller's own
 /// processes) and launchd respawns the daemon on the next lookup.
-pub fn prepare(_kind: Kind, _enabled: bool, _targets: &[Target]) {
+pub fn prepare(_kind: Kind, _targets: &[Target]) {
     refresh();
     unsafe {
         let bundle = CFBundleGetMainBundle();
