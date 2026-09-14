@@ -1,5 +1,11 @@
 # Tabverse Changelog
 
+## 0.1.3
+
+- Use `~/Library/Application Support/app.tabverse/config.toml` as the current macOS application-support configuration path and stop reading the removed bundle path.
+- Keep registered settings in `app.db` while `config.toml` owns only declarative profiles, templates, shortcuts, and Files rules.
+- Remove previous-default backup and restore behavior; Tabverse can claim supported defaults, while later changes belong to the operating system and the user.
+
 ## 0.1.2
 
 - Establish `app.db` as the single authority for durable structured application state.
