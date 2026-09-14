@@ -1,10 +1,9 @@
 //! Making Tabverse the system's default browser, terminal and editor.
 //!
-//! Three switches, one per tab type, each independently on or off. What a
-//! switch actually does is hand a set of system objects -- URL schemes and
-//! file types -- over to this app, and hand them back when it is turned off.
+//! Three actions, one per tab type. Each hands a set of system objects -- URL
+//! schemes and file types -- over to this app.
 //!
-//! Four constraints shape everything here.
+//! Three constraints shape everything here.
 //!
 //! **The system is the source of truth, not a file of ours.** Status is read
 //! live from the OS on every query. A switch that reported what it last wrote
@@ -25,27 +24,13 @@
 //! live in `BROWSER_SCHEMES`/`TERMINAL_SCHEMES` below, mirrored by
 //! CFBundleURLTypes in Info.plist.
 //!
-//! **Whoever held it before must be recoverable.** Turning a switch off has to
-//! put the previous handler back, so the first time a switch goes on, every
-//! target's current owner is written to a backup file. It is written once and
-//! never overwritten while the switch stays on -- a second write would record
-//! Tabverse as the previous owner and the way back would be gone for good.
-//! Losing that file is the one failure in this module that nothing reports:
-//! the user finds out weeks later, when a double-click still opens Tabverse
-//! and turning the switch off does nothing.
-//!
 //! **A set that was not read back did not happen.** Every write is followed by
 //! a read of the same target, and only a matching read counts. Setting a
 //! default fails silently on macOS in more than one way -- an undeclared type,
 //! a synthesized type the system will not bind, a scheme whose change the user
 //! declined in the system's own prompt -- and none of them return an error.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::sync::Mutex;
-
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, Runtime};
 
 // The claimed file types, baked in from resources/content-types.json at build time.
 //
@@ -109,11 +94,9 @@ impl Kind {
     }
 }
 
-/// One system object a switch takes over.
+/// One system object an action takes over.
 ///
-/// The distinction is not cosmetic: the platform calls differ, and so does the
-/// key a backup entry is filed under, which is why the key carries the variant
-/// (`scheme:http` can never collide with a file type called `http`).
+/// The distinction is not cosmetic: the platform calls differ.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     /// A URL scheme, without `://`.
@@ -130,31 +113,7 @@ pub enum Target {
     },
 }
 
-/// Who a target should point at.
-///
-/// Three states, not two, and conflating any pair of them is a silent bug:
-/// "hand it to us" and "hand it to nobody" both used to arrive as an absent
-/// value, so turning a switch off re-claimed every type that had no owner
-/// before instead of releasing it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Handler<'a> {
-    /// This app.
-    This,
-    /// A specific application, named the way the platform names it.
-    Other(&'a str),
-    /// Nobody. A real state on every platform, and the correct restore for a
-    /// type that was unclaimed before this app took it.
-    Nobody,
-}
-
 impl Target {
-    pub fn key(&self) -> String {
-        match self {
-            Self::Scheme(s) => format!("scheme:{s}"),
-            Self::FileType { id, .. } => format!("type:{id}"),
-        }
-    }
-
     pub fn label(&self) -> String {
         match self {
             Self::Scheme(s) => format!("{s}://"),
@@ -190,54 +149,6 @@ pub struct Status {
     pub note: Option<String>,
 }
 
-/// Previous owners, per switch. Written once when a switch first goes on.
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct Backup {
-    /// switch -> target key -> the bundle/app id that held it, or absent when
-    /// nothing held it. An absent entry restores to "no handler", which is a
-    /// real state and not the same as "leave it alone".
-    #[serde(default)]
-    kinds: BTreeMap<String, BTreeMap<String, Option<String>>>,
-}
-
-/// Guards the backup file against two switches being flipped at once.
-static BACKUP_LOCK: Mutex<()> = Mutex::new(());
-
-fn backup_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("no app data dir: {e}"))?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    Ok(dir.join("default-apps-backup.json"))
-}
-
-fn read_backup<R: Runtime>(app: &AppHandle<R>) -> Backup {
-    let Ok(path) = backup_path(app) else {
-        return Backup::default();
-    };
-    // A missing or unreadable backup is not an error to report here: the
-    // caller's next step decides what it means. Turning a switch ON treats it
-    // as "nothing recorded yet, record now"; turning one OFF treats it as
-    // "nothing to restore", which is the unrecoverable case the module doc
-    // warns about.
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn write_backup<R: Runtime>(app: &AppHandle<R>, b: &Backup) -> Result<(), String> {
-    let path = backup_path(app)?;
-    let json = serde_json::to_string_pretty(b).map_err(|e| e.to_string())?;
-    // Temp file plus rename, the same way saved sessions are written: a crash
-    // midway through must not leave a truncated file, because a truncated
-    // backup is indistinguishable from no backup and costs the way home.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
-}
-
 /// Every target a switch owns, derived from what the bundle actually declares.
 ///
 /// File types come from `bundle.fileAssociations`, split by the role the
@@ -247,11 +158,8 @@ fn write_backup<R: Runtime>(app: &AppHandle<R>, b: &Backup) -> Result<(), String
 /// -- turning one on must leave the other's targets untouched.
 pub fn targets(kind: Kind) -> Vec<Target> {
     let mut out: Vec<Target> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
-    let push = |t: Target, seen: &mut Vec<String>, out: &mut Vec<Target>| {
-        let k = t.key();
-        if !seen.contains(&k) {
-            seen.push(k);
+    let push = |t: Target, out: &mut Vec<Target>| {
+        if !out.contains(&t) {
             out.push(t);
         }
     };
@@ -262,7 +170,7 @@ pub fn targets(kind: Kind) -> Vec<Target> {
         Kind::Editor => &[],
     };
     for s in schemes {
-        push(Target::Scheme((*s).to_string()), &mut seen, &mut out);
+        push(Target::Scheme((*s).to_string()), &mut out);
     }
 
     if kind == Kind::Browser {
@@ -291,7 +199,7 @@ pub fn targets(kind: Kind) -> Vec<Target> {
         // On macOS that resolution also depends on what else is installed on
         // the machine, which is why it happens now and not at build time.
         for id in imp::file_targets(a) {
-            push(Target::FileType { id, executes }, &mut seen, &mut out);
+            push(Target::FileType { id, executes }, &mut out);
         }
     }
     out
@@ -355,11 +263,11 @@ pub fn status(kind: Kind) -> Status {
     }
 }
 
-/// Turn a switch on or off, then report what actually happened.
+/// Make Tabverse the handler, then report what actually happened.
 ///
 /// The returned status is read back from the system, not predicted from what
 /// was written -- see the module doc on silent failure.
-pub fn set<R: Runtime>(app: &AppHandle<R>, kind: Kind, enabled: bool) -> Result<Status, String> {
+pub fn set(kind: Kind) -> Result<Status, String> {
     let targets = targets(kind);
     if targets.is_empty() {
         return Err(format!(
@@ -367,13 +275,11 @@ pub fn set<R: Runtime>(app: &AppHandle<R>, kind: Kind, enabled: bool) -> Result<
             kind.as_str()
         ));
     }
-    let _guard = BACKUP_LOCK.lock().map_err(|e| e.to_string())?;
-
     // Whatever this platform has to do around the change: register the app so
     // the system will consider it at all, and on Windows -- where an
     // application is not allowed to assign a default and a filter driver
     // enforces it -- open the settings page where the user does it themselves.
-    imp::prepare(kind, enabled, &targets);
+    imp::prepare(kind, &targets);
     if !imp::settable(kind) {
         // Nothing further is ours to do. The status that comes back is read
         // from the system like any other, so it tells the truth about whether
@@ -381,76 +287,9 @@ pub fn set<R: Runtime>(app: &AppHandle<R>, kind: Kind, enabled: bool) -> Result<
         return Ok(status(kind));
     }
 
-    if enabled {
-        // Record who holds each target before taking any of them -- and only
-        // if this switch has no record yet. Re-recording would capture
-        // Tabverse as the previous owner of anything already taken.
-        let me = imp::self_id();
-        let mut backup = read_backup(app);
-        if !backup.kinds.contains_key(kind.as_str()) {
-            let mut owners = BTreeMap::new();
-            for t in &targets {
-                // Never record ourselves as the previous owner. If this type
-                // already resolves to Tabverse -- a leftover from a prior
-                // session, or an install-time claim -- then who held it before
-                // is genuinely unknown, and writing "Tabverse" would make the
-                // restore hand it right back to us. Absent means "leave as-is
-                // on restore", which is the honest answer.
-                let owner = imp::current_handler(t).filter(|o| *o != me);
-                owners.insert(t.key(), owner);
-            }
-            backup.kinds.insert(kind.as_str().to_string(), owners);
-            write_backup(app, &backup)?;
-        }
-        for t in &targets {
-            if let Err(e) = imp::set_handler(t, Handler::This) {
-                eprintln!("[default-apps] {}: {e}", t.label());
-            }
-        }
-    } else {
-        let backup = read_backup(app);
-        let owners = backup.kinds.get(kind.as_str()).cloned().unwrap_or_default();
-        // Counts only the ones that had a real owner and did not get it back.
-        // Failing to release something nobody owned is a different thing --
-        // some platforms have no way to say "no handler" -- and letting that
-        // pin the backup forever would mean it never clears at all, since the
-        // editor switch claims a dozen types nothing had ever registered for.
-        let mut unreturned = 0usize;
-        for t in &targets {
-            // An entry that was never recorded gets no guess. Handing a type
-            // to some plausible-looking app would be worse than leaving it:
-            // the user can still fix an unclaimed type from Finder, but they
-            // would have no way to know we invented an owner for it.
-            let Some(previous) = owners.get(&t.key()) else {
-                continue;
-            };
-            match previous.as_deref() {
-                Some(id) => {
-                    if let Err(e) = imp::set_handler(t, Handler::Other(id)) {
-                        eprintln!("[default-apps] returning {} to {id}: {e}", t.label());
-                        unreturned += 1;
-                    }
-                }
-                None => {
-                    if let Err(e) = imp::set_handler(t, Handler::Nobody) {
-                        eprintln!("[default-apps] releasing {}: {e}", t.label());
-                    }
-                }
-            }
-        }
-        // The backup is never removed here, and that is the fix for a real
-        // data-loss bug. It used to be dropped once a restore "succeeded",
-        // then rewritten on the next turn-on from the current owners -- which
-        // by then were Tabverse, so the record of the true original owner was
-        // overwritten with Tabverse and the way back was gone. Kept as a
-        // write-once record of the pre-Tabverse world, re-enabling reads it,
-        // never rewrites it. `unreturned` only drives the log line now.
-        if unreturned > 0 {
-            eprintln!(
-                "[default-apps] {unreturned} of {} did not go back; the record is kept so \
-                 turning it off again can retry",
-                targets.len()
-            );
+    for t in &targets {
+        if let Err(e) = imp::set_handler(t) {
+            eprintln!("[default-apps] {}: {e}", t.label());
         }
     }
 
@@ -460,13 +299,7 @@ pub fn set<R: Runtime>(app: &AppHandle<R>, kind: Kind, enabled: bool) -> Result<
     // backend's `prepare`); a status taken through a stale cache would report
     // the switch as failed when the write in fact landed.
     let first = status(kind);
-    let looks_wrong = if enabled {
-        first.held < first.total
-    } else {
-        // After turning off, holding anything the backup named is suspect --
-        // but a target that had no owner to return to legitimately stays.
-        first.held > 0
-    };
+    let looks_wrong = first.held < first.total;
     if looks_wrong {
         imp::refresh();
         return Ok(status(kind));
@@ -499,13 +332,9 @@ pub async fn default_apps_status() -> Result<Vec<Status>, String> {
 }
 
 #[tauri::command]
-pub async fn default_apps_set(
-    app: AppHandle,
-    kind: String,
-    enabled: bool,
-) -> Result<Status, String> {
+pub async fn default_apps_set(kind: String) -> Result<Status, String> {
     let kind = Kind::parse(&kind).ok_or_else(|| format!("unknown switch: {kind}"))?;
-    tauri::async_runtime::spawn_blocking(move || set(&app, kind, enabled))
+    tauri::async_runtime::spawn_blocking(move || set(kind))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -513,16 +342,6 @@ pub async fn default_apps_set(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn target_keys_cannot_collide_across_variants() {
-        let scheme = Target::Scheme("http".into());
-        let file = Target::FileType {
-            id: "http".into(),
-            executes: false,
-        };
-        assert_ne!(scheme.key(), file.key());
-    }
 
     /// The check that would have caught an empty claim list before it shipped.
     ///
@@ -550,35 +369,6 @@ mod tests {
         assert!(
             DECLARED.iter().any(|a| a.executes),
             "nothing claims the shell role, so the terminal switch has no file types"
-        );
-    }
-
-    /// Recording the previous owner must never name Tabverse itself.
-    ///
-    /// A type that already resolves here -- left from an earlier session, or
-    /// claimed at install -- has an unknown true owner, and writing "Tabverse"
-    /// into the backup makes the restore hand it straight back to us. This is
-    /// the corruption that actually happened: a backup full of Tabverse, and
-    /// no way home. The filter is the whole guard, so it gets its own test.
-    #[test]
-    fn the_backup_never_records_ourselves_as_the_previous_owner() {
-        let me = "dev.tabverse.app";
-        let candidates = [
-            "dev.tabverse.app",
-            "com.microsoft.VSCode",
-            "ai.spalagu.vibeterm",
-        ];
-        let recorded: Vec<Option<&str>> = candidates
-            .into_iter()
-            .map(|owner| Some(owner).filter(|o| *o != me))
-            .collect();
-        assert_eq!(
-            recorded,
-            vec![
-                None,
-                Some("com.microsoft.VSCode"),
-                Some("ai.spalagu.vibeterm")
-            ]
         );
     }
 

@@ -1020,12 +1020,11 @@ export const STR = {
     defaultApps: {
       heading: "Default apps",
       blurb:
-        "Each switch hands a set of things the system opens over to " +
-        "Tabverse, and hands them back when you turn it off. Turning one " +
-        "on is the only thing that takes a file type away from another " +
-        "app — though a type nothing opened before may start opening here " +
-        "just because Tabverse is installed. Whoever held each one first " +
-        "is remembered, so it can be given back.",
+        "Each action hands a set of things the system opens over to " +
+        "Tabverse. This is the only thing that takes a file type away from " +
+        "another app — though a type nothing opened before may start opening " +
+        "here just because Tabverse is installed. Change the default in the " +
+        "operating system when you want another app to take it.",
       reading: "Reading what this Mac currently opens…",
       browserTitle: "Default browser",
       browserBlurb:
@@ -1049,7 +1048,7 @@ export const STR = {
       nothing: "nothing",
       stillElsewhere: (p: { apps: string }) => `Still elsewhere: ${p.apps}`,
       working: "Working…",
-      turnOff: "Turn off",
+      isDefault: "Default",
       makeDefault: "Make default",
       registerAndOpen: "Register and open Settings…",
     },

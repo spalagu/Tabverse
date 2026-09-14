@@ -1011,7 +1011,7 @@ const DIR_UNIX: &str = "tabverse";
 const DIR_WINDOWS: &str = "Tabverse";
 /// macOS keeps its per-application directory under the bundle identifier, so
 /// the last-resort location there is the one the platform itself would pick.
-const DIR_MACOS_APP_SUPPORT: &str = "dev.tabverse.app";
+const DIR_MACOS_APP_SUPPORT: &str = "app.tabverse";
 const FILE_NAME: &str = "config.toml";
 
 /// Named so that all three conventions can be exercised from any one host —
@@ -1764,28 +1764,6 @@ pub struct ConfigSnapshot {
     pub error: Option<String>,
 }
 
-const SETTINGS_IMPORT_MARKER: &str = "_migration.config-toml-v1";
-
-fn explicit_legacy_settings(sources: &[String]) -> Result<Vec<(String, String)>, String> {
-    let mut values = BTreeMap::<String, String>::new();
-    for source in sources {
-        let text = std::fs::read_to_string(source)
-            .map_err(|e| format!("cannot read {source} while importing settings: {e}"))?;
-        let table: toml::Table = toml::from_str(&text)
-            .map_err(|e| format!("cannot parse {source} while importing settings: {e}"))?;
-        for setting in SETTINGS {
-            let (section, leaf) = split_key(setting.key)?;
-            let Some(value) = table.get(section).and_then(|v| v.get(leaf)) else {
-                continue;
-            };
-            let json = serde_json::to_string(value)
-                .map_err(|e| format!("cannot import {} from {source}: {e}", setting.key))?;
-            values.insert(setting.key.to_string(), json);
-        }
-    }
-    Ok(values.into_iter().collect())
-}
-
 fn put_json_path(
     root: &mut serde_json::Value,
     key: &str,
@@ -1805,10 +1783,6 @@ pub fn snapshot_with_store(
 ) -> Result<ConfigSnapshot, String> {
     match load() {
         Ok(loaded) => {
-            let legacy = explicit_legacy_settings(&loaded.sources)?;
-            store
-                .import_settings_once(SETTINGS_IMPORT_MARKER, &legacy)
-                .map_err(|e| format!("app.db settings import: {e:#}"))?;
             let config = apply_store_settings(store, declarative_file_config(loaded.config))?;
             Ok(ConfigSnapshot {
                 values: config,
@@ -1826,9 +1800,9 @@ pub fn snapshot_with_store(
     }
 }
 
-/// After migration, config.toml contributes only the structures that are
-/// deliberately still file-authored. Every registered scalar starts at the
-/// shipped default and is then overlaid exclusively from app.db.
+/// config.toml contributes only the structures that are deliberately
+/// file-authored. Every registered scalar starts at the shipped default and is
+/// then overlaid exclusively from app.db.
 fn declarative_file_config(file: Config) -> Config {
     let defaults = Config::default();
     Config {
@@ -1852,9 +1826,6 @@ fn apply_store_settings(
         .load_settings()
         .map_err(|e| format!("app.db settings read: {e:#}"))?
     {
-        if key == SETTINGS_IMPORT_MARKER {
-            continue;
-        }
         setting_for(&key)?;
         let value = serde_json::from_str(&value_json)
             .map_err(|e| format!("app.db setting `{key}` is invalid: {e}"))?;
@@ -1894,7 +1865,7 @@ pub fn reset_with_store(store: &tabverse_state::AppStateStore, key: &str) -> Res
 
 /// Keep the early-start network factory supplied before Tauri can open
 /// app.db. This file entry is a derived boot projection; config_get and all
-/// writes remain database-authoritative after the one-time import.
+/// writes remain database-authoritative.
 pub fn project_network_setting(key: &str, value: Option<&serde_json::Value>) -> Result<(), String> {
     if key.split('.').next() != Some(SECTION_NETWORK) {
         return Ok(());
@@ -2463,13 +2434,13 @@ mod tests {
             vec![
                 PathBuf::from("/xdg/tabverse/config.toml"),
                 PathBuf::from("/Users/u/.config/tabverse/config.toml"),
-                PathBuf::from("/Users/u/Library/Application Support/dev.tabverse.app/config.toml"),
+                PathBuf::from("/Users/u/Library/Application Support/app.tabverse/config.toml"),
             ]
         );
         assert_eq!(
             resolve_paths(Platform::MacOs, &env).last(),
             Some(&PathBuf::from(
-                "/Users/u/Library/Application Support/dev.tabverse.app/config.toml"
+                "/Users/u/Library/Application Support/app.tabverse/config.toml"
             ))
         );
     }
@@ -4409,7 +4380,7 @@ archive_after = "24h"          # 12h | 24h | 7d | off
     }
 
     #[test]
-    fn migrated_file_scalars_stop_overriding_database_resets() {
+    fn file_scalars_never_override_app_db_settings() {
         let mut file = Config::default();
         file.appearance.theme = ThemePref::Named("dark");
         file.terminal.font_size = 18;
@@ -4454,27 +4425,5 @@ archive_after = "24h"          # 12h | 24h | 7d | off
             Some(value) => std::env::set_var(ENV_CONFIG_FILE, value),
             None => std::env::remove_var(ENV_CONFIG_FILE),
         }
-    }
-
-    #[test]
-    fn legacy_import_reads_only_explicit_registered_values() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = write(
-            dir.path(),
-            "first.toml",
-            "[appearance]\ntheme = \"dark\"\n[keys]\nnew-tab = \"Cmd+N\"\n",
-        );
-        let second = write(
-            dir.path(),
-            "second.toml",
-            "[appearance]\ntheme = \"light\"\n[files]\nrespect_gitignore = true\n",
-        );
-        let values =
-            explicit_legacy_settings(&[first.display().to_string(), second.display().to_string()])
-                .unwrap();
-        assert_eq!(
-            values,
-            [("appearance.theme".to_string(), r#""light""#.to_string())]
-        );
     }
 }

@@ -8,10 +8,8 @@
 //! Reads go through `xdg-mime query default` because the answer depends on a
 //! whole search path of files (per-desktop overrides, the user's own list,
 //! system-wide lists, distribution defaults) and only the tool walks all of it.
-//! Writes go straight into the user's own `mimeapps.list`, because the tool can
-//! only add a default and this module also has to *remove* one -- restoring a
-//! type that nobody owned before is a real case, and `xdg-mime` cannot express
-//! it.
+//! Writes go straight into the user's own `mimeapps.list` so existing unrelated
+//! choices are preserved exactly.
 //!
 //! The terminal switch needs one thing the others do not. "Default terminal"
 //! is not a MIME type on Linux; it is four unrelated mechanisms, of which only
@@ -133,11 +131,9 @@ pub fn current_handler(target: &Target) -> Option<String> {
 
 /// Rewrite one entry in the user's own association list.
 ///
-/// `handler` of `None` deletes the line, which is what restoring an
-/// unclaimed type means. Every other line in the file is copied through
-/// untouched: this file belongs to the user and holds their choices for
-/// applications that have nothing to do with Tabverse.
-fn write_default(mime: &str, handler: Option<&str>) -> Result<(), String> {
+/// Every other line in the file is copied through untouched: this file belongs
+/// to the user and holds choices for applications unrelated to Tabverse.
+fn write_default(mime: &str, handler: &str) -> Result<(), String> {
     let path = mimeapps_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -155,9 +151,7 @@ fn write_default(mime: &str, handler: Option<&str>) -> Result<(), String> {
             // Leaving the section without having written the entry: put it at
             // the end of the section rather than dropping it.
             if in_section && !wrote {
-                if let Some(h) = handler {
-                    out.push(format!("{mime}={h}"));
-                }
+                out.push(format!("{mime}={handler}"));
                 wrote = true;
             }
             in_section = trimmed == MIME_SECTION;
@@ -168,9 +162,7 @@ fn write_default(mime: &str, handler: Option<&str>) -> Result<(), String> {
         if in_section && trimmed.starts_with(mime) {
             if let Some(rest) = trimmed.strip_prefix(mime) {
                 if rest.starts_with('=') {
-                    if let Some(h) = handler {
-                        out.push(format!("{mime}={h}"));
-                    }
+                    out.push(format!("{mime}={handler}"));
                     wrote = true;
                     continue;
                 }
@@ -183,9 +175,7 @@ fn write_default(mime: &str, handler: Option<&str>) -> Result<(), String> {
         if !seen_section {
             out.push(MIME_SECTION.to_string());
         }
-        if let Some(h) = handler {
-            out.push(format!("{mime}={h}"));
-        }
+        out.push(format!("{mime}={handler}"));
     }
 
     let mut body = out.join("\n");
@@ -195,26 +185,15 @@ fn write_default(mime: &str, handler: Option<&str>) -> Result<(), String> {
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
 }
 
-pub fn set_handler(target: &Target, handler: super::Handler<'_>) -> Result<(), String> {
-    let me;
-    let desktop = match handler {
-        super::Handler::Other(h) => Some(h),
-        super::Handler::This => {
-            me = self_id();
-            Some(me.as_str())
-        }
-        // The line goes away entirely. Setting it to something plausible-looking
-        // would invent a choice the user never made.
-        super::Handler::Nobody => None,
-    };
-    write_default(&mime_for(target), desktop)
+pub fn set_handler(target: &Target) -> Result<(), String> {
+    write_default(&mime_for(target), &self_id())
 }
 
-/// Register as a terminal emulator, or stop being one.
+/// Register as a terminal emulator.
 ///
 /// Only the mechanisms a running application may write; see the module doc for
 /// the two that are deliberately out of reach.
-fn set_terminal_registration(enabled: bool) {
+fn set_terminal_registration() {
     let id = desktop_id();
     let list = config_dir().join("xdg-terminals.list");
     let existing = std::fs::read_to_string(&list).unwrap_or_default();
@@ -224,10 +203,8 @@ fn set_terminal_registration(enabled: bool) {
         .filter(|l| !l.is_empty() && *l != id)
         .map(str::to_string)
         .collect();
-    if enabled {
-        // First line wins, so preference is expressed by position.
-        lines.insert(0, id.clone());
-    }
+    // First line wins, so preference is expressed by position.
+    lines.insert(0, id.clone());
     let mut body = lines.join("\n");
     if !body.is_empty() {
         body.push('\n');
@@ -241,37 +218,26 @@ fn set_terminal_registration(enabled: bool) {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
     for (key, value) in [
-        (
-            "TerminalApplication",
-            if enabled { exe.as_str() } else { "" },
-        ),
-        ("TerminalService", if enabled { id.as_str() } else { "" }),
+        ("TerminalApplication", exe.as_str()),
+        ("TerminalService", id.as_str()),
     ] {
         let mut cmd = Command::new("kwriteconfig6");
         cmd.args(["--file", "kdeglobals", "--group", "General", "--key", key]);
-        if value.is_empty() {
-            cmd.arg("--delete");
-        } else {
-            cmd.arg(value);
-        }
+        cmd.arg(value);
         if cmd.status().is_err() {
             // Plasma 5 spells it differently, and neither being present just
             // means this is not a KDE session.
             let mut older = Command::new("kwriteconfig5");
             older.args(["--file", "kdeglobals", "--group", "General", "--key", key]);
-            if value.is_empty() {
-                older.arg("--delete");
-            } else {
-                older.arg(value);
-            }
+            older.arg(value);
             let _ = older.status();
         }
     }
 }
 
-pub fn prepare(kind: Kind, enabled: bool, _targets: &[Target]) {
+pub fn prepare(kind: Kind, _targets: &[Target]) {
     if kind == Kind::Terminal {
-        set_terminal_registration(enabled);
+        set_terminal_registration();
     }
     // Desktop environments cache the association database; without this the
     // change is on disk but the running session keeps the old answer. Pointed
