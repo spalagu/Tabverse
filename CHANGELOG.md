@@ -1,5 +1,13 @@
 # Tabverse Changelog
 
+## 0.1.4
+
+- Refine saved-tab lifecycle so live saved tabs sleep, dormant entries remove cleanly, and recovery never recreates deleted folders or stale runtime state.
+- Keep split relationships independent from sidebar grouping and ordering, with complete rows for every visible split member.
+- Separate sidebar sorting from content-plane splitting and clear drag feedback reliably after drop, cancellation, blur, or unmount.
+- Stabilize auto-hide timing, focus ownership, row density, duplicate-title context, viewport-safe menus, keyboard navigation, and IME rename behavior.
+- Route tab, group, keyboard, content, and remote close requests through one serialized protection coordinator for dirty, busy, shared, and beforeunload states.
+
 ## 0.1.3
 
 - Use `~/Library/Application Support/app.tabverse/config.toml` as the current macOS application-support configuration path and stop reading the removed bundle path.
