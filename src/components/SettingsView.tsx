@@ -989,13 +989,12 @@ export function SettingsView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const toggleDefault = async (s: DefaultAppStatus) => {
+  const makeDefault = async (s: DefaultAppStatus) => {
     setBusyKind(s.kind);
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const next = await invoke<DefaultAppStatus>("default_apps_set", {
         kind: s.kind,
-        enabled: !s.enabled,
       });
       setDefaults((prev) =>
         (prev ?? []).map((p) => (p.kind === next.kind ? next : p))
@@ -1751,19 +1750,23 @@ export function SettingsView({
                             )}
                           </td>
                           <td>
-                            <button
-                              className={`btn${s.enabled ? " active" : ""}`}
-                              disabled={busyKind === s.kind}
-                              onClick={() => void toggleDefault(s)}
-                            >
-                              {busyKind === s.kind
-                                ? STR.settings.defaultApps.working
-                                : s.enabled
-                                  ? STR.settings.defaultApps.turnOff
+                            {s.enabled ? (
+                              <span className="pw-empty">
+                                {STR.settings.defaultApps.isDefault}
+                              </span>
+                            ) : (
+                              <button
+                                className="btn"
+                                disabled={busyKind === s.kind}
+                                onClick={() => void makeDefault(s)}
+                              >
+                                {busyKind === s.kind
+                                  ? STR.settings.defaultApps.working
                                   : s.settable
                                     ? STR.settings.defaultApps.makeDefault
                                     : STR.settings.defaultApps.registerAndOpen}
-                            </button>
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );
