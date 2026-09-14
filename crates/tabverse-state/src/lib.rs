@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn factory_reset_is_atomic_and_keeps_every_user_data_scope_and_credential() {
+    fn factory_reset_is_atomic_and_keeps_user_state_and_credentials() {
         let temp = tempfile::tempdir().unwrap();
         let store = AppStateStore::open(temp.path()).unwrap();
         store.save_setting("appearance.theme", r#""dark""#).unwrap();
@@ -627,9 +627,6 @@ mod tests {
             .save_content_preference("text/plain", "editor")
             .unwrap();
         store.save_scope("session", r#"{"tabs":[]}"#).unwrap();
-        store
-            .save_scope("default-apps-backup", r#"{"browser":["old"]}"#)
-            .unwrap();
         store
             .save_credential_vault("browser-logins-v2", b"sealed")
             .unwrap();
@@ -641,7 +638,6 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(store.load_scope("session").unwrap().is_some());
-        assert!(store.load_scope("default-apps-backup").unwrap().is_some());
         assert!(store
             .load_credential_vault("browser-logins-v2")
             .unwrap()

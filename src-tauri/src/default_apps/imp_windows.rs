@@ -101,7 +101,7 @@ pub fn current_handler(target: &Target) -> Option<String> {
 /// Nothing to do: an application may not assign a default on this platform.
 /// Kept so the shared code has one shape, and returning an error here is what
 /// makes a caller that ignores `settable` fail loudly instead of quietly.
-pub fn set_handler(_target: &Target, _handler: super::Handler<'_>) -> Result<(), String> {
+pub fn set_handler(_target: &Target) -> Result<(), String> {
     Err(
         "Windows does not let an application assign a default; the user \
          chooses in Settings"
@@ -218,13 +218,7 @@ fn open_settings_page() {
     let _ = Command::new("cmd").args(["/C", "start", "", &url]).spawn();
 }
 
-pub fn prepare(kind: Kind, enabled: bool, targets: &[Target]) {
-    if !enabled {
-        // Turning a switch off cannot un-choose the user's choice either; the
-        // page is where that is undone too.
-        open_settings_page();
-        return;
-    }
+pub fn prepare(kind: Kind, targets: &[Target]) {
     if kind == Kind::Terminal {
         // See the module doc: the registry values that would make this the
         // default terminal name a COM class we do not serve yet.

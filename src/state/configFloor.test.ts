@@ -19,7 +19,7 @@ vi.mock("./config", async (importOriginal) => {
     configGet: () =>
       Promise.reject(
         new Error(
-          "/Users/x/Library/Application Support/dev.tabverse.app/config.toml:3:5: key with no value, expected `=`"
+          "/Users/x/Library/Application Support/app.tabverse/config.toml:3:5: key with no value, expected `=`"
         )
       ),
     configSchema: () => Promise.resolve([]),

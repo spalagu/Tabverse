@@ -41,8 +41,14 @@ generation, state, Host instance, and required checkpoints. The GUI never writes
 `runtime.db`. Neither database imports removed JSON or vault formats.
 
 Registered scalar settings use `app.db.settings`. Profiles, templates, shortcuts, and Files
-walk rules remain declarative configuration. Agent transcripts are append-only JSONL content
-under the application content directory.
+walk rules remain declarative configuration in `config.toml`. On macOS, that file has one
+current path: `~/Library/Application Support/app.tabverse/config.toml`. Removed bundle paths
+are not read or migrated. Agent transcripts are append-only JSONL content under the
+application content directory.
+
+Default application status is read from the operating system. Tabverse can claim supported
+URL schemes and file types, but it does not store the previous handlers or provide a restore
+operation. A later default choice belongs to the operating system and the user.
 
 ## Verification
 

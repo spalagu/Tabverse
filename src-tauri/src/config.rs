@@ -1042,7 +1042,7 @@ const DIR_UNIX: &str = "tabverse";
 const DIR_WINDOWS: &str = "Tabverse";
 /// macOS keeps its per-application directory under the bundle identifier, so
 /// the last-resort location there is the one the platform itself would pick.
-const DIR_MACOS_APP_SUPPORT: &str = "dev.tabverse.app";
+const DIR_MACOS_APP_SUPPORT: &str = "app.tabverse";
 const FILE_NAME: &str = "config.toml";
 
 /// Named so that all three conventions can be exercised from any one host —
@@ -2221,13 +2221,13 @@ mod tests {
             vec![
                 PathBuf::from("/xdg/tabverse/config.toml"),
                 PathBuf::from("/Users/u/.config/tabverse/config.toml"),
-                PathBuf::from("/Users/u/Library/Application Support/dev.tabverse.app/config.toml"),
+                PathBuf::from("/Users/u/Library/Application Support/app.tabverse/config.toml"),
             ]
         );
         assert_eq!(
             resolve_paths(Platform::MacOs, &env).last(),
             Some(&PathBuf::from(
-                "/Users/u/Library/Application Support/dev.tabverse.app/config.toml"
+                "/Users/u/Library/Application Support/app.tabverse/config.toml"
             ))
         );
     }

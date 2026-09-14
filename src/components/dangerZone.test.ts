@@ -261,7 +261,7 @@ describe("restoring factory settings", () => {
     // below are this test's own and that no file is involved.
     localStorage.setItem(carrier(SESSION_SCOPE), JSON.stringify({ tabs: [] }));
     localStorage.setItem(carrier("browser-history"), "[]");
-    localStorage.setItem(carrier("default-apps-backup"), "{}");
+    localStorage.setItem(carrier("extension-state"), "{}");
     setKeyOverrides({ "duplicate-tab": "⌃⌥Z" });
 
     const factory = dangerActions(() => {}).find((a) => a.id === "factory");
@@ -276,7 +276,7 @@ describe("restoring factory settings", () => {
     for (const scope of [SESSION_SCOPE, "browser-history"]) {
       expect(localStorage.getItem(carrier(scope)), `${scope} survives`).not.toBeNull();
     }
-    expect(localStorage.getItem(carrier("default-apps-backup"))).toBe("{}");
+    expect(localStorage.getItem(carrier("extension-state"))).toBe("{}");
     // ② the key overlay, in the file and in memory.
     const commands = mocks.invoke.mock.calls.map(([cmd]) => cmd);
     expect(commands, "the overlay is dropped in the file").toContain(
