@@ -114,7 +114,9 @@ Passed on macOS:
   closing its Files tab displayed the same protection dialog; Cancel retained
   the editor and dirty state.
 
-Not completed after macOS locked automatically:
+Not completed because the available automation cannot produce a physical
+trackpad gesture, a pure hover path across the native preview portal, or a
+second independent client:
 
 - physical trackpad resize and edge-hover traversal;
 - native folder-preview pointer traversal across the portal gap;
@@ -135,10 +137,15 @@ goal, and the timing values are Tabverse choices rather than Arc measurements.
 
 ### D05: repository state
 
-The branch integrates current `main` and is intended to update PR #36. It
-must remain unmerged until the PR commit, remote CI result, and the three manual
-native acceptance items above are recorded. No automatic merge into `main`
-is part of this task.
+PR #36 contains commit `858048db66b5fd2d52cd51ed9672ec8bd332ce4c`,
+which merges `main` at `c2c5352618fb31a454edf70a6658a7230b29f454`.
+All GitHub checks pass, including Browser UI, quality-core, security, visual
+regression, and Linux, macOS, and Windows builds. The first quality-core
+attempt hit an existing timing race in an untouched terminal lifecycle test;
+the failed job rerun completed the full quality chain successfully.
+
+PR #36 remains a Draft until the three manual native acceptance items above
+are recorded. No automatic merge into `main` is part of this task.
 
 ## Reproduction
 
